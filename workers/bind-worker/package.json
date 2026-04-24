@@ -1,0 +1,19 @@
+{
+  "name": "@cf-logger/bind-worker",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+		"start": "wrangler dev",
+    "cf-typegen": "wrangler types --include-runtime=false"
+  },
+  "dependencies": {
+    "@cf-logger/logger": "workspace:*",
+    "pino": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "cf-logger",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+		"dev": "wrangler dev -c workers/main-worker/wrangler.jsonc -c workers/bind-worker/wrangler.jsonc -c workers/math-worker/wrangler.jsonc",
+    "cf-typegen": "wrangler types --include-runtime=false"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

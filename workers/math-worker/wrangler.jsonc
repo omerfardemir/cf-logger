@@ -1,0 +1,21 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "math-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-22",
+  "compatibility_flags": [
+     "nodejs_compat"
+  ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    }
+  },
+  "vars": {
+    "ENVIRONMENT": "development",
+    "VERSION": "1.0.0",
+    "NAME": "math-test",
+    "LOG_LEVEL": "debug"
+  }
+}

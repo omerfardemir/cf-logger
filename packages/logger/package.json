@@ -1,0 +1,31 @@
+{
+  "name": "@cf-logger/logger",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./hono": "./src/hono.ts",
+    "./workers": "./src/workers.ts"
+  },
+  "dependencies": {
+    "pino": "catalog:"
+  },
+  "peerDependencies": {
+    "hono": "catalog:"
+  },
+  "peerDependenciesMeta": {
+    "hono": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:",
+    "hono": "catalog:",
+    "vitest": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

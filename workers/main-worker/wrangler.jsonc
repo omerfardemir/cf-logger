@@ -1,0 +1,28 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "pino-log-test",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-04-22",
+  "compatibility_flags": [
+     "nodejs_compat"
+  ],
+  "observability": {
+    "logs": {
+      "enabled": true,
+      "invocation_logs": false
+    }
+  },
+  "services": [
+    {
+      "binding": "BIND",
+      "service": "bind-test"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "development",
+    "RELEASE": "e69d9c8",
+    "VERSION": "1.0.0",
+    "NAME": "pino-log-test",
+    "LOG_LEVEL": "debug"
+  }
+}
