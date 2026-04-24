@@ -9,7 +9,9 @@
   "observability": {
     "logs": {
       "enabled": true,
-      "invocation_logs": false
+      "invocation_logs": false,
+      "destinations": ["grafana-logs"],
+      "head_sampling_rate": 1
     }
   },
   "services": [
