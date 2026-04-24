@@ -43,6 +43,16 @@ function nodePinoOptions(level: string): pino.LoggerOptions {
   }
 }
 
+/** Map level labels to console methods for correct OTLP severity */
+const LEVEL_TO_CONSOLE: Record<string, 'debug' | 'info' | 'warn' | 'error'> = {
+  TRACE: 'debug',
+  DEBUG: 'debug',
+  INFO:  'info',
+  WARN:  'warn',
+  ERROR: 'error',
+  FATAL: 'error',
+}
+
 /** Pino options for CF Workers — uses browser.write for ALS fields */
 function workersPinoOptions(level: string): pino.LoggerOptions {
   return {
@@ -58,7 +68,9 @@ function workersPinoOptions(level: string): pino.LoggerOptions {
       write: (o: object) => {
         const obj = o as Record<string, unknown>
         Object.assign(obj, getALSFields())
-        console.log(JSON.stringify(obj))
+        const msg = JSON.stringify(obj)
+        const method = LEVEL_TO_CONSOLE[obj.level as string] ?? 'info'
+        console[method](msg)
       },
     },
     timestamp: pino.stdTimeFunctions.isoTime,

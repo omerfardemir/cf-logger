@@ -41,8 +41,8 @@ app
     method: conn.method,
     path: conn.path,
   };
-  if (conn.source_ip_address) fields.sourceIp = conn.source_ip_address;
   if (conn.country) fields.country = conn.country;
+  if (conn.user_agent) fields.user_agent = conn.user_agent;
   setLoggerContext(fields);
   await next();
 });
