@@ -14,9 +14,9 @@ pnpm add hono
 
 | Import | Contents |
 |--------|----------|
-| `@cf-logger/logger` | Core: logger creation, ALS context, trace utilities, types |
-| `@cf-logger/logger/hono` | `useLogger` — Hono middleware |
-| `@cf-logger/logger/workers` | `TracedSession`, `tracedWorker`, `withTrace`, `tracedSession` |
+| `@cf-logger/logger` | Core: `createLogger`, `createSimpleLogger`, `LoggerFactory`, ALS context, trace utilities, types |
+| `@cf-logger/logger/hono` | `useLogger`, `generateId` — Hono middleware |
+| `@cf-logger/logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession` |
 
 ---
 
@@ -134,9 +134,11 @@ import {
 
 Creates a Hono middleware that:
 1. Parses `traceparent` from the incoming request header
-2. Creates an ALS context with the logger and trace
-3. Sets `c.var.logger` for use in route handlers
-4. Responds with a `traceparent` header for downstream correlation
+2. Reads `X-Request-Id` from the request or generates a new UUID
+3. Creates an ALS context via `runWithLogger` with the logger and trace
+4. Sets `c.var.logger`, `c.var.requestId`, and `c.var.traceId` for use in route handlers
+5. Adds `requestId` to the ALS logger context so it appears on every log line
+6. Sets response headers: `X-Request-Id`, `X-Trace-Id`, `traceparent`
 
 ```ts
 import { Hono } from 'hono'
@@ -222,18 +224,21 @@ export default class extends tracedWorker(MySession) {
 }
 ```
 
-### `withTrace(binding, fn)`
+### `withTrace(binding, fn, fields?)`
 
-**Caller-side** one-liner. Reads `traceparent` from current ALS, calls `binding.session(traceparent)`, passes the session to your callback.
+**Caller-side** one-liner. Reads `traceparent` from current ALS, calls `binding.session(traceparent, fields)`, passes the session to your callback.
 
 ```ts
 import { withTrace } from '@cf-logger/logger/workers'
 
 // In a route handler or another traced() method:
 const result = await withTrace(c.env.BIND, s => s.add(5, 7))
+
+// With propagated fields — appear on all downstream logs:
+const result = await withTrace(c.env.BIND, s => s.add(5, 7), { requestId: 'abc' })
 ```
 
-### `tracedSession(binding)`
+### `tracedSession(binding, fields?)`
 
 Lower-level alternative to `withTrace` — returns the session for multiple calls:
 
@@ -243,6 +248,9 @@ import { tracedSession } from '@cf-logger/logger/workers'
 const session = tracedSession(c.env.BIND)
 const a = await session.add(1, 2)
 const b = await session.add(3, 4)
+
+// With propagated fields:
+const session = tracedSession(c.env.BIND, { requestId: 'abc' })
 ```
 
 ### Multi-Hop RPC
@@ -264,13 +272,31 @@ class BindSession extends TracedSession<Env> {
 
 All workers in the chain share the same `traceId`.
 
+### `TracedEntrypoint<Env>`
+
+Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`).
+
+```ts
+import { TracedEntrypoint, TracedSession } from '@cf-logger/logger/workers'
+
+class MySession extends TracedSession<Env> { /* ... */ }
+
+export default class extends TracedEntrypoint<Env> {
+  session(traceparent: string, fields?: Record<string, unknown>) {
+    return new MySession(traceparent, this.loggerOptions, this.env, fields)
+  }
+
+  async scheduled(event: ScheduledEvent) { /* ... */ }
+}
+```
+
 ### Service Type Convention
 
 Define shared interfaces in a `services.d.ts`:
 
 ```ts
 export interface ServiceSession<T> {
-  session(traceparent: string): T;
+  session(traceparent: string, fields?: Record<string, unknown>): T;
 }
 
 export interface BindService {
