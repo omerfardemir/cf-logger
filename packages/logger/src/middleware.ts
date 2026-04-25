@@ -1,15 +1,19 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import type { LogFields, Logger } from './types'
 import { resolveTrace, buildTraceparent } from './trace'
-import { runWithLogger } from './als'
+import { runWithLogger, setLoggerContext } from './als'
 
 /**
  * Creates a Hono middleware that initializes the ALS logging context.
  *
  * Accepts either a Logger instance (shared across requests) or a factory
  * function `(c) => Logger` that is called per-request.
- * 
- * @params 
+ *
+ * Handles `X-Request-Id` and `X-Trace-Id` headers automatically:
+ * - Reads from the incoming request header if present, otherwise generates a new value.
+ * - Sets both on the response headers.
+ * - Adds `requestId` to the ALS logger context so it appears on every log line.
+ * - `traceId` is already on every log line via the ALS trace context.
  */
 export function useLogger<T extends LogFields = LogFields>(
   loggerOrFactory: Logger<T> | ((c: Parameters<MiddlewareHandler>[0]) => Logger<T>),
@@ -20,15 +24,22 @@ export function useLogger<T extends LogFields = LogFields>(
       : loggerOrFactory(c)
 
     const trace = resolveTrace(c.req.header('traceparent'))
+    const requestId = c.req.header('X-Request-Id') || c.var?.requestId || crypto.randomUUID()
 
     await runWithLogger(
       { logger, trace },
       async () => {
         c.set('logger' as never, logger as never)
+        c.set('requestId' as never, requestId as never)
+        c.set('traceId' as never, trace.traceId as never)
+
+        setLoggerContext({ requestId })
         await next()
       },
     )
 
+    c.header('X-Request-Id', requestId)
+    c.header('X-Trace-Id', trace.traceId)
     c.header('traceparent', buildTraceparent(trace))
   }
 }
