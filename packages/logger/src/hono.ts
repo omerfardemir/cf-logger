@@ -1,1 +1,1 @@
-export { useLogger } from './middleware'
+export { useLogger, generateId } from './middleware'

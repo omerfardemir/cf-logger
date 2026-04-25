@@ -82,9 +82,9 @@ export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
  * Read the current trace context from ALS.
  * Returns null if called outside a logging context.
  */
-export function getTraceContext(): (TraceContext & LogFields) | null {
+export function getTraceContext(): TraceContext | null {
   const store = als.getStore()
-  return store ? { ...store.fields, ...store.trace } : null
+  return store ? {...store.trace } : null
 }
 
 /** Reset all cached state */

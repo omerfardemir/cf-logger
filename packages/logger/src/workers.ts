@@ -1,5 +1,5 @@
 import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers';
-import type { LoggerOptions, LogLevel } from './types';
+import type { LogFields, LoggerOptions, LogLevel } from './types';
 import { createLogger } from './logger';
 import { runWithLogger, getTraceContext, getLogger } from './als';
 import { buildTraceparent } from './trace';
@@ -35,13 +35,15 @@ import { buildTraceparent } from './trace';
 export class TracedSession<E = unknown> extends RpcTarget {
   #traceparent: string;
   #loggerOptions: LoggerOptions;
+  #fields: LogFields;
   /** Worker env — instance property, never exposed over RPC */
   protected env: E;
 
-  constructor(traceparent: string, loggerOptions: LoggerOptions, env: E) {
+  constructor(traceparent: string, loggerOptions: LoggerOptions, env: E, fields?: LogFields) {
     super();
     this.#traceparent = traceparent;
     this.#loggerOptions = loggerOptions;
+    this.#fields = fields ?? {};
     this.env = env;
   }
 
@@ -54,10 +56,10 @@ export class TracedSession<E = unknown> extends RpcTarget {
   protected traced<R>(fn: () => R, operation?: string): R {
     const logger = createLogger(this.#loggerOptions);
     if (!operation) {
-      return runWithLogger({ logger, traceparent: this.#traceparent }, fn);
+      return runWithLogger({ logger, traceparent: this.#traceparent, fields: this.#fields }, fn);
     }
 
-    return runWithLogger({ logger, traceparent: this.#traceparent }, () => {
+    return runWithLogger({ logger, traceparent: this.#traceparent, fields: this.#fields }, () => {
       const startTime = Date.now();
 
       const emitSpan = (status: 'OK' | 'ERROR', error?: string) => {
@@ -160,10 +162,10 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
  * ```
  */
 export function tracedWorker<S extends TracedSession>(
-  SessionClass: new (traceparent: string, options: LoggerOptions, env: any) => S,
+  SessionClass: new (traceparent: string, options: LoggerOptions, env: any, fields?: LogFields) => S,
 ): {
   new (...args: any[]): {
-    session(traceparent: string): S;
+    session(traceparent: string, fields?: LogFields): S;
     fetch(): Response | Promise<Response>;
   };
 } {
@@ -173,8 +175,8 @@ export function tracedWorker<S extends TracedSession>(
       return new Response(null, { status: 404 });
     }
 
-    session(traceparent: string): S {
-      return new SessionClass(traceparent, envLoggerOptions(this.env), this.env);
+    session(traceparent: string, fields?: LogFields): S {
+      return new SessionClass(traceparent, envLoggerOptions(this.env), this.env, fields);
     }
   } as any;
 }
@@ -196,11 +198,11 @@ export function tracedWorker<S extends TracedSession>(
  * ```
  */
 export function tracedSession<T>(binding: {
-  session(traceparent: string): T;
-}): T {
+  session(traceparent: string, fields?: LogFields): T;
+}, fields?: LogFields): T {
   const trace = getTraceContext();
   const traceparent = trace ? buildTraceparent(trace) : '';
-  return binding.session(traceparent);
+  return binding.session(traceparent, fields);
 }
 
 /**
@@ -209,12 +211,16 @@ export function tracedSession<T>(binding: {
  * Usage:
  * ```ts
  * const result = await withTrace(c.env.BIND, s => s.add(5, 7))
+ *
+ * // With propagated fields:
+ * const result = await withTrace(c.env.BIND, s => s.add(5, 7), { requestId: 'abc' })
  * ```
  */
 export async function withTrace<T, R>(
-  binding: { session(traceparent: string): T },
+  binding: { session(traceparent: string, fields?: LogFields): T },
   fn: (session: T) => Promise<R> | R,
+  fields?: LogFields,
 ): Promise<R> {
-  const session = tracedSession(binding);
+  const session = tracedSession(binding, fields);
   return fn(session);
 }

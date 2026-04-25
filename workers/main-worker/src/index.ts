@@ -1,10 +1,11 @@
 import { Hono } from 'hono';
 import { useLogger } from './logger';
-import { createLogger, setLoggerContext, getTraceContext, buildTraceparent, type Logger } from '@cf-logger/logger';
+import { createLogger, setLoggerContext, getTraceContext, buildTraceparent, type Logger, generateTraceId } from '@cf-logger/logger';
 import { withTrace } from '@cf-logger/logger/workers';
 import { requestId } from 'hono/request-id';
 import { getClientDetails } from './network';
 import type { BindService, ServiceSession } from './types';
+import { generateId } from '@cf-logger/logger/hono';
 
 type Context = {
   Bindings: {
@@ -25,6 +26,15 @@ const app = new Hono<Context>();
 // ── Middleware ──────────────────────────────────────────────────────
 app
 .use(requestId({ headerName: 'X-Request-Id' }))
+.use(generateId({
+  contextKey: 'requestId',
+  headerName: 'X-Request-Id',
+}))
+.use(generateId({
+  contextKey: 'traceId',
+  headerName: 'X-Trace-Id',
+  generator: () => generateTraceId(),
+}))
 .use(
   useLogger((c) => createLogger({
     service: c.env.NAME,
@@ -32,6 +42,7 @@ app
     environment: c.env.ENVIRONMENT,
     version: c.env.VERSION,
     requestId: c.var.requestId,
+    traceId: c.var.traceId,
   })),
 )
 .use('*', async (c, next) => {

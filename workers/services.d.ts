@@ -1,7 +1,7 @@
 /** Shared RPC service interfaces */
 
 export interface ServiceSession<T> {
-  session(traceparent: string): T;
+  session(traceparent: string, fields?: Record<string, unknown>): T;
 }
 
 /** bind-worker: math operations + multi-hop demo */
