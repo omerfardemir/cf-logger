@@ -4,16 +4,34 @@ import { resolveTrace, buildTraceparent } from './trace'
 import { runWithLogger, setLoggerContext } from './als'
 
 /**
- * Creates a Hono middleware that initializes the ALS logging context.
+ * Logging Middleware for Hono.
  *
- * Accepts either a Logger instance (shared across requests) or a factory
+ * Initializes the ALS logging context for each request.
+ * Accepts either a `Logger` instance (shared across requests) or a factory
  * function `(c) => Logger` that is called per-request.
  *
- * Handles `X-Request-Id` and `X-Trace-Id` headers automatically:
+ * Handles `X-Request-Id`, `X-Trace-Id`, and `traceparent` headers automatically:
  * - Reads from the incoming request header if present, otherwise generates a new value.
- * - Sets both on the response headers.
+ * - Sets all three on the response headers.
  * - Adds `requestId` to the ALS logger context so it appears on every log line.
  * - `traceId` is already on every log line via the ALS trace context.
+ *
+ * @template T - The type of user-defined log fields.
+ * @param {Logger<T> | ((c: Context) => Logger<T>)} loggerOrFactory - A logger instance or a per-request factory.
+ * @returns {MiddlewareHandler} The middleware handler function.
+ *
+ * @example
+ * ```ts
+ * import { Hono } from 'hono'
+ * import { useLogger } from '@cf-logger/logger/hono'
+ * import { createLogger } from '@cf-logger/logger'
+ *
+ * const app = new Hono()
+ * const logger = createLogger({ service: 'api', level: 'info' })
+ *
+ * app.use(useLogger(logger))
+ * app.get('/', (c) => c.text('Hello!'))
+ * ```
  */
 export function useLogger<T extends LogFields = LogFields>(
   loggerOrFactory: Logger<T> | ((c: Parameters<MiddlewareHandler>[0]) => Logger<T>),
@@ -44,9 +62,15 @@ export function useLogger<T extends LogFields = LogFields>(
   }
 }
 
+/**
+ * Options for the `generateId` middleware.
+ */
 export type GenerateIdOptions = {
+  /** The Hono context key used to store the generated ID. */
   contextKey: string
+  /** The HTTP header name to read / write the ID. */
   headerName: string
+  /** Custom ID generation function. Defaults to `crypto.randomUUID()`. */
   generator?: (c: Context) => string
 }
 

@@ -19,7 +19,7 @@ describe('getLogger outside ALS context', () => {
     const logger = getLogger()
     logger.info({ foo: 'bar' }, 'standalone log')
 
-    // No warnings — this is a valid use case
+    // No warnings this is a valid use case
     expect(console.warn).not.toHaveBeenCalled()
 
     expect(logged.length).toBeGreaterThan(0)

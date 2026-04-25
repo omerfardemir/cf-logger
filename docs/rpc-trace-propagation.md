@@ -1,72 +1,213 @@
 # RPC Trace Propagation on Cloudflare Workers
 
-## What We Have Today
+## The Problem
 
-The `@pino-log-test/logger` package is a **complete cross-platform structured logging library**:
+Cloudflare Workers RPC (Service Bindings) provides **no user-accessible header or metadata channel**. When Worker A calls Worker B via `c.env.BIND.add(5, 7)`, there's no way to attach a `traceparent`. CF's observability auto-instruments `fetch`, KV, R2, D1, and DO — but **not RPC calls between workers**.
 
-- **Pino-based** with platform-aware config (Node.js mixin+stream, CF Workers `browser.write`)
-- **AsyncLocalStorage** for per-request scoped context (trace, user fields, logger)
-- **W3C Trace Context** (`traceparent`) parsing, generation, and propagation
-- **Hono middleware** (`useLogger`) that auto-creates ALS context from incoming `traceparent` headers
-- **Framework-agnostic** `runWithLogger()` for non-Hono contexts (cron, queue, RPC handlers, etc.)
-- All logs include `traceId`, `spanId`, `parentSpanId` — ready for Grafana correlation
+This means distributed tracing across service bindings requires a user-space solution.
 
-**Trace propagation works for HTTP-to-HTTP** (Hono → Hono via `fetch`), because `traceparent` flows as a standard header.
+## Approaches We Explored
 
-## What Does NOT Work — RPC Trace Propagation
+### ❌ Approach 1: Proxy on Fetcher Stub (Hidden Trace Bag)
 
-When Worker A calls Worker B via **Service Binding RPC** (`c.env.BIND.add(5, 7)`), **there is no way to attach trace context**. The RPC call goes through Cloudflare's internal JSRPC protocol, which:
+Wrap the service binding in a JS `Proxy` to intercept method calls and append a hidden `{__$$trace: traceparent}` argument. Strip it on the receiver.
 
-1. **Has no user-accessible header/metadata channel** — you can't attach a `traceparent` to an RPC method call
-2. **Does not auto-propagate trace context** — CF's observability auto-instruments `fetch`, KV, R2, D1, DO, but **not RPC calls** between workers
+**Blocked by:** `DataCloneError` — wrapping a `Fetcher`/service binding stub in a `Proxy` throws `ServiceStub serialization requires the 'experimental' compat flag` (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)). The `experimental` flag prevents deployment to production.
 
-We explored three approaches, all blocked:
+> **Note:** The *receiver-side* Proxy (wrapping `this` inside an `RpcTarget`) was fixed in workerd [#3212](https://github.com/cloudflare/workerd/pull/3212) (Dec 2024, `v1.20241213.0`). But the *caller-side* Proxy on `Fetcher` remains broken.
 
-### Approach 1: Hidden Trace Bag (append to args)
-
-Append a hidden `{__$$trace: traceparent}` object as the last argument via `traced()` Proxy wrapper on the caller, strip it on the receiver via `TracedEntrypoint`.
-
-**Blocked by:** Wrapping a `Fetcher`/service binding stub in a `Proxy` throws `DataCloneError: ServiceStub serialization requires the 'experimental' compat flag` (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)). The `experimental` flag prevents deployment.
-
-**Note:** The *receiver side* Proxy (wrapping `this` in `TracedEntrypoint` constructor) **was fixed** in workerd [#3212](https://github.com/cloudflare/workerd/pull/3212) (Dec 2024, `v1.20241213.0`). But the *caller side* Proxy on `Fetcher` remains broken.
-
-### Approach 2: Cap'n Web (route RPC over HTTP)
+### ❌ Approach 2: Cap'n Web (RPC over HTTP)
 
 Use Cloudflare's `capnweb` library to route RPC over HTTP through service bindings, injecting `traceparent` as an HTTP header.
 
-**Technically worked** but was an architectural shift that replaced native RPC with a custom HTTP-based protocol. Not solid enough — adds complexity, different semantics, and the library is still young.
+**Technically functional** but replaced native JSRPC with a custom HTTP protocol. Adds complexity, changes semantics, and the library is immature. Rejected as not production-ready.
 
-### Approach 3: Manual explicit argument passing
+### ❌ Approach 3: Explicit Argument Passing
 
-Pass `traceparent` as an explicit argument to every RPC method.
+Pass `traceparent` as an extra argument to every RPC method.
 
-**Works** but terrible DX — every RPC method signature needs an extra parameter, every call site needs boilerplate. Doesn't scale across ~20 workers with 6-10 hops.
+**Works** but terrible developer experience — every method signature and call site needs boilerplate. Doesn't scale across ~20 workers with 6-10 hops per request.
 
-## What Cloudflare Would Need to Fix
+### ✅ Approach 4: Session Factory Pattern (Adopted)
 
-For native RPC trace propagation to work, one of these would need to happen:
+Use `RpcTarget` private fields to carry trace context. The caller calls `binding.session(traceparent)` which returns an `RpcTarget` instance with the traceparent stored in a `#private` field (never serialized over the wire). RPC methods on the session wrap their logic in `traced()` which sets up ALS with the correct trace context.
 
-1. **CF auto-propagates trace context through RPC** (like they do for `fetch`) — this is the ideal fix and the most likely eventual path given their OTel investment
-2. **CF allows metadata/headers on RPC calls** — a user-space channel to attach context to RPC invocations
-3. **CF fixes Proxy on Fetcher stubs** (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)) — would unblock the hidden trace bag approach
+**Why it works:**
+- `binding.session(traceparent)` is a standard RPC method call — CF supports passing strings
+- Private fields (`#traceparent`) on `RpcTarget` stay server-side — only prototype methods are exposed via JSRPC
+- Each session generates a new `spanId` and links `parentSpanId` to the caller's `spanId`
+- The caller reads traceparent from ALS automatically via `withTrace()`
 
-## What We Should Do
+## The Solution: How It Works
 
-**Short term:** The logger package is complete as-is. Each worker gets its own scoped `traceId` per request. For the bind-worker pattern, the RPC handler wraps itself in `runWithLogger()` with a fresh trace — logs are structured but traces don't link across workers.
+### Architecture
 
-**Monitor:** Watch for CF adding RPC to their auto-instrumentation (most likely path). Their `observability.logs` pipeline already exports to Grafana — once they instrument RPC spans, our `traceId`/`spanId` fields will naturally connect.
+```
+HTTP Request (with traceparent header)
+  │
+  ▼
+┌─────────────────────────────────────────────────┐
+│  main-worker (Hono + useLogger middleware)       │
+│  traceId: abc   spanId: 111                     │
+│                                                  │
+│  withTrace(c.env.BIND, s => s.multiHop(10))     │
+│    └─ reads traceparent from ALS                 │
+│    └─ calls BIND.session("00-abc-111-00")        │
+└─────────────┬───────────────────────────────────┘
+              │  JSRPC (traceparent as method arg)
+              ▼
+┌─────────────────────────────────────────────────┐
+│  bind-worker (TracedSession)                     │
+│  traceId: abc   spanId: 222   parent: 111       │
+│                                                  │
+│  this.traced(async () => {                       │
+│    withTrace(this.env.MATH, s => s.multiply())   │
+│    withTrace(this.env.MATH, s => s.divide())     │
+│  }, 'bind.multiHop')                             │
+└─────────────┬──────────┬────────────────────────┘
+              │          │  JSRPC
+              ▼          ▼
+┌──────────────────┐  ┌──────────────────┐
+│  math-worker     │  │  math-worker     │
+│  traceId: abc    │  │  traceId: abc    │
+│  spanId: 333     │  │  spanId: 444     │
+│  parent: 222     │  │  parent: 222     │
+└──────────────────┘  └──────────────────┘
+```
 
-**If you need cross-worker correlation now:** The only clean workaround is to **pass traceparent explicitly as a method argument** in the few critical paths where you need it, and use `runWithLogger({ logger, traceparent })` on the receiver. Ugly, but it works without hacks:
+All four invocations share `traceId: abc`. Search Grafana for that ID and you see the entire request.
+
+### Receiver Side
 
 ```ts
-// Caller
-const tp = buildTraceparent(getTraceContext()!)
-const total = await c.env.BIND.add(5, 7, tp)
+import { TracedSession, tracedWorker } from '@cf-logger/logger/workers'
 
-// Receiver
-async add(a: number, b: number, traceparent?: string) {
-  return runWithLogger({ logger, traceparent }, () => { ... })
+class MathSession extends TracedSession<Env> {
+  async multiply(a: number, b: number): Promise<number> {
+    return this.traced(() => {
+      const result = a * b
+      this.logger.info({ a, b, result }, 'Multiplied %d × %d = %d', a, b, result)
+      return result
+    }, 'math.multiply')  // operation name → span logging
+  }
+}
+
+export default tracedWorker(MathSession)
+```
+
+**`TracedSession`** handles:
+- Stores `traceparent` in `#private` field (never sent over wire)
+- `traced(fn, operation?)` sets up ALS with logger + parsed trace context
+- `this.logger` returns the request-scoped logger with traceId/spanId
+- `this.env` provides access to bindings for multi-hop RPC
+
+**`tracedWorker(SessionClass)`** generates the entrypoint:
+- Implements `session(traceparent)` → instantiates your session class
+- Reads `LoggerOptions` from env vars (NAME, LOG_LEVEL, ENVIRONMENT, VERSION)
+- Includes a default `fetch()` returning 404
+
+### Caller Side
+
+```ts
+import { withTrace } from '@cf-logger/logger/workers'
+
+// One-liner: reads traceparent from ALS, creates session, runs callback
+const result = await withTrace(c.env.BIND, s => s.add(5, 7))
+
+// Or for multiple calls on the same session:
+import { tracedSession } from '@cf-logger/logger/workers'
+const session = tracedSession(c.env.BIND)
+const a = await session.add(1, 2)
+const b = await session.multiply(3, 4)
+```
+
+### Service Interfaces
+
+Define shared interfaces in `workers/services.d.ts`:
+
+```ts
+/** All traced bindings expose session(traceparent) */
+export interface ServiceSession<T> {
+  session(traceparent: string): T;
+}
+
+export interface BindService {
+  add(a: number, b: number): Promise<number>;
+  multiHop(value: number): Promise<number>;
+}
+
+export interface MathService {
+  multiply(a: number, b: number): Promise<number>;
+  divide(a: number, b: number): Promise<number>;
 }
 ```
 
-This is a conscious tradeoff — apply it only to the critical hops where you need end-to-end traces, not everywhere.
+Type your env bindings:
+
+```ts
+interface Env {
+  BIND: ServiceSession<BindService>;
+  MATH: ServiceSession<MathService>;
+}
+```
+
+### Wrangler Config
+
+```jsonc
+// bind-worker/wrangler.jsonc
+{
+  "services": [
+    { "binding": "MATH", "service": "math-test" }
+  ],
+  "vars": {
+    "NAME": "bind-test",
+    "LOG_LEVEL": "debug",
+    "ENVIRONMENT": "development",
+    "VERSION": "1.0.0"
+  }
+}
+```
+
+## Span Logging
+
+Pass an operation name to `traced()` to get structured span timing:
+
+```ts
+return this.traced(() => {
+  // your logic
+}, 'math.multiply')
+```
+
+Emits on completion:
+
+```json
+{
+  "level": "INFO",
+  "span": { "operation": "math.multiply", "duration": 3, "status": "OK" },
+  "message": "span.end math.multiply",
+  "traceId": "abc...", "spanId": "333...", "parentSpanId": "222..."
+}
+```
+
+On error: `status: "ERROR"`, `error: "message"`, logged at error level. The span object is intentionally lean — trace IDs are already on every log line.
+
+Span logging is **optional**. Omit the operation name and `traced()` has zero span overhead.
+
+## What Cloudflare Could Still Improve
+
+1. **Auto-propagate trace context through RPC** — like they do for `fetch`. This is the ideal fix and most likely eventual path given their OTel investment. When/if this ships, our `traceId`/`spanId` fields will align with CF's native spans automatically.
+
+2. **Allow metadata/headers on RPC calls** — a user-space channel to attach context to RPC invocations. Would eliminate the need for the session pattern.
+
+3. **Fix Proxy on Fetcher stubs** (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)) — would enable transparent tracing without changing method signatures.
+
+## Key Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Session Factory over Proxy | CF platform limitation (workerd #6358) blocks Proxy on Fetcher stubs |
+| Private fields for traceparent | `#field` on RpcTarget stays server-side, never serialized |
+| `withTrace()` one-liner API | Clean DX without changing method signatures |
+| Span data excludes trace IDs | Already on every log line via ALS mixin — no duplicate bytes |
+| Optional span logging | Zero overhead when you don't need timing |
+| Env var convention (NAME, LOG_LEVEL) | Consistent across workers, readable from wrangler config |

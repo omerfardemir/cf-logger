@@ -12,7 +12,7 @@ interface Env {
 }
 
 class BindSession extends TracedSession<Env> implements BindService {
-  /** Simple operation — single hop */
+  /** Simple operation single hop */
   async add(a: number, b: number): Promise<number> {
     return this.traced(() => {
       const result = a + b

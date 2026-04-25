@@ -3,19 +3,33 @@ import { als } from './store'
 import { createSimpleLogger } from './logger'
 import { resolveTrace } from './trace'
 
-/** Cached standalone loggers keyed by service name */
+/**
+ * Cached standalone loggers keyed by service name.
+ */
 const _cache = new Map<string | symbol, Logger>()
 
-/** Default key when no service name is provided */
+/**
+ * Default key when no service name is provided.
+ */
 const DEFAULT_KEY = Symbol('default')
 
 /**
- * Get a logger.
+ * Get a logger for the current context.
  *
- * - Inside ALS (middleware): returns the request-scoped
+ * - **Inside ALS** (middleware / `runWithLogger`): returns the request-scoped
  *   logger with trace context. `service` is ignored (already set by factory).
- * - Outside ALS: returns a cached standalone logger, optionally tagged with
+ * - **Outside ALS**: returns a cached standalone logger, optionally tagged with
  *   a service name.
+ *
+ * @template T - The type of user-defined log fields.
+ * @param {string} [service] - Service name used for the standalone fallback logger.
+ * @returns {Logger<T>} The logger for the current context.
+ *
+ * @example
+ * ```ts
+ * const logger = getLogger()
+ * logger.info({ userId: 42 }, 'user signed in')
+ * ```
  */
 export function getLogger<T extends LogFields = LogFields>(
   service?: string,
@@ -35,10 +49,18 @@ export function getLogger<T extends LogFields = LogFields>(
 /**
  * Enrich the current logging context with extra fields.
  *
- * - Inside ALS: fields appear on all subsequent log lines in the same request
+ * - **Inside ALS**: fields appear on all subsequent log lines in the same request
  *   (via pino mixin).
- * - Outside ALS: replaces the cached logger with a child that includes these
+ * - **Outside ALS**: replaces every cached logger with a child that includes these
  *   fields, so subsequent `getLogger(service)` calls include them.
+ *
+ * @template T - The type of user-defined log fields.
+ * @param {Partial<T>} fields - Key-value pairs to merge into the logging context.
+ *
+ * @example
+ * ```ts
+ * setLoggerContext({ requestId: 'abc-123', tenantId: 'acme' })
+ * ```
  */
 export function setLoggerContext<T extends LogFields = LogFields>(
   fields: Partial<T>,
@@ -49,7 +71,7 @@ export function setLoggerContext<T extends LogFields = LogFields>(
     return
   }
 
-  // Outside ALS — upgrade every cached logger with a child that has these bindings
+  // Outside ALS upgrade every cached logger with a child that has these bindings
   for (const [key, logger] of _cache) {
     _cache.set(key, logger.child(fields))
   }
@@ -57,8 +79,27 @@ export function setLoggerContext<T extends LogFields = LogFields>(
 
 /**
  * Run a function within a logging context.
- * Framework-agnostic — use this directly in any runtime (Node.js, CF Workers,
+ *
+ * Framework-agnostic, use this directly in any runtime (Node.js, CF Workers,
  * RPC entrypoints, scheduled handlers, queue consumers, etc.).
+ *
+ * @template T - The type of user-defined log fields.
+ * @template R - The return type of `fn`.
+ * @param {object} options - Context options.
+ * @param {Logger<T>} options.logger - The logger instance for this context.
+ * @param {TraceContext} [options.trace] - An already-parsed trace context.
+ * @param {string | null} [options.traceparent] - A raw `traceparent` header to parse. Ignored when `trace` is set.
+ * @param {Partial<T>} [options.fields] - Initial log fields.
+ * @param {() => R} fn - The function to execute inside the ALS context.
+ * @returns {R} The return value of `fn`.
+ *
+ * @example
+ * ```ts
+ * const logger = createLogger({ service: 'worker' })
+ * runWithLogger({ logger, traceparent: req.headers.get('traceparent') }, () => {
+ *   getLogger().info('inside ALS')
+ * })
+ * ```
  */
 export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
   options: {
@@ -80,14 +121,27 @@ export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
 
 /**
  * Read the current trace context from ALS.
- * Returns null if called outside a logging context.
+ *
+ * @returns {TraceContext | null} The current trace context, or `null` if called outside a logging context.
+ *
+ * @example
+ * ```ts
+ * const trace = getTraceContext()
+ * if (trace) {
+ *   c.header('traceparent', buildTraceparent(trace))
+ * }
+ * ```
  */
 export function getTraceContext(): TraceContext | null {
   const store = als.getStore()
   return store ? {...store.trace } : null
 }
 
-/** Reset all cached state */
+/**
+ * Reset all cached standalone loggers.
+ *
+ * Used internally by tests to clear state between runs.
+ */
 export function _reset(): void {
   _cache.clear()
 }

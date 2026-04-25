@@ -37,7 +37,7 @@ app
   await next();
 });
 
-/** GET / — Simple: log levels demo + single-hop RPC */
+/** GET / Simple: log levels demo + single-hop RPC */
 app.get('/', async (c) => {
   const log = c.var.logger;
 
@@ -63,7 +63,7 @@ app.get('/', async (c) => {
   });
 });
 
-/** GET /multi-hop — Multi-hop: main → bind-worker → math-worker */
+/** GET /multi-hop Multi-hop: main → bind-worker → math-worker */
 app.get('/multi-hop', async (c) => {
   const log = c.var.logger;
 
@@ -84,7 +84,7 @@ app.get('/multi-hop', async (c) => {
   });
 });
 
-/** GET /error — Error handling: division by zero in downstream worker */
+/** GET /error Error handling: division by zero in downstream worker */
 app.get('/error', async (c) => {
   const log = c.var.logger;
 
@@ -107,7 +107,7 @@ app.get('/error', async (c) => {
   }
 });
 
-/** GET /trace — Shows current trace context */
+/** GET /trace Shows current trace context */
 app.get('/trace', async (c) => {
   const trace = getTraceContext();
   const traceparent = trace ? buildTraceparent(trace) : null;

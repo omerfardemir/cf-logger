@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-// Mock cloudflare:workers — not available in Node/vitest
+// Mock cloudflare:workers not available in Node/vitest
 vi.mock('cloudflare:workers', () => ({
   RpcTarget: class RpcTarget {},
   WorkerEntrypoint: class WorkerEntrypoint {
