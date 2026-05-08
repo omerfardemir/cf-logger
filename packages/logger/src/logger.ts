@@ -104,8 +104,8 @@ function workersPinoOptions(level: string): pino.LoggerOptions {
         },
       },
       write: (o: object) => {
-        const obj = o as Record<string, unknown>
-        Object.assign(obj, getALSFields())
+        const raw = o as Record<string, unknown>
+        const obj = { ...raw, ...getALSFields() }
         // Serialize err field if present (browser path doesn't use Pino serializers)
         if (obj.err instanceof Error) {
           const e = obj.err
