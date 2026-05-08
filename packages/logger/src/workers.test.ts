@@ -10,7 +10,7 @@ vi.mock('cloudflare:workers', () => ({
 }))
 
 import { TracedSession, tracedSession, withTrace, TracedEntrypoint, tracedWorker } from './workers'
-import { runWithLogger, getTraceContext, getLogger, _reset, createSimpleLogger } from './logger'
+import { runWithLogger, getTraceContext, getLogger, _reset, createSimpleLogger, _captureEntries } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
 
 describe('Session Factory trace propagation', () => {
@@ -20,7 +20,7 @@ describe('Session Factory trace propagation', () => {
   })
 
   it('TracedSession.traced() sets up ALS with correct trace context', () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     const callerTrace = resolveTrace()
     const traceparent = buildTraceparent(callerTrace)
@@ -41,7 +41,7 @@ describe('Session Factory trace propagation', () => {
   })
 
   it('tracedSession() extracts traceparent from current ALS context', () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     const callerTrace = resolveTrace()
     const callerLogger = createSimpleLogger({ service: 'caller' })
@@ -75,7 +75,7 @@ describe('Session Factory trace propagation', () => {
   })
 
   it('propagates traceId end-to-end through session factory', () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     const callerTrace = resolveTrace()
     const callerLogger = createSimpleLogger({ service: 'caller' })
@@ -106,7 +106,7 @@ describe('Session Factory trace propagation', () => {
   })
 
   it('isolates traces across concurrent sessions', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     const traceA = resolveTrace()
     const traceB = resolveTrace()
@@ -147,10 +147,7 @@ describe('Session Factory trace propagation', () => {
   })
 
   it('traced() logs include correct traceId', () => {
-    const logged: string[] = []
-    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      logged.push(...args.map(String))
-    })
+    const entries = _captureEntries()
 
     const callerTrace = resolveTrace()
     const traceparent = buildTraceparent(callerTrace)
@@ -166,10 +163,9 @@ describe('Session Factory trace propagation', () => {
     const session = new TestSession(traceparent, { service: 'test-svc' }, {})
     session.doWork()
 
-    const logLine = logged.find((l) => l.includes('doing work'))
-    expect(logLine).toBeDefined()
-    const entry = JSON.parse(logLine!)
-    expect(entry.traceId).toBe(callerTrace.traceId)
+    const entry = entries.find((e) => e.message === 'doing work')
+    expect(entry).toBeDefined()
+    expect(entry!.traceId).toBe(callerTrace.traceId)
   })
 
   it('round-trips through W3C traceparent format', () => {
@@ -184,10 +180,7 @@ describe('Session Factory trace propagation', () => {
 
   describe('traced() span support', () => {
     it('does not emit span log when no operation name is provided', () => {
-      const logged: string[] = []
-      vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-        logged.push(...args.map(String))
-      })
+      const entries = _captureEntries()
 
       const callerTrace = resolveTrace()
       const traceparent = buildTraceparent(callerTrace)
@@ -202,15 +195,12 @@ describe('Session Factory trace propagation', () => {
       const result = session.doWork()
 
       expect(result).toBe(42)
-      const spanLog = logged.find((l) => l.includes('span.end'))
-      expect(spanLog).toBeUndefined()
+      const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))
+      expect(spanEntry).toBeUndefined()
     })
 
     it('emits span log with OK status for sync operations', () => {
-      const logged: string[] = []
-      vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-        logged.push(...args.map(String))
-      })
+      const entries = _captureEntries()
 
       const callerTrace = resolveTrace()
       const traceparent = buildTraceparent(callerTrace)
@@ -225,25 +215,22 @@ describe('Session Factory trace propagation', () => {
       const result = session.doWork()
 
       expect(result).toBe(42)
-      const spanLog = logged.find((l) => l.includes('span.end'))
-      expect(spanLog).toBeDefined()
+      const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
+      expect(spanEntry).toBeDefined()
 
-      const entry = JSON.parse(spanLog!)
-      expect(entry.span.operation).toBe('test.doWork')
-      expect(entry.span.status).toBe('OK')
-      expect(entry.span.duration).toBeGreaterThanOrEqual(0)
-      expect(entry.span.startTime).toBeLessThanOrEqual(entry.span.endTime)
-      expect(entry.span.error).toBeUndefined()
+      const span = spanEntry.span as Record<string, unknown>
+      expect(span.operation).toBe('test.doWork')
+      expect(span.status).toBe('OK')
+      expect(span.duration).toBeGreaterThanOrEqual(0)
+      expect((span.startTime as number)).toBeLessThanOrEqual(span.endTime as number)
+      expect(span.error).toBeUndefined()
       // trace IDs are on the log line itself, not duplicated in span
-      expect(entry.span.traceId).toBeUndefined()
-      expect(entry.traceId).toBe(callerTrace.traceId)
+      expect(span.traceId).toBeUndefined()
+      expect(spanEntry.traceId).toBe(callerTrace.traceId)
     })
 
     it('emits span log with ERROR status when sync operation throws', () => {
-      const logged: string[] = []
-      vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-        logged.push(...args.map(String))
-      })
+      const entries = _captureEntries()
 
       const callerTrace = resolveTrace()
       const traceparent = buildTraceparent(callerTrace)
@@ -257,20 +244,17 @@ describe('Session Factory trace propagation', () => {
       const session = new TestSession(traceparent, { service: 'test-svc' }, {})
       expect(() => session.doWork()).toThrow('boom')
 
-      const spanLog = logged.find((l) => l.includes('span.end'))
-      expect(spanLog).toBeDefined()
+      const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
+      expect(spanEntry).toBeDefined()
 
-      const entry = JSON.parse(spanLog!)
-      expect(entry.span.operation).toBe('test.fail')
-      expect(entry.span.status).toBe('ERROR')
-      expect(entry.span.error).toBe('boom')
+      const span = spanEntry.span as Record<string, unknown>
+      expect(span.operation).toBe('test.fail')
+      expect(span.status).toBe('ERROR')
+      expect(span.error).toBe('boom')
     })
 
     it('emits span log with OK status for async operations', async () => {
-      const logged: string[] = []
-      vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-        logged.push(...args.map(String))
-      })
+      const entries = _captureEntries()
 
       const callerTrace = resolveTrace()
       const traceparent = buildTraceparent(callerTrace)
@@ -287,22 +271,19 @@ describe('Session Factory trace propagation', () => {
       const result = await session.doWork()
 
       expect(result).toBe(99)
-      const spanLog = logged.find((l) => l.includes('span.end'))
-      expect(spanLog).toBeDefined()
+      const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
+      expect(spanEntry).toBeDefined()
 
-      const entry = JSON.parse(spanLog!)
-      expect(entry.span.operation).toBe('test.async')
-      expect(entry.span.status).toBe('OK')
+      const span = spanEntry.span as Record<string, unknown>
+      expect(span.operation).toBe('test.async')
+      expect(span.status).toBe('OK')
       // trace IDs are on the log line itself, not duplicated in span
-      expect(entry.span.traceId).toBeUndefined()
-      expect(entry.traceId).toBe(callerTrace.traceId)
+      expect(span.traceId).toBeUndefined()
+      expect(spanEntry.traceId).toBe(callerTrace.traceId)
     })
 
     it('emits span log with ERROR status when async operation rejects', async () => {
-      const logged: string[] = []
-      vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-        logged.push(...args.map(String))
-      })
+      const entries = _captureEntries()
 
       const callerTrace = resolveTrace()
       const traceparent = buildTraceparent(callerTrace)
@@ -318,20 +299,17 @@ describe('Session Factory trace propagation', () => {
       const session = new TestSession(traceparent, { service: 'test-svc' }, {})
       await expect(session.doWork()).rejects.toThrow('async boom')
 
-      const spanLog = logged.find((l) => l.includes('span.end'))
-      expect(spanLog).toBeDefined()
+      const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
+      expect(spanEntry).toBeDefined()
 
-      const entry = JSON.parse(spanLog!)
-      expect(entry.span.operation).toBe('test.asyncFail')
-      expect(entry.span.status).toBe('ERROR')
-      expect(entry.span.error).toBe('async boom')
+      const span = spanEntry.span as Record<string, unknown>
+      expect(span.operation).toBe('test.asyncFail')
+      expect(span.status).toBe('ERROR')
+      expect(span.error).toBe('async boom')
     })
 
     it('span does not duplicate trace IDs (they are on the log line)', () => {
-      const logged: string[] = []
-      vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-        logged.push(...args.map(String))
-      })
+      const entries = _captureEntries()
 
       const callerTrace = resolveTrace()
       const traceparent = buildTraceparent(callerTrace)
@@ -345,19 +323,19 @@ describe('Session Factory trace propagation', () => {
       const session = new TestSession(traceparent, { service: 'test-svc' }, {})
       session.doWork()
 
-      const spanLog = logged.find((l) => l.includes('span.end'))
-      const entry = JSON.parse(spanLog!)
+      const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
+      const span = spanEntry.span as Record<string, unknown>
       // trace IDs should be on the log line, not in the span object
-      expect(entry.span.traceId).toBeUndefined()
-      expect(entry.span.spanId).toBeUndefined()
-      expect(entry.span.parentSpanId).toBeUndefined()
-      expect(entry.traceId).toBe(callerTrace.traceId)
-      expect(entry.parentSpanId).toBe(callerTrace.spanId)
+      expect(span.traceId).toBeUndefined()
+      expect(span.spanId).toBeUndefined()
+      expect(span.parentSpanId).toBeUndefined()
+      expect(spanEntry.traceId).toBe(callerTrace.traceId)
+      expect(spanEntry.parentSpanId).toBe(callerTrace.spanId)
     })
   })
 
   it('withTrace() creates session and runs callback as one-liner', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     const callerTrace = resolveTrace()
     const callerLogger = createSimpleLogger({ service: 'caller' })
@@ -420,7 +398,7 @@ describe('tracedWorker', () => {
   })
 
   it('creates entrypoint with session() that returns the session class', () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     class TestSession extends TracedSession {
       getTrace() {
@@ -440,7 +418,7 @@ describe('tracedWorker', () => {
   })
 
   it('end-to-end: tracedSession + tracedWorker', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     class TestSession extends TracedSession {
       async add(a: number, b: number) {
@@ -466,7 +444,7 @@ describe('tracedWorker', () => {
   })
 
   it('session receives env and can access it for multi-hop RPC', () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     interface TestEnv { OTHER_SERVICE: { session(tp: string): unknown } }
 

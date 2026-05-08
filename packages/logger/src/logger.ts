@@ -26,9 +26,15 @@ function asLogger<T extends LogFields = LogFields>(p: pino.Logger): Logger<T> {
 }
 
 /**
- * Node.js destination that writes JSON to `console.log`.
+ * Pluggable write function for the Node.js destination.
+ * Tests replace this via `_captureEntries()` to receive structured objects.
  */
-const consoleDestination = { write(msg: string) { console.log(msg.trimEnd()) } }
+let _writeFn: (msg: string) => void = (msg) => { console.log(msg.trimEnd()) }
+
+/**
+ * Node.js destination that delegates to `_writeFn`.
+ */
+const consoleDestination = { write(msg: string) { _writeFn(msg) } }
 
 /**
  * Build the merged ALS fields (trace context + user fields) for the current request.
@@ -361,6 +367,20 @@ export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
 export function getTraceContext(): TraceContext | null {
   const store = als.getStore()
   return store ? {...store.trace } : null
+}
+
+/**
+ * Redirect log output to an in-memory array of parsed objects.
+ *
+ * Returns the array; entries are pushed as logging occurs.
+ * Call `_reset()` to restore normal console output.
+ *
+ * @internal Test helper — not part of the public API.
+ */
+export function _captureEntries(): Record<string, unknown>[] {
+  const entries: Record<string, unknown>[] = []
+  _writeFn = (msg) => { entries.push(JSON.parse(msg)) }
+  return entries
 }
 
 /**

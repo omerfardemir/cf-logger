@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { LoggerFactory, getLogger, setLoggerContext, _reset } from './logger'
+import { LoggerFactory, getLogger, setLoggerContext, _reset, _captureEntries } from './logger'
 import { generateTraceId, generateSpanId, resolveTrace } from './trace'
 
 describe('getLogger outside ALS context', () => {
@@ -9,11 +9,8 @@ describe('getLogger outside ALS context', () => {
   })
 
   it('returns a working logger without warnings', () => {
-    const logged: string[] = []
     vi.spyOn(console, 'warn').mockImplementation(() => {})
-    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      logged.push(...args.map(String))
-    })
+    const entries = _captureEntries()
 
     const logger = getLogger()
     logger.info({ foo: 'bar' }, 'standalone log')
@@ -21,27 +18,22 @@ describe('getLogger outside ALS context', () => {
     // No warnings this is a valid use case
     expect(console.warn).not.toHaveBeenCalled()
 
-    expect(logged.length).toBeGreaterThan(0)
-    const entry = JSON.parse(logged[0])
-    expect(entry.message).toBe('standalone log')
-    expect(entry.foo).toBe('bar')
+    expect(entries.length).toBeGreaterThan(0)
+    expect(entries[0].message).toBe('standalone log')
+    expect(entries[0].foo).toBe('bar')
   })
 
   it('includes service field when name is provided', () => {
-    const logged: string[] = []
-    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      logged.push(...args.map(String))
-    })
+    const entries = _captureEntries()
 
     const logger = getLogger('auth-service')
     logger.info({}, 'with service')
 
-    const entry = JSON.parse(logged[0])
-    expect(entry.service).toBe('auth-service')
+    expect(entries[0].service).toBe('auth-service')
   })
 
   it('caches logger by service name', () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {})
+    _captureEntries()
 
     const a = getLogger('svc-a')
     const b = getLogger('svc-a')
@@ -52,10 +44,7 @@ describe('getLogger outside ALS context', () => {
   })
 
   it('produces same JSON shape as ALS logger', () => {
-    const logged: string[] = []
-    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      logged.push(...args.map(String))
-    })
+    const entries = _captureEntries()
 
     // ALS logger
     const factory = new LoggerFactory({ service: 'shape-svc' })
@@ -68,15 +57,13 @@ describe('getLogger outside ALS context', () => {
     _reset()
     getLogger('shape-svc').info({ key: 'val' }, 'standalone log')
 
-    expect(logged.length).toBe(2)
-    const alsEntry = JSON.parse(logged[0])
-    const standaloneEntry = JSON.parse(logged[1])
+    expect(entries.length).toBe(2)
 
     for (const k of ['level', 'time', 'message'] as const) {
-      expect(alsEntry[k]).toBeDefined()
-      expect(standaloneEntry[k]).toBeDefined()
+      expect(entries[0][k]).toBeDefined()
+      expect(entries[1][k]).toBeDefined()
     }
-    expect(typeof alsEntry.level).toBe(typeof standaloneEntry.level)
+    expect(typeof entries[0].level).toBe(typeof entries[1].level)
   })
 })
 
@@ -87,21 +74,15 @@ describe('setLoggerContext outside ALS', () => {
   })
 
   it('stores fields as child bindings on the cached logger', () => {
-    const logged: string[] = []
-    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      logged.push(...args.map(String))
-    })
+    const entries = _captureEntries()
 
     getLogger('ctx-svc').info({}, 'before')
     setLoggerContext({ userId: 'user-42' })
     getLogger('ctx-svc').info({}, 'after')
 
-    expect(logged.length).toBe(2)
-    const before = JSON.parse(logged[0])
-    expect(before.userId).toBeUndefined()
-
-    const after = JSON.parse(logged[1])
-    expect(after.userId).toBe('user-42')
+    expect(entries.length).toBe(2)
+    expect(entries[0].userId).toBeUndefined()
+    expect(entries[1].userId).toBe('user-42')
   })
 })
 
@@ -111,10 +92,7 @@ describe('setLoggerContext', () => {
   })
 
   it('makes fields visible on all log lines within the same request', () => {
-    const logged: string[] = []
-    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      logged.push(...args.map(String))
-    })
+    const entries = _captureEntries()
 
     const factory = new LoggerFactory({ service: 'ctx-svc' })
 
@@ -133,17 +111,11 @@ describe('setLoggerContext', () => {
       },
     )
 
-    expect(logged.length).toBe(3)
-
-    const before = JSON.parse(logged[0])
-    expect(before.userId).toBeUndefined()
-
-    const after = JSON.parse(logged[1])
-    expect(after.userId).toBe('user-42')
-
-    const childLog = JSON.parse(logged[2])
-    expect(childLog.userId).toBe('user-42')
-    expect(childLog.component).toBe('db')
+    expect(entries.length).toBe(3)
+    expect(entries[0].userId).toBeUndefined()
+    expect(entries[1].userId).toBe('user-42')
+    expect(entries[2].userId).toBe('user-42')
+    expect(entries[2].component).toBe('db')
   })
 })
 
@@ -153,10 +125,7 @@ describe('ALS context isolation', () => {
   })
 
   it('concurrent contexts do not leak fields between each other', async () => {
-    const logged: string[] = []
-    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      logged.push(...args.map(String))
-    })
+    const entries = _captureEntries()
 
     const factory = new LoggerFactory({ service: 'iso-svc' })
 
@@ -184,10 +153,10 @@ describe('ALS context isolation', () => {
       }),
     ])
 
-    expect(logged.length).toBe(2)
+    expect(entries.length).toBe(2)
 
-    const entryA = JSON.parse(logged.find((l) => l.includes('context A'))!)
-    const entryB = JSON.parse(logged.find((l) => l.includes('context B'))!)
+    const entryA = entries.find((e) => e.message === 'from context A')!
+    const entryB = entries.find((e) => e.message === 'from context B')!
 
     expect(entryA.userId).toBe('user-A')
     expect(entryA.traceId).toBe('aaaa'.repeat(8))
@@ -203,10 +172,7 @@ describe('child logger', () => {
   })
 
   it('inherits ALS trace fields and adds its own bindings', () => {
-    const logged: string[] = []
-    vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      logged.push(...args.map(String))
-    })
+    const entries = _captureEntries()
 
     const factory = new LoggerFactory({ service: 'child-svc' })
 
@@ -223,15 +189,11 @@ describe('child logger', () => {
       },
     )
 
-    expect(logged.length).toBe(2)
-
-    const childEntry = JSON.parse(logged[0])
-    expect(childEntry.component).toBe('cache')
-    expect(childEntry.traceId).toBeDefined()
-    expect(childEntry.service).toBe('child-svc')
-
-    const parentEntry = JSON.parse(logged[1])
-    expect(parentEntry.component).toBeUndefined()
-    expect(parentEntry.traceId).toBe(childEntry.traceId)
+    expect(entries.length).toBe(2)
+    expect(entries[0].component).toBe('cache')
+    expect(entries[0].traceId).toBeDefined()
+    expect(entries[0].service).toBe('child-svc')
+    expect(entries[1].component).toBeUndefined()
+    expect(entries[1].traceId).toBe(entries[0].traceId)
   })
 })
