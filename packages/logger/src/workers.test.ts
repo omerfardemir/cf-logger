@@ -516,3 +516,58 @@ describe('tracedWorker', () => {
     expect(session.hasBinding()).toBe(true)
   })
 })
+
+describe('traceFlags sampling', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+  })
+
+  it('skips span logs when traceFlags sampled bit is 0', () => {
+    const entries = _captureEntries()
+
+    const callerTrace = resolveTrace()
+    // Build unsampled traceparent (flags = 00)
+    const unsampledTp = `00-${callerTrace.traceId}-${callerTrace.spanId}-00`
+
+    class TestSession extends TracedSession {
+      doWork() {
+        return this.traced(() => {
+          getLogger().info({}, 'inside traced')
+          return 42
+        }, 'test.operation')
+      }
+    }
+
+    const session = new TestSession(unsampledTp, { service: 'test-svc' }, {})
+    const result = session.doWork()
+    expect(result).toBe(42)
+
+    // Should have the business log but NO span.end log
+    const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))
+    expect(spanEntry).toBeUndefined()
+    const businessLog = entries.find((e) => e.message === 'inside traced')
+    expect(businessLog).toBeDefined()
+  })
+
+  it('emits span logs when traceFlags sampled bit is 1', () => {
+    const entries = _captureEntries()
+
+    const callerTrace = resolveTrace()
+    // Build sampled traceparent (flags = 01)
+    const sampledTp = `00-${callerTrace.traceId}-${callerTrace.spanId}-01`
+
+    class TestSession extends TracedSession {
+      doWork() {
+        return this.traced(() => 42, 'test.operation')
+      }
+    }
+
+    const session = new TestSession(sampledTp, { service: 'test-svc' }, {})
+    const result = session.doWork()
+    expect(result).toBe(42)
+
+    const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))
+    expect(spanEntry).toBeDefined()
+  })
+})

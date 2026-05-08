@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { generateTraceId, generateSpanId, parseTraceparent, buildTraceparent } from './trace'
+import { generateTraceId, generateSpanId, parseTraceparent, buildTraceparent, resolveTrace } from './trace'
 
 describe('generateTraceId', () => {
   it('returns a 32-character lowercase hex string', () => {
@@ -74,5 +74,28 @@ describe('buildTraceparent', () => {
     const header = buildTraceparent(ctx)
     const parsed = parseTraceparent(header)
     expect(parsed).toEqual(ctx)
+  })
+})
+
+describe('resolveTrace', () => {
+  it('generates a new root trace with sampled flag when no traceparent', () => {
+    const trace = resolveTrace(undefined)
+    expect(trace.traceId).toMatch(/^[0-9a-f]{32}$/)
+    expect(trace.spanId).toMatch(/^[0-9a-f]{16}$/)
+    expect(trace.parentSpanId).toBeUndefined()
+    expect(trace.traceFlags).toBe(0x01)
+  })
+
+  it('preserves sampled flag from incoming traceparent', () => {
+    const header = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+    const trace = resolveTrace(header)
+    expect(trace.traceFlags).toBe(1)
+    expect(trace.traceId).toBe('0af7651916cd43dd8448eb211c80319c')
+  })
+
+  it('preserves unsampled flag from incoming traceparent', () => {
+    const header = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00'
+    const trace = resolveTrace(header)
+    expect(trace.traceFlags).toBe(0)
   })
 })

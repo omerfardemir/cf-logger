@@ -62,7 +62,9 @@ export class TracedSession<E = unknown> extends RpcTarget {
    */
   protected traced<R>(fn: () => R, operation?: string): R {
     const trace = resolveTrace(this.#traceparent);
-    if (!operation) {
+    const sampled = (trace.traceFlags & 0x01) === 0x01;
+
+    if (!operation || !sampled) {
       return this.#factory.runInContext(trace, fn, this.#fields);
     }
 

@@ -115,6 +115,6 @@ export function resolveTrace(traceparent?: string | null): TraceContext {
     traceId: parsed?.traceId ?? generateTraceId(),
     spanId: generateSpanId(),
     ...(parsed?.spanId ? { parentSpanId: parsed.spanId } : {}),
-    traceFlags: parsed?.traceFlags ?? 0,
+    traceFlags: parsed?.traceFlags ?? 1,
   }
 }
