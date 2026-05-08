@@ -65,17 +65,18 @@ export function useLogger<T extends LogFields = LogFields>(
           if (!c.res.status || c.res.status < 400) {
             c.res = new Response('Internal Server Error', { status: 500 })
           }
-        }
-        const duration = Date.now() - start
-        const statusCode = c.res.status
+        } finally {
+          const duration = Date.now() - start
+          const statusCode = c.res.status
 
-        logger.info({ method, path, statusCode, duration, requestId, traceId: trace.traceId }, `request.end ${method} ${path}`)
+          logger.info({ method, path, statusCode, duration, requestId, traceId: trace.traceId }, `request.end ${method} ${path}`)
+
+          c.header('X-Request-Id', requestId)
+          c.header('X-Trace-Id', trace.traceId)
+          c.header('traceparent', buildTraceparent(trace))
+        }
       },
     )
-
-    c.header('X-Request-Id', requestId)
-    c.header('X-Trace-Id', trace.traceId)
-    c.header('traceparent', buildTraceparent(trace))
   }
 }
 

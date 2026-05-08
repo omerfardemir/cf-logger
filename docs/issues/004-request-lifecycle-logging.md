@@ -2,21 +2,18 @@
 
 **Priority:** P1
 **Type:** AFK
+**Status:** DONE
+**Commit:** ec6e423
 
-## What to build
+## What was built
 
-`useLogger` sets up ALS but never emits structured request logs. Add automatic `request.start` and `request.end` log lines so users get basic observability out of the box — request rate, latency percentiles, error rate by path — without writing any application code.
+`useLogger` now emits `request.start` and `request.end` structured logs automatically. Includes method, path, requestId, traceId, statusCode, and duration (ms). Error paths handled — `request.end` always fires, even on throws.
 
 ## Acceptance criteria
 
-- [ ] `useLogger` emits a structured log on request start with: `method`, `path`, `requestId`, `traceId`
-- [ ] `useLogger` emits a structured log on request end with: `method`, `path`, `statusCode`, `duration` (ms), `requestId`, `traceId`
-- [ ] Duration is measured from before `next()` to after it completes (including error paths)
-- [ ] Request end log is emitted even when `next()` throws (with the error status code)
-- [ ] Log messages use consistent, greppable format (e.g. `request.start GET /path`, `request.end GET /path`)
-- [ ] Tests verify both logs are emitted with correct fields
-- [ ] Optional: make lifecycle logging configurable (on by default, opt-out via options)
-
-## Blocked by
-
-None — can start immediately
+- [x] `useLogger` emits a structured log on request start with: `method`, `path`, `requestId`, `traceId`
+- [x] `useLogger` emits a structured log on request end with: `method`, `path`, `statusCode`, `duration` (ms), `requestId`, `traceId`
+- [x] Duration is measured from before `next()` to after it completes (including error paths)
+- [x] Request end log is emitted even when `next()` throws (with 500 status code)
+- [x] Log messages use consistent, greppable format (`request.start GET /path`, `request.end GET /path`)
+- [x] Tests verify both logs are emitted with correct fields (5 new tests)

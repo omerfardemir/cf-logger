@@ -78,6 +78,19 @@ describe('useLogger lifecycle logging', () => {
     expect(res.headers.get('traceparent')).toBeDefined()
   })
 
+  it('sets response headers even on error', async () => {
+    const { app } = setup()
+    app.get('/fail', () => {
+      throw new Error('fail')
+    })
+
+    const res = await app.request('/fail')
+    expect(res.status).toBe(500)
+    expect(res.headers.get('X-Request-Id')).toBeDefined()
+    expect(res.headers.get('X-Trace-Id')).toBeDefined()
+    expect(res.headers.get('traceparent')).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-\d{2}$/)
+  })
+
   it('measures duration accurately', async () => {
     const { entries, app } = setup()
     app.get('/slow', async (c) => {
