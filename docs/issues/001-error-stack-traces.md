@@ -11,11 +11,11 @@ End-to-end: when a downstream worker throws, every span log in the RPC chain inc
 
 ## Acceptance criteria
 
-- [ ] `traced()` span error logs include `stack` alongside `message`
-- [ ] Pino error serializer (`pino.stdSerializers.err`) is configured in both Node.js and Workers paths
-- [ ] Tests verify stack trace presence on both sync and async error spans
-- [ ] Existing error span tests updated (structure may change from `span.error: string` to `span.error: { message, stack }`)
+- [x] `traced()` span error logs include `stack` alongside `message`
+- [x] Pino error serializer (`pino.stdSerializers.err`) is configured in both Node.js and Workers paths
+- [x] Tests verify stack trace presence on both sync and async error spans
+- [x] Existing error span tests updated (structure may change from `span.error: string` to `span.error: { message, stack }`)
 
-## Blocked by
+## Status
 
-None — can start immediately
+**DONE** — implemented in commit `a853731`

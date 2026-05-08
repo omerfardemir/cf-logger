@@ -161,30 +161,29 @@ export function createSimpleLogger<T extends LogFields = LogFields>(
 /**
  * Create a standalone root logger with context fields baked in.
  *
- * `service` and `level` configure the logger; all other keys become
- * persistent bindings on every log line.
+ * `options` configures the logger; `bindings` become persistent fields
+ * on every log line.
  *
  * @template T - The type of user-defined log fields.
- * @param {LoggerOptions & Partial<T>} options - Logger configuration plus extra bindings.
+ * @param {LoggerOptions} options - Logger configuration.
+ * @param {Partial<T>} [bindings] - Extra key-value pairs included on every log line.
  * @returns {Logger<T>} A logger with the extra fields attached.
  *
  * @example
  * ```ts
- * const logger = createLogger({
- *   service: 'api-gateway',
- *   level: 'info',
- *   environment: 'production',
- *   version: '1.2.0',
- * })
+ * const logger = createLogger(
+ *   { service: 'api-gateway', level: 'info', environment: 'production', version: '1.2.0' },
+ * )
  * logger.info('server started')
  * ```
  */
 export function createLogger<T extends LogFields = LogFields>(
-  options: LoggerOptions & Partial<T>,
+  options: LoggerOptions,
+  bindings?: Partial<T>,
 ): Logger<T> {
-  const { service, level, ...fields } = options
+  const { service, level, environment, version } = options
   const p = createPino(level ?? 'debug')
-  return asLogger<T>(p.child({ service, ...fields }))
+  return asLogger<T>(p.child({ service, ...(environment ? { environment } : {}), ...(version ? { version } : {}), ...bindings }))
 }
 
 /**
@@ -224,8 +223,8 @@ export class LoggerFactory<T extends LogFields = LogFields> {
     contextFields?: Partial<T>,
     levelOverride?: string,
   ): R {
-    const { service, level: _level, ...extraFields } = this.options
-    const childOpts: Record<string, unknown> = { service, ...extraFields }
+    const { service, level: _level, environment, version } = this.options
+    const childOpts: Record<string, unknown> = { service, ...(environment ? { environment } : {}), ...(version ? { version } : {}) }
     if (levelOverride) {
       childOpts.level = levelOverride
     }

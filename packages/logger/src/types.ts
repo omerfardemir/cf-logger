@@ -97,8 +97,6 @@ export interface ALSStore<T extends LogFields = LogFields> {
 /**
  * Options for creating a Logger instance.
  *
- * Extends `LogFields` so any extra keys become persistent bindings.
- *
  * @example
  * ```ts
  * const logger = createLogger({
@@ -108,11 +106,15 @@ export interface ALSStore<T extends LogFields = LogFields> {
  * })
  * ```
  */
-export interface LoggerOptions extends LogFields {
+export interface LoggerOptions {
   /** Service name included on every log line. */
-  service?: string
+  service: string
   /** Minimum log level. Defaults to `'debug'`. */
   level?: LogLevel
+  /** Deployment environment (e.g. `'production'`, `'development'`). */
+  environment?: string
+  /** Application version (e.g. `'1.2.0'`). */
+  version?: string
 }
 
 /**
