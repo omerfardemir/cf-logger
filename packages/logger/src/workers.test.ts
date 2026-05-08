@@ -253,6 +253,32 @@ describe('Session Factory trace propagation', () => {
       expect(span.error).toBe('boom')
     })
 
+    it('sync error span includes stack trace in err field', () => {
+      const entries = _captureEntries()
+
+      const callerTrace = resolveTrace()
+      const traceparent = buildTraceparent(callerTrace)
+
+      class TestSession extends TracedSession {
+        doWork() {
+          return this.traced(() => { throw new Error('stack test') }, 'test.stackSync')
+        }
+      }
+
+      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      expect(() => session.doWork()).toThrow('stack test')
+
+      const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
+      expect(spanEntry).toBeDefined()
+
+      const err = spanEntry.err as Record<string, unknown>
+      expect(err).toBeDefined()
+      expect(err.message).toBe('stack test')
+      expect(err.type).toBe('Error')
+      expect(typeof err.stack).toBe('string')
+      expect((err.stack as string).length).toBeGreaterThan(0)
+    })
+
     it('emits span log with OK status for async operations', async () => {
       const entries = _captureEntries()
 
@@ -306,6 +332,32 @@ describe('Session Factory trace propagation', () => {
       expect(span.operation).toBe('test.asyncFail')
       expect(span.status).toBe('ERROR')
       expect(span.error).toBe('async boom')
+    })
+
+    it('async error span includes stack trace in err field', async () => {
+      const entries = _captureEntries()
+
+      const callerTrace = resolveTrace()
+      const traceparent = buildTraceparent(callerTrace)
+
+      class TestSession extends TracedSession {
+        async doWork() {
+          return this.traced(async () => {
+            throw new Error('async stack test')
+          }, 'test.stackAsync')
+        }
+      }
+
+      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      await expect(session.doWork()).rejects.toThrow('async stack test')
+
+      const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
+      const err = spanEntry.err as Record<string, unknown>
+      expect(err).toBeDefined()
+      expect(err.message).toBe('async stack test')
+      expect(err.type).toBe('Error')
+      expect(typeof err.stack).toBe('string')
+      expect((err.stack as string).length).toBeGreaterThan(0)
     })
 
     it('span does not duplicate trace IDs (they are on the log line)', () => {

@@ -69,7 +69,7 @@ export class TracedSession<E = unknown> extends RpcTarget {
     return this.#factory.runInContext(trace, () => {
       const startTime = Date.now();
 
-      const emitSpan = (status: 'OK' | 'ERROR', error?: string) => {
+      const emitSpan = (status: 'OK' | 'ERROR', error?: unknown) => {
         const endTime = Date.now();
         const span = {
           operation,
@@ -77,10 +77,10 @@ export class TracedSession<E = unknown> extends RpcTarget {
           endTime,
           duration: endTime - startTime,
           status,
-          ...(error ? { error } : {}),
+          ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
         };
         if (status === 'ERROR') {
-          getLogger(this.#loggerOptions.service).error({ span }, 'span.end %s', operation);
+          getLogger(this.#loggerOptions.service).error({ span, err: error }, 'span.end %s', operation);
         } else {
           getLogger(this.#loggerOptions.service).info({ span }, 'span.end %s', operation);
         }
@@ -92,13 +92,13 @@ export class TracedSession<E = unknown> extends RpcTarget {
         if (result instanceof Promise) {
           return result.then(
             (v) => { emitSpan('OK'); return v; },
-            (err) => { emitSpan('ERROR', err instanceof Error ? err.message : String(err)); throw err; },
+            (err) => { emitSpan('ERROR', err); throw err; },
           ) as R;
         }
         emitSpan('OK');
         return result;
       } catch (err) {
-        emitSpan('ERROR', err instanceof Error ? err.message : String(err));
+        emitSpan('ERROR', err);
         throw err;
       }
     });

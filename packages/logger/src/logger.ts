@@ -68,6 +68,7 @@ function nodePinoOptions(level: string): pino.LoggerOptions {
         return { level: label.toUpperCase() }
       },
     },
+    serializers: { err: pino.stdSerializers.err },
     timestamp: pino.stdTimeFunctions.isoTime,
     mixin: getALSFields,
   }
@@ -105,6 +106,11 @@ function workersPinoOptions(level: string): pino.LoggerOptions {
       write: (o: object) => {
         const obj = o as Record<string, unknown>
         Object.assign(obj, getALSFields())
+        // Serialize err field if present (browser path doesn't use Pino serializers)
+        if (obj.err instanceof Error) {
+          const e = obj.err
+          obj.err = { type: e.constructor.name, message: e.message, stack: e.stack }
+        }
         const msg = JSON.stringify(obj)
         const method = LEVEL_TO_CONSOLE[obj.level as string] ?? 'info'
         console[method](msg)
