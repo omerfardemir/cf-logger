@@ -218,7 +218,8 @@ export class LoggerFactory<T extends LogFields = LogFields> {
     contextFields?: Partial<T>,
     levelOverride?: string,
   ): R {
-    const childOpts: Record<string, unknown> = { service: this.options.service }
+    const { service, level: _level, ...extraFields } = this.options
+    const childOpts: Record<string, unknown> = { service, ...extraFields }
     if (levelOverride) {
       childOpts.level = levelOverride
     }
@@ -232,8 +233,6 @@ export class LoggerFactory<T extends LogFields = LogFields> {
     return als.run(store, fn)
   }
 }
-
-// ─── ALS context API ─────────────────────────────────────────────────────────
 
 /**
  * Cached standalone loggers keyed by service name.
@@ -375,7 +374,7 @@ export function getTraceContext(): TraceContext | null {
  * Returns the array; entries are pushed as logging occurs.
  * Call `_reset()` to restore normal console output.
  *
- * @internal Test helper — not part of the public API.
+ * @internal Test helper, not part of the public API.
  */
 export function _captureEntries(): Record<string, unknown>[] {
   const entries: Record<string, unknown>[] = []

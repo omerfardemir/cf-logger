@@ -1,7 +1,7 @@
 import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers';
 import type { LogFields, LoggerOptions, LogLevel } from './types';
-import { createLogger, runWithLogger, getTraceContext, getLogger } from './logger';
-import { buildTraceparent } from './trace';
+import { LoggerFactory, getTraceContext, getLogger } from './logger';
+import { buildTraceparent, resolveTrace } from './trace';
 
 /**
  * Base class for traced RPC sessions.
@@ -30,6 +30,7 @@ export class TracedSession<E = unknown> extends RpcTarget {
   #traceparent: string;
   #loggerOptions: LoggerOptions;
   #fields: LogFields;
+  #factory: LoggerFactory;
   /** Worker env instance property, never exposed over RPC. */
   protected env: E;
 
@@ -44,6 +45,7 @@ export class TracedSession<E = unknown> extends RpcTarget {
     this.#traceparent = traceparent;
     this.#loggerOptions = loggerOptions;
     this.#fields = fields ?? {};
+    this.#factory = new LoggerFactory(loggerOptions);
     this.env = env;
   }
 
@@ -59,12 +61,12 @@ export class TracedSession<E = unknown> extends RpcTarget {
    * @returns {R} The return value of `fn`.
    */
   protected traced<R>(fn: () => R, operation?: string): R {
-    const logger = createLogger(this.#loggerOptions);
+    const trace = resolveTrace(this.#traceparent);
     if (!operation) {
-      return runWithLogger({ logger, traceparent: this.#traceparent, fields: this.#fields }, fn);
+      return this.#factory.runInContext(trace, fn, this.#fields);
     }
 
-    return runWithLogger({ logger, traceparent: this.#traceparent, fields: this.#fields }, () => {
+    return this.#factory.runInContext(trace, () => {
       const startTime = Date.now();
 
       const emitSpan = (status: 'OK' | 'ERROR', error?: string) => {
