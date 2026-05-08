@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { LoggerFactory, getLogger, setLoggerContext, _reset, _captureEntries } from './logger'
-import { generateTraceId, generateSpanId, resolveTrace } from './trace'
+import { LoggerFactory, getLogger, setLoggerContext, _reset, _captureEntries, tracedFetch } from './logger'
+import { generateTraceId, generateSpanId, resolveTrace, buildTraceparent } from './trace'
 
 describe('getLogger outside ALS context', () => {
   beforeEach(() => {
@@ -195,5 +195,76 @@ describe('child logger', () => {
     expect(entries[0].service).toBe('child-svc')
     expect(entries[1].component).toBeUndefined()
     expect(entries[1].traceId).toBe(entries[0].traceId)
+  })
+})
+
+describe('tracedFetch', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+  })
+
+  it('injects traceparent header inside ALS context', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
+    vi.stubGlobal('fetch', mockFetch)
+
+    const trace = resolveTrace(undefined)
+    const factory = new LoggerFactory({ service: 'fetch-svc' })
+
+    await factory.runInContext(trace, async () => {
+      await tracedFetch('https://example.com/api')
+    })
+
+    expect(mockFetch).toHaveBeenCalledOnce()
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toBe('https://example.com/api')
+    const headers = new Headers(init.headers)
+    expect(headers.get('traceparent')).toBe(buildTraceparent(trace))
+  })
+
+  it('preserves existing headers', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
+    vi.stubGlobal('fetch', mockFetch)
+
+    const factory = new LoggerFactory({ service: 'fetch-svc' })
+
+    await factory.runInContext(resolveTrace(undefined), async () => {
+      await tracedFetch('https://example.com/api', {
+        headers: { 'Authorization': 'Bearer abc', 'Content-Type': 'application/json' },
+      })
+    })
+
+    const [, init] = mockFetch.mock.calls[0]
+    const headers = new Headers(init.headers)
+    expect(headers.get('Authorization')).toBe('Bearer abc')
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('traceparent')).toBeDefined()
+  })
+
+  it('falls back to regular fetch outside ALS', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
+    vi.stubGlobal('fetch', mockFetch)
+
+    await tracedFetch('https://example.com/api')
+
+    expect(mockFetch).toHaveBeenCalledOnce()
+    const [url, init] = mockFetch.mock.calls[0]
+    expect(url).toBe('https://example.com/api')
+    expect(init).toBeUndefined()
+  })
+
+  it('does not modify the original init object', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
+    vi.stubGlobal('fetch', mockFetch)
+
+    const factory = new LoggerFactory({ service: 'fetch-svc' })
+    const originalInit = { headers: { 'X-Custom': 'value' } }
+
+    await factory.runInContext(resolveTrace(undefined), async () => {
+      await tracedFetch('https://example.com/api', originalInit)
+    })
+
+    // Original should not have traceparent
+    expect(originalInit.headers).toEqual({ 'X-Custom': 'value' })
   })
 })

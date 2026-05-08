@@ -15,6 +15,7 @@ export {
   setLoggerContext,
   runWithLogger,
   getTraceContext,
+  tracedFetch,
 } from './logger';
 export {
   resolveTrace,

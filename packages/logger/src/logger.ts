@@ -1,7 +1,7 @@
 import pino from 'pino'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { LogFields, LoggerOptions, Logger, TraceContext, ALSStore } from './types'
-import { resolveTrace } from './trace'
+import { resolveTrace, buildTraceparent } from './trace'
 
 // ─── ALS instance ────────────────────────────────────────────────────────────
 
@@ -371,6 +371,28 @@ export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
 export function getTraceContext(): TraceContext | null {
   const store = als.getStore()
   return store ? {...store.trace } : null
+}
+
+/**
+ * A `fetch` wrapper that injects the current `traceparent` header from ALS.
+ *
+ * Outside an ALS context, behaves like regular `fetch()`.
+ *
+ * @param {RequestInfo | URL} input - The fetch URL or Request.
+ * @param {RequestInit} [init] - Optional fetch init options.
+ * @returns {Promise<Response>} The fetch response.
+ */
+export function tracedFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const trace = getTraceContext()
+  if (!trace) return fetch(input, init)
+
+  const traceparent = buildTraceparent(trace)
+  const headers = new Headers(init?.headers)
+  headers.set('traceparent', traceparent)
+  return fetch(input, { ...init, headers })
 }
 
 /**

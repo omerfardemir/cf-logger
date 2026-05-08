@@ -2,19 +2,17 @@
 
 **Priority:** P2
 **Type:** AFK
+**Status:** DONE
+**Commit:** 616ea50
 
-## What to build
+## What was built
 
-When `useLogger(logger)` receives a shared Logger instance, the same object is stored in every request's ALS and in `c.var.logger`. If a caller does `c.var.logger.child(...)`, the child is shared. Create a per-request child inside the middleware so each request gets its own logger instance with request-scoped bindings (`requestId`, etc.) baked in.
+`useLogger` now creates `logger.child({ requestId })` per request. Each request gets its own logger instance with `requestId` baked in as a binding. `c.var.logger` and the ALS store hold the per-request child, not the shared parent.
 
 ## Acceptance criteria
 
-- [ ] `useLogger` creates a `logger.child({ requestId })` per request
-- [ ] `c.var.logger` is the per-request child, not the shared parent
-- [ ] The ALS store holds the per-request child
-- [ ] Two concurrent requests get different logger instances (not `===`)
-- [ ] Test: verify `c.var.logger` has `requestId` as a binding, not just via ALS mixin
-
-## Blocked by
-
-None — can start immediately
+- [x] `useLogger` creates a `logger.child({ requestId })` per request
+- [x] `c.var.logger` is the per-request child, not the shared parent
+- [x] The ALS store holds the per-request child
+- [x] Two concurrent requests get different logger instances (not `===`)
+- [x] Test: verify `c.var.logger` has `requestId` as a binding
