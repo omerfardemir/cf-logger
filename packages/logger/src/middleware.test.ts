@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { Hono } from 'hono'
-import { createLogger, _captureEntries, _reset } from './logger'
+import { createLogger, _captureEntries, _reset, getLogger } from './logger'
 import { useLogger } from './middleware'
 import type { LogFields } from './types'
 
@@ -102,5 +102,41 @@ describe('useLogger lifecycle logging', () => {
 
     const end = entries.find((e) => e.message?.startsWith('request.end'))
     expect(end!.duration).toBeGreaterThanOrEqual(40)
+  })
+
+  it('creates per-request child logger with requestId binding', async () => {
+    const { entries, app } = setup()
+    let capturedLogger: unknown
+
+    app.get('/child', (c) => {
+      capturedLogger = c.get('logger' as never)
+      ;(capturedLogger as any).info({}, 'from handler')
+      return c.text('ok')
+    })
+
+    await app.request('/child')
+
+    // The handler log should have requestId from child binding (not just ALS)
+    const handlerLog = entries.find((e) => e.message === 'from handler')
+    expect(handlerLog).toBeDefined()
+    expect(handlerLog!.requestId).toBeDefined()
+  })
+
+  it('gives different logger instances to concurrent requests', async () => {
+    const { app } = setup()
+    const loggers: unknown[] = []
+
+    app.get('/concurrent', (c) => {
+      loggers.push(c.get('logger' as never))
+      return c.text('ok')
+    })
+
+    await Promise.all([
+      app.request('/concurrent'),
+      app.request('/concurrent'),
+    ])
+
+    expect(loggers).toHaveLength(2)
+    expect(loggers[0]).not.toBe(loggers[1])
   })
 })

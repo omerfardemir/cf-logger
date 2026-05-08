@@ -37,7 +37,7 @@ export function useLogger<T extends LogFields = LogFields>(
   loggerOrFactory: Logger<T> | ((c: Parameters<MiddlewareHandler>[0]) => Logger<T>),
 ): MiddlewareHandler {
   return async (c, next) => {
-    const logger = 'info' in loggerOrFactory
+    const baseLogger = 'info' in loggerOrFactory
       ? loggerOrFactory
       : loggerOrFactory(c)
 
@@ -45,6 +45,7 @@ export function useLogger<T extends LogFields = LogFields>(
     const requestId = c.req.header('X-Request-Id') || c.var?.requestId || crypto.randomUUID()
     const method = c.req.method
     const path = new URL(c.req.url).pathname
+    const logger = baseLogger.child({ requestId })
 
     await runWithLogger(
       { logger, trace },
@@ -55,7 +56,7 @@ export function useLogger<T extends LogFields = LogFields>(
 
         setLoggerContext({ requestId })
 
-        logger.info({ method, path, requestId, traceId: trace.traceId }, `request.start ${method} ${path}`)
+        logger.info({ method, path }, `request.start ${method} ${path}`)
 
         const start = Date.now()
         try {
@@ -69,7 +70,7 @@ export function useLogger<T extends LogFields = LogFields>(
           const duration = Date.now() - start
           const statusCode = c.res.status
 
-          logger.info({ method, path, statusCode, duration, requestId, traceId: trace.traceId }, `request.end ${method} ${path}`)
+          logger.info({ method, path, statusCode, duration }, `request.end ${method} ${path}`)
 
           c.header('X-Request-Id', requestId)
           c.header('X-Trace-Id', trace.traceId)
