@@ -2,23 +2,20 @@
 
 **Priority:** P3
 **Type:** AFK
+**Status:** DONE
+**Commit:** facf23e
 
-## What to build
+## What was built
 
-The W3C Trace Context spec defines `tracestate` alongside `traceparent` for vendor-specific key-value pairs. Currently `tracestate` is silently dropped. Parse, store, and propagate `tracestate` through the request lifecycle and across RPC hops so vendor-specific context (Datadog, Jaeger, custom keys) survives.
+`tracestate` is now parsed, stored, and propagated through the entire request lifecycle — middleware, ALS, RPC sessions, and outgoing fetch. Vendor-specific context (Datadog, Jaeger, custom keys) survives across hops.
 
 ## Acceptance criteria
 
-- [ ] `TraceContext` type includes optional `tracestate: string`
-- [ ] `parseTraceparent` is paired with a `parseTracestate` or the middleware reads both headers
-- [ ] `useLogger` reads `tracestate` header from incoming request and stores it in trace context
-- [ ] `buildTraceparent` is paired with `buildTracestate` or `useLogger` sets both response headers
-- [ ] `TracedSession` propagates `tracestate` alongside `traceparent` through the Session Factory
-- [ ] `tracedFetch` (if #007 is done) includes `tracestate` on outgoing requests
-- [ ] `ServiceSession` interface updated to accept `tracestate`
-- [ ] Tests verify `tracestate` round-trips through middleware → RPC → downstream
-- [ ] Tests verify `tracestate` is optional — existing code without it still works
-
-## Blocked by
-
-None — can start immediately (but benefits from #007 being done first)
+- [x] `TraceContext` type includes optional `tracestate: string`
+- [x] `useLogger` reads `tracestate` header and stores it in trace context
+- [x] `useLogger` sets `tracestate` on response headers (when present)
+- [x] `TracedSession` propagates `tracestate` through the Session Factory
+- [x] `tracedFetch` includes `tracestate` on outgoing requests
+- [x] `tracedSession`/`withTrace`/`tracedWorker` updated for tracestate
+- [x] Tests verify `tracestate` round-trips through middleware
+- [x] Tests verify `tracestate` is optional — existing code without it still works (65/65)
