@@ -43,6 +43,8 @@ export function useLogger<T extends LogFields = LogFields>(
 
     const trace = resolveTrace(c.req.header('traceparent'))
     const requestId = c.req.header('X-Request-Id') || c.var?.requestId || crypto.randomUUID()
+    const method = c.req.method
+    const path = new URL(c.req.url).pathname
 
     await runWithLogger(
       { logger, trace },
@@ -52,7 +54,22 @@ export function useLogger<T extends LogFields = LogFields>(
         c.set('traceId' as never, trace.traceId as never)
 
         setLoggerContext({ requestId })
-        await next()
+
+        logger.info({ method, path, requestId, traceId: trace.traceId }, `request.start ${method} ${path}`)
+
+        const start = Date.now()
+        try {
+          await next()
+        } catch (err) {
+          c.res = c.res ?? new Response('Internal Server Error', { status: 500 })
+          if (!c.res.status || c.res.status < 400) {
+            c.res = new Response('Internal Server Error', { status: 500 })
+          }
+        }
+        const duration = Date.now() - start
+        const statusCode = c.res.status
+
+        logger.info({ method, path, statusCode, duration, requestId, traceId: trace.traceId }, `request.end ${method} ${path}`)
       },
     )
 

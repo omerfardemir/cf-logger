@@ -2,17 +2,15 @@
 
 **Priority:** P1
 **Type:** AFK
+**Status:** DONE
+**Commit:** 680d634
 
-## What to build
+## What was built
 
-The Workers path in `workersPinoOptions` does `Object.assign(obj, getALSFields())`, mutating Pino's internal object in-place. Replace with an object spread (`{ ...obj, ...getALSFields() }`) to avoid coupling to Pino's internal object lifecycle.
+`browser.write` now creates a new merged object via spread (`{ ...raw, ...getALSFields() }`) instead of mutating Pino's internal object with `Object.assign`.
 
 ## Acceptance criteria
 
-- [ ] `browser.write` uses spread instead of `Object.assign`
-- [ ] Log output shape is unchanged (verified by existing tests or a new Workers-path test)
-- [ ] No mutation of the `o` parameter passed by Pino
-
-## Blocked by
-
-None — can start immediately
+- [x] `browser.write` uses spread instead of `Object.assign`
+- [x] Log output shape is unchanged (verified by existing tests)
+- [x] No mutation of the `o` parameter passed by Pino
