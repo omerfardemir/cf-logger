@@ -139,4 +139,26 @@ describe('useLogger lifecycle logging', () => {
     expect(loggers).toHaveLength(2)
     expect(loggers[0]).not.toBe(loggers[1])
   })
+
+  it('round-trips tracestate header', async () => {
+    const { app } = setup()
+    app.get('/ts', (c) => c.text('ok'))
+
+    const res = await app.request('/ts', {
+      headers: {
+        traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
+        tracestate: 'congo=t61rcWkgMzE,rojo=00f067aa0ba902b7',
+      },
+    })
+
+    expect(res.headers.get('tracestate')).toBe('congo=t61rcWkgMzE,rojo=00f067aa0ba902b7')
+  })
+
+  it('does not set tracestate header when not present on request', async () => {
+    const { app } = setup()
+    app.get('/no-ts', (c) => c.text('ok'))
+
+    const res = await app.request('/no-ts')
+    expect(res.headers.get('tracestate')).toBeNull()
+  })
 })

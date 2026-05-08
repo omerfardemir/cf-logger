@@ -392,6 +392,9 @@ export function tracedFetch(
   const traceparent = buildTraceparent(trace)
   const headers = new Headers(init?.headers)
   headers.set('traceparent', traceparent)
+  if (trace.tracestate) {
+    headers.set('tracestate', trace.tracestate)
+  }
   return fetch(input, { ...init, headers })
 }
 

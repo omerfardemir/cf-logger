@@ -109,12 +109,13 @@ export function buildTraceparent(trace: TraceContext): string {
  * // trace.traceId is either inherited or freshly generated
  * ```
  */
-export function resolveTrace(traceparent?: string | null): TraceContext {
+export function resolveTrace(traceparent?: string | null, tracestate?: string | null): TraceContext {
   const parsed = traceparent ? parseTraceparent(traceparent) : null
   return {
     traceId: parsed?.traceId ?? generateTraceId(),
     spanId: generateSpanId(),
     ...(parsed?.spanId ? { parentSpanId: parsed.spanId } : {}),
     traceFlags: parsed?.traceFlags ?? 1,
+    ...(tracestate ? { tracestate } : {}),
   }
 }

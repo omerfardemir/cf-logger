@@ -55,6 +55,8 @@ export interface TraceContext {
   parentSpanId?: string
   /** 8-bit field (usually `0x00` or `0x01`). */
   traceFlags: number
+  /** W3C tracestate header value for vendor-specific key-value pairs. */
+  tracestate?: string
 }
 
 /**

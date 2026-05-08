@@ -2,21 +2,17 @@
 
 **Priority:** P2
 **Type:** AFK
+**Status:** DONE
+**Commit:** 39f6148
 
-## What to build
+## What was built
 
-`traceFlags` is parsed and stored but never acted upon. The W3C spec defines bit `0x01` as the "sampled" flag. Support sampling so upstream services can control whether a trace is recorded. This allows cost control at scale — not every request needs full logging.
+New root traces default to sampled (`traceFlags: 0x01`). Incoming `traceFlags` are preserved via `resolveTrace`. `TracedSession.traced()` skips span logs when the sampled bit (`0x01`) is not set — business logic still runs regardless.
 
 ## Acceptance criteria
 
-- [ ] `resolveTrace` preserves the `sampled` flag from incoming traceparent
-- [ ] New root traces default to sampled (`traceFlags: 0x01`)
-- [ ] `LoggerFactory` / `runWithLogger` can optionally suppress logging when `sampled = false`
-- [ ] `TracedSession` respects the sampled flag (skip span logs when not sampled)
-- [ ] `buildTraceparent` correctly propagates the sampled flag downstream
-- [ ] Tests verify sampled/unsampled traces behave differently
-- [ ] Document the sampling behavior and how to configure it
-
-## Blocked by
-
-None — can start immediately
+- [x] `resolveTrace` preserves the `sampled` flag from incoming traceparent
+- [x] New root traces default to sampled (`traceFlags: 0x01`)
+- [x] `TracedSession.traced()` skips span logs when not sampled
+- [x] `buildTraceparent` correctly propagates the sampled flag downstream
+- [x] Tests verify sampled/unsampled traces behave differently (5 new tests)

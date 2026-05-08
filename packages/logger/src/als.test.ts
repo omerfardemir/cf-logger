@@ -267,4 +267,23 @@ describe('tracedFetch', () => {
     // Original should not have traceparent
     expect(originalInit.headers).toEqual({ 'X-Custom': 'value' })
   })
+
+  it('includes tracestate header when present in ALS context', async () => {
+    const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
+    vi.stubGlobal('fetch', mockFetch)
+
+    const trace = resolveTrace(
+      '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
+      'congo=t61rcWkgMzE',
+    )
+    const factory = new LoggerFactory({ service: 'fetch-svc' })
+
+    await factory.runInContext(trace, async () => {
+      await tracedFetch('https://example.com/api')
+    })
+
+    const [, init] = mockFetch.mock.calls[0]
+    const headers = new Headers(init.headers)
+    expect(headers.get('tracestate')).toBe('congo=t61rcWkgMzE')
+  })
 })

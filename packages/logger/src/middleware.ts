@@ -41,7 +41,7 @@ export function useLogger<T extends LogFields = LogFields>(
       ? loggerOrFactory
       : loggerOrFactory(c)
 
-    const trace = resolveTrace(c.req.header('traceparent'))
+    const trace = resolveTrace(c.req.header('traceparent'), c.req.header('tracestate'))
     const requestId = c.req.header('X-Request-Id') || c.var?.requestId || crypto.randomUUID()
     const method = c.req.method
     const path = new URL(c.req.url).pathname
@@ -75,6 +75,9 @@ export function useLogger<T extends LogFields = LogFields>(
           c.header('X-Request-Id', requestId)
           c.header('X-Trace-Id', trace.traceId)
           c.header('traceparent', buildTraceparent(trace))
+          if (trace.tracestate) {
+            c.header('tracestate', trace.tracestate)
+          }
         }
       },
     )
