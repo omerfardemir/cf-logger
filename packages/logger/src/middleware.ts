@@ -1,7 +1,7 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import type { LogFields, Logger } from './types'
 import { resolveTrace, buildTraceparent } from './trace'
-import { runWithLogger, setLoggerContext } from './als'
+import { runWithLogger, setLoggerContext } from './logger'
 
 /**
  * Logging Middleware for Hono.

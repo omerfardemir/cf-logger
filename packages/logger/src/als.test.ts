@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { LoggerFactory } from './logger'
-import { getLogger, setLoggerContext, _reset } from './als'
+import { LoggerFactory, getLogger, setLoggerContext, _reset } from './logger'
 import { generateTraceId, generateSpanId, resolveTrace } from './trace'
 
 describe('getLogger outside ALS context', () => {

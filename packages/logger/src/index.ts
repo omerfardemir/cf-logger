@@ -7,13 +7,15 @@ export type {
   LogLevel,
 } from './types';
 
-export { createLogger, createSimpleLogger, LoggerFactory } from './logger';
 export {
+  createLogger,
+  createSimpleLogger,
+  LoggerFactory,
   getLogger,
   setLoggerContext,
   runWithLogger,
   getTraceContext,
-} from './als';
+} from './logger';
 export {
   resolveTrace,
   buildTraceparent,

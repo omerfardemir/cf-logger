@@ -1,7 +1,6 @@
 import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers';
 import type { LogFields, LoggerOptions, LogLevel } from './types';
-import { createLogger } from './logger';
-import { runWithLogger, getTraceContext, getLogger } from './als';
+import { createLogger, runWithLogger, getTraceContext, getLogger } from './logger';
 import { buildTraceparent } from './trace';
 
 /**

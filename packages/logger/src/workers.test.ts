@@ -10,8 +10,7 @@ vi.mock('cloudflare:workers', () => ({
 }))
 
 import { TracedSession, tracedSession, withTrace, TracedEntrypoint, tracedWorker } from './workers'
-import { runWithLogger, getTraceContext, getLogger, _reset } from './als'
-import { createSimpleLogger } from './logger'
+import { runWithLogger, getTraceContext, getLogger, _reset, createSimpleLogger } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
 
 describe('Session Factory trace propagation', () => {
