@@ -3,8 +3,6 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import type { LogFields, LoggerOptions, Logger, TraceContext, ALSStore } from './types'
 import { resolveTrace, buildTraceparent } from './trace'
 
-// ─── ALS instance ────────────────────────────────────────────────────────────
-
 const als = new AsyncLocalStorage<ALSStore>()
 
 /**
