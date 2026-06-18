@@ -12,6 +12,11 @@ function setup() {
   return { entries, app }
 }
 
+function messageStartsWith(prefix: string) {
+  return (entry: Record<string, unknown>) =>
+    typeof entry.message === 'string' && entry.message.startsWith(prefix)
+}
+
 describe('useLogger lifecycle logging', () => {
   beforeEach(() => _reset())
 
@@ -22,14 +27,14 @@ describe('useLogger lifecycle logging', () => {
     const res = await app.request('/hello')
     expect(res.status).toBe(200)
 
-    const start = entries.find((e) => e.message?.startsWith('request.start'))
+    const start = entries.find(messageStartsWith('request.start'))
     expect(start).toBeDefined()
     expect(start!.method).toBe('GET')
     expect(start!.path).toBe('/hello')
     expect(start!.requestId).toBeDefined()
     expect(start!.traceId).toBeDefined()
 
-    const end = entries.find((e) => e.message?.startsWith('request.end'))
+    const end = entries.find(messageStartsWith('request.end'))
     expect(end).toBeDefined()
     expect(end!.method).toBe('GET')
     expect(end!.path).toBe('/hello')
@@ -47,7 +52,7 @@ describe('useLogger lifecycle logging', () => {
     const res = await app.request('/boom')
     expect(res.status).toBe(500)
 
-    const end = entries.find((e) => e.message?.startsWith('request.end'))
+    const end = entries.find(messageStartsWith('request.end'))
     expect(end).toBeDefined()
     expect(end!.statusCode).toBe(500)
     expect(typeof end!.duration).toBe('number')
@@ -60,11 +65,11 @@ describe('useLogger lifecycle logging', () => {
     const res = await app.request('/users', { method: 'POST' })
     expect(res.status).toBe(201)
 
-    const start = entries.find((e) => e.message?.startsWith('request.start'))
+    const start = entries.find(messageStartsWith('request.start'))
     expect(start!.method).toBe('POST')
     expect(start!.path).toBe('/users')
 
-    const end = entries.find((e) => e.message?.startsWith('request.end'))
+    const end = entries.find(messageStartsWith('request.end'))
     expect(end!.statusCode).toBe(201)
   })
 
@@ -100,7 +105,7 @@ describe('useLogger lifecycle logging', () => {
 
     await app.request('/slow')
 
-    const end = entries.find((e) => e.message?.startsWith('request.end'))
+    const end = entries.find(messageStartsWith('request.end'))
     expect(end!.duration).toBeGreaterThanOrEqual(40)
   })
 

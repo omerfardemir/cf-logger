@@ -1,15 +1,13 @@
 {
   "compilerOptions": {
-    "target": "ESNext",
+    "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "strict": true,
     "skipLibCheck": true,
-    "lib": ["ESNext"],
-    "types": ["@types/node", "@cloudflare/workers-types"],
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "declaration": true
+    "lib": ["ES2022"],
+    "types": ["node", "@cloudflare/workers-types"],
+    "noEmit": true
   },
-  "include": ["src"]
+  "include": ["src/**/*.ts", "vitest.config.ts", "tsdown.config.ts"]
 }

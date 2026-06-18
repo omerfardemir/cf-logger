@@ -1,15 +1,36 @@
 {
   "name": "@cf-logger/logger",
   "version": "0.0.1",
+  "description": "Structured logging and trace propagation for Cloudflare Workers and Node.js.",
   "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
-    "test": "vitest run"
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "pnpm run build && pnpm run typecheck && pnpm run test",
+    "pack:dry": "npm pack --dry-run"
   },
   "exports": {
-    ".": "./src/index.ts",
-    "./hono": "./src/hono.ts",
-    "./workers": "./src/workers.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./hono": {
+      "types": "./dist/hono.d.ts",
+      "import": "./dist/hono.js"
+    },
+    "./workers": {
+      "types": "./dist/workers.d.ts",
+      "import": "./dist/workers.js"
+    }
   },
+  "types": "./dist/index.d.ts",
   "dependencies": {
     "pino": "catalog:"
   },
@@ -25,6 +46,9 @@
     "@cloudflare/workers-types": "catalog:",
     "@types/node": "catalog:",
     "hono": "catalog:",
+    "publint": "catalog:",
+    "tsdown": "catalog:",
+    "typescript": "catalog:",
     "vitest": "catalog:",
     "wrangler": "catalog:"
   }

@@ -1,0 +1,20 @@
+import { defineConfig } from 'tsdown'
+
+export default defineConfig({
+  entry: {
+    index: './src/index.ts',
+    hono: './src/hono.ts',
+    workers: './src/workers.ts',
+  },
+  dts: {
+    resolver: 'tsc',
+  },
+  format: ['esm'],
+  platform: 'neutral',
+  sourcemap: true,
+  clean: true,
+  publint: true,
+  deps: {
+    neverBundle: ['pino', 'hono', 'cloudflare:workers', 'node:async_hooks'],
+  },
+})
