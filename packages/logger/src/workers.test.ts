@@ -9,7 +9,8 @@ vi.mock('cloudflare:workers', () => ({
   },
 }))
 
-import { TracedSession, tracedSession, withTrace, TracedEntrypoint, tracedWorker } from './workers'
+import { TracedSession, tracedSession, withTrace, TracedEntrypoint, tracedWorker, loggerOptionsFromEnv } from './workers'
+import type { TracedServiceBinding } from './workers'
 import { runWithLogger, getTraceContext, getLogger, _reset, createSimpleLogger, _captureEntries } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
 
@@ -17,6 +18,54 @@ describe('Session Factory trace propagation', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     _reset()
+  })
+
+  it('TracedServiceBinding describes the session factory contract', async () => {
+    interface ExampleSession {
+      add(a: number, b: number): Promise<number>
+    }
+
+    const binding: TracedServiceBinding<ExampleSession> = {
+      session(traceparent, fields, tracestate) {
+        expect(traceparent).toBe('00-11111111111111111111111111111111-2222222222222222-01')
+        expect(fields).toEqual({ requestId: 'req-1' })
+        expect(tracestate).toBe('vendor=value')
+        return {
+          async add(a, b) {
+            return a + b
+          },
+        }
+      },
+    }
+
+    await expect(
+      binding
+        .session('00-11111111111111111111111111111111-2222222222222222-01', { requestId: 'req-1' }, 'vendor=value')
+        .add(2, 3),
+    ).resolves.toBe(5)
+  })
+
+  it('loggerOptionsFromEnv maps Cloudflare env conventions', () => {
+    expect(loggerOptionsFromEnv({
+      NAME: 'api',
+      LOG_LEVEL: 'debug',
+      ENVIRONMENT: 'production',
+      VERSION: '1.2.3',
+    })).toEqual({
+      service: 'api',
+      level: 'debug',
+      environment: 'production',
+      version: '1.2.3',
+    })
+  })
+
+  it('loggerOptionsFromEnv has safe defaults', () => {
+    expect(loggerOptionsFromEnv({})).toEqual({
+      service: 'unknown',
+      level: 'info',
+      environment: 'unknown',
+      version: 'unknown',
+    })
   })
 
   it('TracedSession.traced() sets up ALS with correct trace context', () => {

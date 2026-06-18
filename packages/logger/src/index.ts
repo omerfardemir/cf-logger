@@ -18,6 +18,12 @@ export {
   tracedFetch,
 } from './logger';
 export {
+  loggerOptionsFromEnv,
+} from './env';
+export type {
+  TracedServiceBinding,
+} from './workers';
+export {
   resolveTrace,
   buildTraceparent,
   parseTraceparent,

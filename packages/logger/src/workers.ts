@@ -1,7 +1,14 @@
 import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers';
-import type { LogFields, LoggerOptions, LogLevel } from './types';
+import type { LogFields, LoggerOptions } from './types';
 import { LoggerFactory, getTraceContext, getLogger } from './logger';
 import { buildTraceparent, resolveTrace } from './trace';
+import { loggerOptionsFromEnv } from './env';
+
+export { loggerOptionsFromEnv } from './env';
+
+export type TracedServiceBinding<T> = {
+  session(traceparent: string, fields?: LogFields, tracestate?: string): T;
+}
 
 /**
  * Base class for traced RPC sessions.
@@ -123,22 +130,6 @@ export class TracedSession<E = unknown> extends RpcTarget {
 }
 
 /**
- * Extract `LoggerOptions` from env using the `NAME` / `LOG_LEVEL` convention.
- *
- * @param {unknown} env - The worker environment object.
- * @returns {LoggerOptions} Logger options derived from env vars.
- */
-function envLoggerOptions(env: unknown): LoggerOptions {
-  const e = env as Record<string, unknown>;
-  return {
-    service: (e.NAME as string) ?? 'unknown',
-    level: ((e.LOG_LEVEL as string) ?? 'info') as LogLevel,
-    environment: (e.ENVIRONMENT as string) ?? 'unknown',
-    version: (e.VERSION as string) ?? 'unknown',
-  };
-}
-
-/**
  * Base class for RPC worker entrypoints with automatic `loggerOptions` from env.
  *
  * Expects `env.NAME` and `env.LOG_LEVEL` by convention.
@@ -162,7 +153,7 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
    * @returns {LoggerOptions} The logger options.
    */
   protected get loggerOptions(): LoggerOptions {
-    return envLoggerOptions(this.env);
+    return loggerOptionsFromEnv(this.env);
   }
 }
 
@@ -212,7 +203,7 @@ export function tracedWorker<S extends TracedSession>(
     }
 
     session(traceparent: string, fields?: LogFields, tracestate?: string): S {
-      return new SessionClass(traceparent, envLoggerOptions(this.env), this.env, fields, tracestate);
+      return new SessionClass(traceparent, loggerOptionsFromEnv(this.env), this.env, fields, tracestate);
     }
   } as any;
 }
@@ -237,9 +228,10 @@ export function tracedWorker<S extends TracedSession>(
  * const result = await session.add(5, 7)
  * ```
  */
-export function tracedSession<T>(binding: {
-  session(traceparent: string, fields?: LogFields, tracestate?: string): T;
-}, fields?: LogFields): T {
+export function tracedSession<T>(
+  binding: TracedServiceBinding<T>,
+  fields?: LogFields,
+): T {
   const trace = getTraceContext();
   const traceparent = trace ? buildTraceparent(trace) : '';
   return binding.session(traceparent, fields, trace?.tracestate);
@@ -264,7 +256,7 @@ export function tracedSession<T>(binding: {
  * ```
  */
 export async function withTrace<T, R>(
-  binding: { session(traceparent: string, fields?: LogFields, tracestate?: string): T },
+  binding: TracedServiceBinding<T>,
   fn: (session: T) => Promise<R> | R,
   fields?: LogFields,
 ): Promise<R> {
