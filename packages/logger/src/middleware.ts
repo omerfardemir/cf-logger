@@ -59,25 +59,21 @@ export function useLogger<T extends LogFields = LogFields>(
         logger.info({ method, path }, `request.start ${method} ${path}`)
 
         const start = Date.now()
-        try {
-          await next()
-        } catch (err) {
-          c.res = c.res ?? new Response('Internal Server Error', { status: 500 })
-          if (!c.res.status || c.res.status < 400) {
-            c.res = new Response('Internal Server Error', { status: 500 })
-          }
-        } finally {
-          const duration = Date.now() - start
-          const statusCode = c.res.status
+        await next()
 
-          logger.info({ method, path, statusCode, duration }, `request.end ${method} ${path}`)
+        const duration = Date.now() - start
+        const statusCode = c.res.status
 
-          c.header('X-Request-Id', requestId)
-          c.header('X-Trace-Id', trace.traceId)
-          c.header('traceparent', buildTraceparent(trace))
-          if (trace.tracestate) {
-            c.header('tracestate', trace.tracestate)
-          }
+        if (c.error) {
+          logger.error({ err: c.error, method, path, statusCode, duration }, `request.error ${method} ${path}`)
+        }
+        logger.info({ method, path, statusCode, duration }, `request.end ${method} ${path}`)
+
+        c.header('X-Request-Id', requestId)
+        c.header('X-Trace-Id', trace.traceId)
+        c.header('traceparent', buildTraceparent(trace))
+        if (trace.tracestate) {
+          c.header('tracestate', trace.tracestate)
         }
       },
     )
