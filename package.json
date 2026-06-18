@@ -2,9 +2,15 @@
   "name": "cf-logger",
   "type": "module",
   "scripts": {
-		"dev": "wrangler dev -c workers/main-worker/wrangler.jsonc -c workers/bind-worker/wrangler.jsonc -c workers/math-worker/wrangler.jsonc",
+    "dev": "wrangler dev -c workers/main-worker/wrangler.jsonc -c workers/bind-worker/wrangler.jsonc -c workers/math-worker/wrangler.jsonc",
     "deploy": "wrangler deploy -c workers/main-worker/wrangler.jsonc && wrangler deploy -c workers/bind-worker/wrangler.jsonc && wrangler deploy -c workers/math-worker/wrangler.jsonc",
-    "cf-typegen": "wrangler types --include-runtime=false"
+    "cf-typegen": "wrangler types --include-runtime=false",
+    "logger:build": "pnpm --filter @cf-logger/logger build",
+    "logger:typecheck": "pnpm --filter @cf-logger/logger typecheck",
+    "logger:test": "pnpm --filter @cf-logger/logger test",
+    "logger:pack": "pnpm --filter @cf-logger/logger pack:dry",
+    "e2e:local": "powershell -ExecutionPolicy Bypass -File scripts/e2e-local.ps1",
+    "release:check": "pnpm logger:build && pnpm logger:typecheck && pnpm logger:test && pnpm logger:pack && pnpm e2e:local"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
