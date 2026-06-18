@@ -94,7 +94,7 @@ app.get('/error', async (c) => {
   try {
     // math-worker will throw "Division by zero"
     // The error propagates back through the RPC chain
-    await withTrace(c.env.BIND, (s) => s.multiHop(0));
+    await withTrace(c.env.BIND, (s) => s.divideByZero(42));
     return c.text('Should not reach here');
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

@@ -11,9 +11,7 @@ cf-logger/
 │       └── src/
 │           ├── index.ts     # Main exports
 │           ├── types.ts     # Logger, TraceContext, SpanContext, etc.
-│           ├── logger.ts    # Pino factory (platform-aware config)
-│           ├── als.ts       # AsyncLocalStorage context management
-│           ├── store.ts     # Shared ALS instance
+│           ├── logger.ts    # Pino factory + AsyncLocalStorage context
 │           ├── trace.ts     # W3C traceparent parse/build/resolve
 │           ├── middleware.ts # Hono middleware (useLogger)
 │           ├── hono.ts      # Re-export for @cf-logger/logger/hono
@@ -146,5 +144,5 @@ Each worker needs these env vars for the logger:
 
 ```bash
 cd packages/logger
-pnpm test  # 43 tests across trace, ALS, and workers
+pnpm test  # 65 tests across trace, ALS, middleware, and workers
 ```

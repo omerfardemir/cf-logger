@@ -126,9 +126,9 @@ const b = await session.multiply(3, 4)
 Define shared interfaces in `workers/services.d.ts`:
 
 ```ts
-/** All traced bindings expose session(traceparent) */
+/** All traced bindings expose session(traceparent, fields?, tracestate?) */
 export interface ServiceSession<T> {
-  session(traceparent: string): T;
+  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string): T;
 }
 
 export interface BindService {

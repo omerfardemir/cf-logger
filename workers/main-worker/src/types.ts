@@ -1,13 +1,14 @@
 /** Shared RPC service interfaces */
 
 export interface ServiceSession<T> {
-  session(traceparent: string): T;
+  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string): T;
 }
 
 /** bind-worker: math operations + multi-hop demo */
 export interface BindService {
   add(a: number, b: number): Promise<number>;
   multiHop(value: number): Promise<number>;
+  divideByZero(value: number): Promise<number>;
 }
 
 /** math-worker: downstream worker called by bind-worker */

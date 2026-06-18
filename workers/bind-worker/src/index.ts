@@ -38,6 +38,14 @@ class BindSession extends TracedSession<Env> implements BindService {
       return divided
     }, 'bind.multiHop')
   }
+
+  /** Error demo: bind-worker -> math-worker division by zero */
+  async divideByZero(value: number): Promise<number> {
+    return this.traced(async () => {
+      this.logger.info({ value }, 'Triggering downstream division by zero')
+      return withTrace(this.env.MATH, (s) => s.divide(value, 0))
+    }, 'bind.divideByZero')
+  }
 }
 
 export default tracedWorker(BindSession)

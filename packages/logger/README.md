@@ -282,8 +282,8 @@ import { TracedEntrypoint, TracedSession } from '@cf-logger/logger/workers'
 class MySession extends TracedSession<Env> { /* ... */ }
 
 export default class extends TracedEntrypoint<Env> {
-  session(traceparent: string, fields?: Record<string, unknown>) {
-    return new MySession(traceparent, this.loggerOptions, this.env, fields)
+  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string) {
+    return new MySession(traceparent, this.loggerOptions, this.env, fields, tracestate)
   }
 
   async scheduled(event: ScheduledEvent) { /* ... */ }
@@ -296,7 +296,7 @@ Define shared interfaces in a `services.d.ts`:
 
 ```ts
 export interface ServiceSession<T> {
-  session(traceparent: string, fields?: Record<string, unknown>): T;
+  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string): T;
 }
 
 export interface BindService {
