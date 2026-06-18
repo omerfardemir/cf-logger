@@ -14,11 +14,35 @@ pnpm add hono
 
 | Import | Contents |
 |--------|----------|
-| `@cf-logger/logger` | Core: `createLogger`, `createSimpleLogger`, `LoggerFactory`, ALS context, trace utilities, types |
+| `@cf-logger/logger` | Core: `createLogger`, `createSimpleLogger`, `LoggerFactory`, `loggerOptionsFromEnv`, ALS context, trace utilities, types |
 | `@cf-logger/logger/hono` | `useLogger`, `generateId` — Hono middleware |
 | `@cf-logger/logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession` |
 
 ---
+
+## Cloudflare Worker Requirements
+
+`@cf-logger/logger` uses `AsyncLocalStorage` through `node:async_hooks`.
+Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
+
+```jsonc
+{
+  "compatibility_flags": ["nodejs_compat"]
+}
+```
+
+The package expects these environment variables when using `loggerOptionsFromEnv()` or `tracedWorker()`:
+
+```jsonc
+{
+  "vars": {
+    "NAME": "my-worker",
+    "LOG_LEVEL": "info",
+    "ENVIRONMENT": "production",
+    "VERSION": "1.0.0"
+  }
+}
+```
 
 ## Core API (`@cf-logger/logger`)
 
@@ -126,6 +150,16 @@ import {
 } from '@cf-logger/logger'
 ```
 
+### `loggerOptionsFromEnv(env)`
+
+Map the conventional Worker environment variables into `LoggerOptions`.
+
+```ts
+import { createLogger, loggerOptionsFromEnv } from '@cf-logger/logger'
+
+const logger = createLogger(loggerOptionsFromEnv(env))
+```
+
 ---
 
 ## Hono Middleware (`@cf-logger/logger/hono`)
@@ -139,6 +173,7 @@ Creates a Hono middleware that:
 4. Sets `c.var.logger`, `c.var.requestId`, and `c.var.traceId` for use in route handlers
 5. Adds `requestId` to the ALS logger context so it appears on every log line
 6. Sets response headers: `X-Request-Id`, `X-Trace-Id`, `traceparent`
+7. Lets Hono own error responses, then logs `request.error` and `request.end` using the final `c.res.status`
 
 ```ts
 import { Hono } from 'hono'
@@ -165,6 +200,8 @@ app.get('/', (c) => {
   return c.text('ok')
 })
 ```
+
+`useLogger()` does not catch, create, or replace error responses. It lets Hono run downstream handlers and app-level `onError()` normally, then checks `c.error` after `await next()`. Failed requests emit `request.error` with the final `c.res.status`; all requests emit `request.end` with the final `c.res.status`.
 
 ---
 
@@ -292,12 +329,10 @@ export default class extends TracedEntrypoint<Env> {
 
 ### Service Type Convention
 
-Define shared interfaces in a `services.d.ts`:
+Define shared service method interfaces and use `TracedServiceBinding<T>` for Worker bindings:
 
 ```ts
-export interface ServiceSession<T> {
-  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string): T;
-}
+import type { TracedServiceBinding } from '@cf-logger/logger/workers'
 
 export interface BindService {
   add(a: number, b: number): Promise<number>;
@@ -309,8 +344,8 @@ Then type your env bindings:
 
 ```ts
 interface Env {
-  BIND: ServiceSession<BindService>;
-  MATH: ServiceSession<MathService>;
+  BIND: TracedServiceBinding<BindService>;
+  MATH: TracedServiceBinding<MathService>;
 }
 ```
 

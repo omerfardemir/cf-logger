@@ -123,13 +123,10 @@ const b = await session.multiply(3, 4)
 
 ### Service Interfaces
 
-Define shared interfaces in `workers/services.d.ts`:
+Define shared service method interfaces and use the package-provided traced binding type:
 
 ```ts
-/** All traced bindings expose session(traceparent, fields?, tracestate?) */
-export interface ServiceSession<T> {
-  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string): T;
-}
+import type { TracedServiceBinding } from '@cf-logger/logger/workers'
 
 export interface BindService {
   add(a: number, b: number): Promise<number>;
@@ -146,8 +143,8 @@ Type your env bindings:
 
 ```ts
 interface Env {
-  BIND: ServiceSession<BindService>;
-  MATH: ServiceSession<MathService>;
+  BIND: TracedServiceBinding<BindService>;
+  MATH: TracedServiceBinding<MathService>;
 }
 ```
 

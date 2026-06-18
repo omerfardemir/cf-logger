@@ -16,7 +16,7 @@ cf-logger/
 │           ├── middleware.ts # Hono middleware (useLogger)
 │           ├── hono.ts      # Re-export for @cf-logger/logger/hono
 │           └── workers.ts   # Session Factory for RPC trace propagation
-├── workers/                 # Example workers demonstrating usage
+├── workers/                 # Local Worker fixtures for e2e verification
 │   ├── services.d.ts        # Shared RPC service interfaces
 │   ├── main-worker/         # Gateway worker (Hono + routes)
 │   ├── bind-worker/         # Mid-tier worker (single + multi-hop RPC)
@@ -32,6 +32,8 @@ pnpm dev   # starts all 3 workers with multi-worker dev
 ```
 
 Hit `http://localhost:8787/` to see structured logs with trace context across workers.
+
+`workers/` contains local Cloudflare Worker fixtures used to verify real RPC trace propagation. The only package intended for npm publish is `packages/logger`.
 
 ## Package: `@cf-logger/logger`
 
