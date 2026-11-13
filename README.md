@@ -448,19 +448,35 @@ cf-logger/
 │   ├── main-worker/      # Gateway worker (Hono + routes)
 │   ├── bind-worker/      # Mid-tier worker (single + multi-hop RPC)
 │   └── math-worker/      # Leaf worker (multiply, divide)
-├── scripts/e2e-local.ps1 # Starts the dev workers and probes trace propagation
+├── scripts/e2e-local.mjs # Starts the dev workers, probes trace propagation, checks their logs
 └── docs/                 # Design deep-dives
 ```
 
 The dev workers import `cf-logger` by package name, which resolves to this package's built `dist/` — run `pnpm build` before `pnpm dev`.
 
-| Script                             | Purpose                                                    |
-| ---------------------------------- | ---------------------------------------------------------- |
-| `pnpm build`                       | Build `dist/` with tsdown                                  |
-| `pnpm test`                        | Run unit tests (Vitest)                                    |
-| `pnpm typecheck` / `typecheck:dev` | Typecheck the package / the dev workers (needs a build)    |
-| `pnpm lint` / `lint:fix`           | Lint with oxlint                                           |
-| `pnpm format` / `format:check`     | Format with oxfmt                                          |
-| `pnpm dev`                         | Run all three dev workers on `http://localhost:8787`       |
-| `pnpm e2e:local`                   | Build, start the dev workers, and assert trace propagation |
-| `pnpm release:check`               | Everything above plus `npm pack --dry-run`                 |
+| Script                             | Purpose                                                                      |
+| ---------------------------------- | ---------------------------------------------------------------------------- |
+| `pnpm build`                       | Build `dist/` with tsdown                                                    |
+| `pnpm test`                        | Run unit tests (Vitest)                                                      |
+| `pnpm typecheck` / `typecheck:dev` | Typecheck the package / the dev workers (needs a build)                      |
+| `pnpm lint` / `lint:fix`           | Lint with oxlint                                                             |
+| `pnpm format` / `format:check`     | Format with oxfmt                                                            |
+| `pnpm dev`                         | Run all three dev workers on `http://localhost:8787`                         |
+| `pnpm e2e:local`                   | Build, start the dev workers, assert trace propagation in responses and logs |
+| `pnpm release:check`               | Everything above plus `npm pack --dry-run`                                   |
+
+CI (`.github/workflows/ci.yml`) runs every check above, plus the e2e, on Ubuntu for each pull request and push to `main`.
+
+## Releasing
+
+Releases are cut by hand from the **Publish** workflow (Actions → Publish → Run workflow) on `main`. Pick `patch`, `minor`, or `major` and it:
+
+1. runs the full CI suite on that commit,
+2. bumps `package.json`, commits `chore(release): vX.Y.Z`, and tags `vX.Y.Z`,
+3. pushes the commit and tag to `main` together (rejected if `main` moved after you started it),
+4. publishes to npm,
+5. creates a GitHub Release with generated notes.
+
+One-time setup: create an npm granular access token with read and write access to `cf-logger` (allowed to publish without 2FA), and save it as the `NPM_TOKEN` repository secret (Settings → Secrets and variables → Actions).
+
+If npm publish fails after step 3, the version commit and tag are already on `main`. Fix the cause, then publish that tag by hand (`git checkout vX.Y.Z && pnpm install && npm publish --access public`) and create the release with `gh release create vX.Y.Z --verify-tag --generate-notes`. Don't re-run the workflow, because it would bump the version again.

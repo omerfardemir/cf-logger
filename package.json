@@ -36,7 +36,7 @@
     "dev": "wrangler dev -c dev/main-worker/wrangler.jsonc -c dev/bind-worker/wrangler.jsonc -c dev/math-worker/wrangler.jsonc",
     "dev:deploy": "wrangler deploy -c dev/main-worker/wrangler.jsonc && wrangler deploy -c dev/bind-worker/wrangler.jsonc && wrangler deploy -c dev/math-worker/wrangler.jsonc",
     "cf-typegen": "wrangler types -c dev/main-worker/wrangler.jsonc dev/main-worker/worker-configuration.d.ts --include-runtime=false && wrangler types -c dev/bind-worker/wrangler.jsonc dev/bind-worker/worker-configuration.d.ts --include-runtime=false && wrangler types -c dev/math-worker/wrangler.jsonc dev/math-worker/worker-configuration.d.ts --include-runtime=false",
-    "e2e:local": "powershell -ExecutionPolicy Bypass -File scripts/e2e-local.ps1",
+    "e2e:local": "node scripts/e2e-local.mjs",
     "prepack": "pnpm run build && pnpm run typecheck && pnpm run test",
     "pack:dry": "npm pack --dry-run",
     "release:check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm typecheck:dev && pnpm test && pnpm pack:dry && pnpm e2e:local"
