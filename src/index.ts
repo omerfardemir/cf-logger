@@ -3,7 +3,7 @@ export type { LogFields, TraceContext, SpanContext, LoggerOptions, Logger, LogLe
 export {
   createLogger,
   createSimpleLogger,
-  LoggerFactory,
+  withSpan,
   getLogger,
   setLoggerContext,
   runWithLogger,

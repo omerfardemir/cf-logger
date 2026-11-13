@@ -26,6 +26,7 @@ import {
   getLogger,
   _reset,
   createSimpleLogger,
+  createLogger,
   _captureEntries,
 } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
@@ -102,7 +103,7 @@ describe('Session Factory trace propagation', () => {
       }
     }
 
-    const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+    const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
     const receivedTrace = session.getTrace()
 
     expect(receivedTrace).not.toBeNull()
@@ -125,11 +126,14 @@ describe('Session Factory trace propagation', () => {
       },
     }
 
-    runWithLogger({ logger: callerLogger, trace: callerTrace }, () => {
+    let callerContextTrace: ReturnType<typeof getTraceContext>
+    runWithLogger({ logger: callerLogger, traceparent: buildTraceparent(callerTrace) }, () => {
+      callerContextTrace = getTraceContext()
       tracedSession(mockBinding)
     })
 
-    expect(receivedTraceparent).toBe(buildTraceparent(callerTrace))
+    expect(receivedTraceparent).toBe(buildTraceparent(callerContextTrace!))
+    expect(callerContextTrace!.traceId).toBe(callerTrace.traceId)
   })
 
   it('tracedSession() passes empty string when no ALS context', () => {
@@ -159,21 +163,23 @@ describe('Session Factory trace propagation', () => {
 
     const mockBinding = {
       session(traceparent: string) {
-        return new TestSession(traceparent, { service: 'receiver' }, {})
+        return new TestSession(traceparent, createLogger({ service: 'receiver' }), {})
       },
     }
 
     let receivedTrace: ReturnType<typeof getTraceContext>
+    let callerContextTrace: ReturnType<typeof getTraceContext>
 
-    runWithLogger({ logger: callerLogger, trace: callerTrace }, () => {
+    runWithLogger({ logger: callerLogger, traceparent: buildTraceparent(callerTrace) }, () => {
+      callerContextTrace = getTraceContext()
       const session = tracedSession(mockBinding)
       receivedTrace = session.getTrace()
     })
 
     expect(receivedTrace!).not.toBeNull()
     expect(receivedTrace!.traceId).toBe(callerTrace.traceId)
-    expect(receivedTrace!.parentSpanId).toBe(callerTrace.spanId)
-    expect(receivedTrace!.spanId).not.toBe(callerTrace.spanId)
+    expect(receivedTrace!.parentSpanId).toBe(callerContextTrace!.spanId)
+    expect(receivedTrace!.spanId).not.toBe(callerContextTrace!.spanId)
   })
 
   it('isolates traces across concurrent sessions', async () => {
@@ -191,7 +197,7 @@ describe('Session Factory trace propagation', () => {
 
     const mockBinding = {
       session(traceparent: string) {
-        return new TestSession(traceparent, { service: 'receiver' }, {})
+        return new TestSession(traceparent, createLogger({ service: 'receiver' }), {})
       },
     }
 
@@ -199,13 +205,13 @@ describe('Session Factory trace propagation', () => {
 
     const [resultA, resultB] = await Promise.all([
       new Promise<ReturnType<typeof getTraceContext>>((resolve) => {
-        runWithLogger({ logger: callerLogger, trace: traceA }, () => {
+        runWithLogger({ logger: callerLogger, traceparent: buildTraceparent(traceA) }, () => {
           const session = tracedSession(mockBinding)
           resolve(session.getTrace())
         })
       }),
       new Promise<ReturnType<typeof getTraceContext>>((resolve) => {
-        runWithLogger({ logger: callerLogger, trace: traceB }, () => {
+        runWithLogger({ logger: callerLogger, traceparent: buildTraceparent(traceB) }, () => {
           const session = tracedSession(mockBinding)
           resolve(session.getTrace())
         })
@@ -231,7 +237,7 @@ describe('Session Factory trace propagation', () => {
       }
     }
 
-    const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+    const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
     session.doWork()
 
     const entry = entries.find((e) => e.message === 'doing work')
@@ -262,7 +268,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
       const result = session.doWork()
 
       expect(result).toBe(42)
@@ -282,7 +288,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
       const result = session.doWork()
 
       expect(result).toBe(42)
@@ -314,7 +320,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
       expect(() => session.doWork()).toThrow('boom')
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -340,7 +346,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
       expect(() => session.doWork()).toThrow('stack test')
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -368,7 +374,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
       const result = await session.doWork()
 
       expect(result).toBe(99)
@@ -397,7 +403,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
       await expect(session.doWork()).rejects.toThrow('async boom')
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -423,7 +429,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
       await expect(session.doWork()).rejects.toThrow('async stack test')
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -447,7 +453,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, { service: 'test-svc' }, {})
+      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
       session.doWork()
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -479,12 +485,13 @@ describe('Session Factory trace propagation', () => {
 
     const mockBinding = {
       session(traceparent: string) {
-        return new TestSession(traceparent, { service: 'receiver' }, {})
+        return new TestSession(traceparent, createLogger({ service: 'receiver' }), {})
       },
     }
 
-    const result = await runWithLogger({ logger: callerLogger, trace: callerTrace }, () =>
-      withTrace(mockBinding, (s) => s.add(5, 7)),
+    const result = await runWithLogger(
+      { logger: callerLogger, traceparent: buildTraceparent(callerTrace) },
+      () => withTrace(mockBinding, (s) => s.add(5, 7)),
     )
 
     expect(result).toBe(12)
@@ -511,6 +518,34 @@ describe('TracedEntrypoint', () => {
     const opts = (entrypoint as any).loggerOptions
     expect(opts.service).toBe('unknown')
     expect(opts.level).toBe('info')
+  })
+
+  it('shares one Root Logger per isolate for the same Logger Options', () => {
+    const env = { NAME: 'root-svc', LOG_LEVEL: 'info' }
+    const a = new TracedEntrypoint({} as any, env)
+    const b = new TracedEntrypoint({} as any, { ...env })
+    const other = new TracedEntrypoint({} as any, { NAME: 'other-svc', LOG_LEVEL: 'info' })
+
+    expect((a as any).rootLogger).toBe((b as any).rootLogger)
+    expect((a as any).rootLogger).not.toBe((other as any).rootLogger)
+  })
+
+  it('Root Logger carries per-process fields from env', () => {
+    const entries = _captureEntries()
+    const entrypoint = new TracedEntrypoint({} as any, {
+      NAME: 'env-svc',
+      LOG_LEVEL: 'info',
+      ENVIRONMENT: 'staging',
+      VERSION: '2.0.0',
+    })
+
+    ;(entrypoint as any).rootLogger.info('hello')
+
+    expect(entries[0]).toMatchObject({
+      service: 'env-svc',
+      environment: 'staging',
+      version: '2.0.0',
+    })
   })
 })
 
@@ -558,8 +593,9 @@ describe('tracedWorker', () => {
     const callerTrace = resolveTrace()
     const callerLogger = createSimpleLogger({ service: 'caller' })
 
-    const result = await runWithLogger({ logger: callerLogger, trace: callerTrace }, () =>
-      withTrace(binding, (s) => s.add(3, 4)),
+    const result = await runWithLogger(
+      { logger: callerLogger, traceparent: buildTraceparent(callerTrace) },
+      () => withTrace(binding, (s) => s.add(3, 4)),
     )
 
     expect(result).toBe(7)
@@ -611,7 +647,7 @@ describe('traceFlags sampling', () => {
       }
     }
 
-    const session = new TestSession(unsampledTp, { service: 'test-svc' }, {})
+    const session = new TestSession(unsampledTp, createLogger({ service: 'test-svc' }), {})
     const result = session.doWork()
     expect(result).toBe(42)
 
@@ -635,7 +671,7 @@ describe('traceFlags sampling', () => {
       }
     }
 
-    const session = new TestSession(sampledTp, { service: 'test-svc' }, {})
+    const session = new TestSession(sampledTp, createLogger({ service: 'test-svc' }), {})
     const result = session.doWork()
     expect(result).toBe(42)
 

@@ -1,7 +1,7 @@
 import pino from 'pino'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { LogFields, LoggerOptions, Logger, TraceContext, ALSStore } from './types'
-import { resolveTrace, buildTraceparent } from './trace'
+import type { LogFields, LoggerOptions, Logger, TraceContext, ALSStore, SpanContext } from './types'
+import { resolveTrace, buildTraceparent, generateSpanId } from './trace'
 
 const als = new AsyncLocalStorage<ALSStore>()
 
@@ -198,63 +198,6 @@ export function createLogger<T extends LogFields = LogFields>(
 }
 
 /**
- * Logger factory that creates per-request child loggers within ALS context.
- *
- * @template T - The type of user-defined log fields.
- *
- * @example
- * ```ts
- * const factory = new LoggerFactory({ service: 'api', level: 'info' })
- * factory.runInContext(trace, () => {
- *   getLogger().info('inside ALS')
- * })
- * ```
- */
-export class LoggerFactory<T extends LogFields = LogFields> {
-  private readonly basePino: pino.Logger
-
-  constructor(private readonly options: LoggerOptions) {
-    this.basePino = createPino(options.level ?? 'debug')
-  }
-
-  /**
-   * Run a function within an ALS context with the given trace context.
-   *
-   * Creates a per-request Pino child and Logger wrapper.
-   *
-   * @param {TraceContext} trace - The W3C trace context for this request.
-   * @param {() => R} fn - The function to execute within the logging context.
-   * @param {Partial<T>} [contextFields] - Optional initial log fields.
-   * @param {string} [levelOverride] - Optional per-request level override.
-   * @returns {R} The return value of `fn`.
-   */
-  runInContext<R>(
-    trace: TraceContext,
-    fn: () => R,
-    contextFields?: Partial<T>,
-    levelOverride?: string,
-  ): R {
-    const { service, level: _level, environment, version } = this.options
-    const childOpts: Record<string, unknown> = {
-      service,
-      ...(environment ? { environment } : {}),
-      ...(version ? { version } : {}),
-    }
-    if (levelOverride) {
-      childOpts.level = levelOverride
-    }
-    const requestPino = this.basePino.child(childOpts)
-    const logger = asLogger<T>(requestPino)
-    const store: ALSStore = {
-      trace,
-      fields: (contextFields ?? {}) as T & LogFields,
-      logger,
-    }
-    return als.run(store, fn)
-  }
-}
-
-/**
  * Cached standalone loggers keyed by service name.
  */
 const _cache = new Map<string | symbol, Logger>()
@@ -267,9 +210,9 @@ const DEFAULT_KEY = Symbol('default')
 /**
  * Get a logger for the current context.
  *
- * - **Inside ALS** (middleware / `runWithLogger`): returns the request-scoped
- *   logger with trace context. `service` is ignored (already set by factory).
- * - **Outside ALS**: returns a cached standalone logger, optionally tagged with
+ * - **Inside a Logging Context** (`runWithLogger`, `useLogger`, Traced Sessions):
+ *   returns the context's logger. `service` is ignored.
+ * - **Outside a Logging Context**: returns a cached standalone logger, optionally tagged with
  *   a service name.
  *
  * @template T - The type of user-defined log fields.
@@ -296,11 +239,11 @@ export function getLogger<T extends LogFields = LogFields>(service?: string): Lo
 }
 
 /**
- * Enrich the current logging context with extra fields.
+ * Add Context Fields to the current Logging Context.
  *
- * - **Inside ALS**: fields appear on all subsequent log lines in the same request
- *   (via pino mixin).
- * - **Outside ALS**: replaces every cached logger with a child that includes these
+ * - **Inside a Logging Context**: fields appear on all subsequent log lines in
+ *   this context and in Spans opened after this call (not in the outer context).
+ * - **Outside a Logging Context**: replaces every cached logger with a child that includes these
  *   fields, so subsequent `getLogger(service)` calls include them.
  *
  * @template T - The type of user-defined log fields.
@@ -325,45 +268,137 @@ export function setLoggerContext<T extends LogFields = LogFields>(fields: Partia
 }
 
 /**
- * Run a function within a logging context.
+ * Run a function within a Logging Context.
  *
- * Framework-agnostic, use this directly in any runtime (Node.js, CF Workers,
- * RPC entrypoints, scheduled handlers, queue consumers, etc.).
+ * The single way to open a Logging Context, in any runtime (Hono, RPC sessions,
+ * scheduled handlers, queue consumers, Node.js). It continues the trace from
+ * `traceparent` / `tracestate` when they are valid, otherwise starts a new root
+ * trace, and always gives this work its own span ID.
+ *
+ * `logger` is a Root Logger: create it once per process or isolate and pass the
+ * same instance to every context. It must carry only per-process data; put
+ * per-unit-of-work data (`requestId`, `userId`, ...) in `fields`.
  *
  * @template T - The type of user-defined log fields.
  * @template R - The return type of `fn`.
  * @param {object} options - Context options.
- * @param {Logger<T>} options.logger - The logger instance for this context.
- * @param {TraceContext} [options.trace] - An already-parsed trace context.
- * @param {string | null} [options.traceparent] - A raw `traceparent` header to parse. Ignored when `trace` is set.
- * @param {Partial<T>} [options.fields] - Initial log fields.
- * @param {() => R} fn - The function to execute inside the ALS context.
+ * @param {Logger<T>} options.logger - The Root Logger this context logs through.
+ * @param {string | null} [options.traceparent] - Incoming W3C `traceparent` value.
+ * @param {string | null} [options.tracestate] - Incoming W3C `tracestate` value.
+ * @param {Partial<T>} [options.fields] - Initial Context Fields. Copied, never mutated.
+ * @param {() => R} fn - The function to execute inside the Logging Context.
  * @returns {R} The return value of `fn`.
  *
  * @example
  * ```ts
  * const logger = createLogger({ service: 'worker' })
  * runWithLogger({ logger, traceparent: req.headers.get('traceparent') }, () => {
- *   getLogger().info('inside ALS')
+ *   getLogger().info('inside the logging context')
  * })
  * ```
  */
 export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
   options: {
     logger: Logger<T>
-    trace?: TraceContext
     traceparent?: string | null
+    tracestate?: string | null
     fields?: Partial<T> | LogFields
   },
   fn: () => R,
 ): R {
-  const trace = options.trace ?? resolveTrace(options.traceparent)
   const store: ALSStore = {
-    trace,
-    fields: (options.fields ?? {}) as T,
-    logger: options.logger,
+    trace: resolveTrace(options.traceparent, options.tracestate),
+    fields: { ...options.fields } as LogFields,
+    logger: options.logger.child({}),
   }
   return als.run(store, fn)
+}
+
+/**
+ * Run `fn` as a named Span nested inside the current Logging Context.
+ *
+ * The Span gets a new span ID whose parent is the current span ID, on the same
+ * trace. Context Fields are copied in: fields set inside the Span stay inside it.
+ * When the trace is sampled, a `span.end` line with timing and status is logged
+ * once `fn` settles (sync or async). Errors are logged and rethrown.
+ *
+ * Outside a Logging Context, `fn` simply runs: no Span, no error.
+ *
+ * @template R - The return type of `fn`.
+ * @param {string} operation - Operation name (e.g. `'db.query'`).
+ * @param {() => R} fn - The work to time.
+ * @returns {R} The return value of `fn`.
+ *
+ * @example
+ * ```ts
+ * const user = await withSpan('db.getUser', () => db.getUser(id))
+ * ```
+ */
+export function withSpan<R>(operation: string, fn: () => R): R {
+  const outer = als.getStore()
+  if (!outer) return fn()
+
+  const store: ALSStore = {
+    trace: { ...outer.trace, spanId: generateSpanId(), parentSpanId: outer.trace.spanId },
+    fields: { ...outer.fields },
+    logger: outer.logger,
+  }
+  return als.run(store, () => recordSpan(operation, fn))
+}
+
+/**
+ * Time `fn` as a Span covering the *current* Logging Context (no new span ID).
+ *
+ * Used by `withSpan()` after it opens a nested context, and by Traced Sessions,
+ * whose whole Logging Context is the Span. Logs only when the trace is sampled.
+ *
+ * @internal Not exported from the package entry points.
+ */
+export function recordSpan<R>(operation: string, fn: () => R): R {
+  const store = als.getStore()
+  if (!store || (store.trace.traceFlags & 0x01) !== 0x01) return fn()
+
+  const { logger } = store
+  const startTime = Date.now()
+
+  const emit = (status: SpanContext['status'], error?: unknown) => {
+    const endTime = Date.now()
+    const span: SpanContext = {
+      operation,
+      startTime,
+      endTime,
+      duration: endTime - startTime,
+      status,
+      ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+    }
+    if (status === 'ERROR') {
+      logger.error({ span, err: error }, 'span.end %s', operation)
+    } else {
+      logger.info({ span }, 'span.end %s', operation)
+    }
+  }
+
+  let result: R
+  try {
+    result = fn()
+  } catch (err) {
+    emit('ERROR', err)
+    throw err
+  }
+  if (result instanceof Promise) {
+    return result.then(
+      (value) => {
+        emit('OK')
+        return value
+      },
+      (err) => {
+        emit('ERROR', err)
+        throw err
+      },
+    ) as R
+  }
+  emit('OK')
+  return result
 }
 
 /**

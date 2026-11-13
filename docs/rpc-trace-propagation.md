@@ -99,14 +99,14 @@ export default tracedWorker(MathSession)
 **`TracedSession`** handles:
 
 - Stores `traceparent` in `#private` field (never sent over wire)
-- `traced(fn, operation?)` sets up ALS with logger + parsed trace context
-- `this.logger` returns the request-scoped logger with traceId/spanId
+- `traced(fn, operation?)` opens a Logging Context (`runWithLogger`) continuing the caller's trace; with `operation`, the call is reported as a Span
+- `this.logger` returns the Logging Context's logger with traceId/spanId
 - `this.env` provides access to bindings for multi-hop RPC
 
 **`tracedWorker(SessionClass)`** generates the entrypoint:
 
 - Implements `session(traceparent)` → instantiates your session class
-- Reads `LoggerOptions` from env vars (NAME, LOG_LEVEL, ENVIRONMENT, VERSION)
+- Builds one Root Logger per isolate from env vars (NAME, LOG_LEVEL, ENVIRONMENT, VERSION) and hands it to every session
 - Includes a default `fetch()` returning 404
 
 ### Caller Side

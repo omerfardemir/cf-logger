@@ -60,7 +60,7 @@ export interface TraceContext {
 }
 
 /**
- * Structured span data emitted by `traced()` when an operation name is provided.
+ * Structured span data logged on `span.end` by `withSpan()` and `TracedSession.traced()`.
  *
  * Trace IDs (`traceId`, `spanId`, `parentSpanId`) are already on every log line
  * via the ALS mixin they are not duplicated inside the span object.
@@ -81,9 +81,9 @@ export interface SpanContext {
 }
 
 /**
- * Shape of the `AsyncLocalStorage` store for each request.
+ * Shape of the `AsyncLocalStorage` store behind each Logging Context.
  *
- * Created internally by `runWithLogger()` and the Hono middleware.
+ * Created internally by `runWithLogger()` and `withSpan()`; never exposed.
  *
  * @template T - The type of user-defined log fields.
  */
