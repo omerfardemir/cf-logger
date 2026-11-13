@@ -1,13 +1,34 @@
 import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
-import type { LogFields, Logger, LoggerOptions } from './types'
-import { createLogger, getLogger, getTraceContext, recordSpan, runWithLogger } from './logger'
-import { buildTraceparent } from './trace'
+import type { LogFields, Logger, LoggerOptions, TraceCarrier } from './types'
+import {
+  createLogger,
+  getLogger,
+  getTraceCarrier,
+  getTraceContext,
+  recordSpan,
+  runWithLogger,
+} from './logger'
 import { loggerOptionsFromEnv } from './env'
 
 export { loggerOptionsFromEnv } from './env'
 
+/**
+ * What a caller hands a Traced Session: its Trace Carrier plus any Context
+ * Fields to propagate. One plain object, so adding keys never changes the
+ * `session()` call.
+ */
+export interface SessionInit extends TraceCarrier {
+  /** Context Fields to carry into the receiver's Logging Context. */
+  fields?: LogFields
+}
+
+/**
+ * A service binding whose entrypoint exposes `session(init)`.
+ *
+ * @template T - The Traced Session type returned by `session()`.
+ */
 export type TracedServiceBinding<T> = {
-  session(traceparent: string, fields?: LogFields, tracestate?: string): T
+  session(init: SessionInit): T
 }
 
 /**
@@ -58,32 +79,20 @@ function rootLoggerFor(options: LoggerOptions): Logger {
  * ```
  */
 export class TracedSession<E = unknown> extends RpcTarget {
-  #traceparent: string
-  #tracestate: string | undefined
+  #init: SessionInit
   #rootLogger: Logger
-  #fields: LogFields
   /** Worker env instance property, never exposed over RPC. */
   protected env: E
 
   /**
-   * @param {string} traceparent - The W3C `traceparent` header value from the caller.
+   * @param {SessionInit} init - The caller's Trace Carrier and Context Fields.
    * @param {Logger} rootLogger - The isolate's Root Logger (see `TracedEntrypoint.rootLogger`).
    * @param {E} env - The worker environment bindings.
-   * @param {LogFields} [fields] - Optional initial Context Fields from the caller.
-   * @param {string} [tracestate] - Optional W3C `tracestate` header value.
    */
-  constructor(
-    traceparent: string,
-    rootLogger: Logger,
-    env: E,
-    fields?: LogFields,
-    tracestate?: string,
-  ) {
+  constructor(init: SessionInit, rootLogger: Logger, env: E) {
     super()
-    this.#traceparent = traceparent
-    this.#tracestate = tracestate
+    this.#init = { ...init }
     this.#rootLogger = rootLogger
-    this.#fields = fields ?? {}
     this.env = env
   }
 
@@ -103,9 +112,9 @@ export class TracedSession<E = unknown> extends RpcTarget {
     return runWithLogger(
       {
         logger: this.#rootLogger,
-        traceparent: this.#traceparent,
-        tracestate: this.#tracestate,
-        fields: this.#fields,
+        traceparent: this.#init.traceparent,
+        tracestate: this.#init.tracestate,
+        fields: this.#init.fields,
       },
       operation ? () => recordSpan(operation, fn) : fn,
     )
@@ -133,8 +142,8 @@ export class TracedSession<E = unknown> extends RpcTarget {
  * @example
  * ```ts
  * export default class extends TracedEntrypoint<Env> {
- *   session(traceparent: string, fields?: LogFields, tracestate?: string) {
- *     return new MySession(traceparent, this.rootLogger, this.env, fields, tracestate)
+ *   session(init: SessionInit) {
+ *     return new MySession(init, this.rootLogger, this.env)
  *   }
  * }
  * ```
@@ -187,16 +196,10 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
  * ```
  */
 export function tracedWorker<S extends TracedSession>(
-  SessionClass: new (
-    traceparent: string,
-    rootLogger: Logger,
-    env: any,
-    fields?: LogFields,
-    tracestate?: string,
-  ) => S,
+  SessionClass: new (init: SessionInit, rootLogger: Logger, env: any) => S,
 ): {
   new (...args: any[]): {
-    session(traceparent: string, fields?: LogFields, tracestate?: string): S
+    session(init: SessionInit): S
     fetch(): Response | Promise<Response>
   }
 } {
@@ -210,8 +213,8 @@ export function tracedWorker<S extends TracedSession>(
       return new Response(null, { status: 404 })
     }
 
-    session(traceparent: string, fields?: LogFields, tracestate?: string): S {
-      return new SessionClass(traceparent, this.rootLogger, this.env, fields, tracestate)
+    session(init: SessionInit): S {
+      return new SessionClass(init ?? {}, this.rootLogger, this.env)
     }
   } as any
 }
@@ -219,7 +222,8 @@ export function tracedWorker<S extends TracedSession>(
 /**
  * Create a traced session from a service binding.
  *
- * Reads `traceparent` from the current Logging Context and passes it to `binding.session()`.
+ * Passes the current Trace Carrier (and `fields`) to `binding.session()`. Outside a
+ * Logging Context the carrier is empty and the receiver starts a new root trace.
  *
  * @template T - The session type returned by `binding.session()`.
  * @param {object} binding - The service binding with a `session()` method.
@@ -237,9 +241,7 @@ export function tracedWorker<S extends TracedSession>(
  * ```
  */
 export function tracedSession<T>(binding: TracedServiceBinding<T>, fields?: LogFields): T {
-  const trace = getTraceContext()
-  const traceparent = trace ? buildTraceparent(trace) : ''
-  return binding.session(traceparent, fields, trace?.tracestate)
+  return binding.session({ ...getTraceCarrier(), ...(fields ? { fields } : {}) })
 }
 
 /**

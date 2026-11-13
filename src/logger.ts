@@ -1,7 +1,15 @@
 import pino from 'pino/browser.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { LogFields, LoggerOptions, Logger, TraceContext, ALSStore, SpanContext } from './types'
-import { resolveTrace, buildTraceparent, generateSpanId } from './trace'
+import type {
+  LogFields,
+  LoggerOptions,
+  Logger,
+  TraceCarrier,
+  TraceContext,
+  ALSStore,
+  SpanContext,
+} from './types'
+import { resolveTrace, generateSpanId, injectCarrier, toCarrier } from './trace'
 import {
   buildRecord,
   nodeSink,
@@ -330,16 +338,13 @@ export function recordSpan<R>(operation: string, fn: () => R): R {
 }
 
 /**
- * Read the current trace context from ALS.
+ * Read the current Trace Context (IDs and flags).
  *
- * @returns {TraceContext | null} The current trace context, or `null` if called outside a logging context.
+ * @returns {TraceContext | null} A copy of the current Trace Context, or `null` outside a Logging Context.
  *
  * @example
  * ```ts
- * const trace = getTraceContext()
- * if (trace) {
- *   c.header('traceparent', buildTraceparent(trace))
- * }
+ * const traceId = getTraceContext()?.traceId
  * ```
  */
 export function getTraceContext(): TraceContext | null {
@@ -348,24 +353,38 @@ export function getTraceContext(): TraceContext | null {
 }
 
 /**
- * A `fetch` wrapper that injects the current `traceparent` header from ALS.
+ * Get the current Trace Carrier, to pass the trace on over any transport.
  *
- * Outside an ALS context, behaves like regular `fetch()`.
+ * On the receiving side, continue it with `runWithLogger({ logger, ...carrier })`.
+ *
+ * @returns {TraceCarrier} `{ traceparent, tracestate? }`, or `{}` outside a Logging Context.
+ *
+ * @example
+ * ```ts
+ * await env.QUEUE.send({ ...payload, trace: getTraceCarrier() })
+ * ```
+ */
+export function getTraceCarrier(): TraceCarrier {
+  const store = als.getStore()
+  return store ? toCarrier(store.trace) : {}
+}
+
+/**
+ * A `fetch` wrapper that sends the current Trace Carrier as
+ * `traceparent` / `tracestate` headers.
+ *
+ * Outside a Logging Context, behaves like regular `fetch()`.
  *
  * @param {RequestInfo | URL} input - The fetch URL or Request.
- * @param {RequestInit} [init] - Optional fetch init options.
+ * @param {RequestInit} [init] - Optional fetch init options. Never mutated.
  * @returns {Promise<Response>} The fetch response.
  */
 export function tracedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const trace = getTraceContext()
-  if (!trace) return fetch(input, init)
+  const carrier = getTraceCarrier()
+  if (!carrier.traceparent) return fetch(input, init)
 
-  const traceparent = buildTraceparent(trace)
   const headers = new Headers(init?.headers)
-  headers.set('traceparent', traceparent)
-  if (trace.tracestate) {
-    headers.set('tracestate', trace.tracestate)
-  }
+  injectCarrier(carrier, (name, value) => headers.set(name, value))
   return fetch(input, { ...init, headers })
 }
 

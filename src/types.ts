@@ -60,6 +60,19 @@ export interface TraceContext {
 }
 
 /**
+ * The wire form of a Trace Context, as it travels in HTTP headers, an RPC
+ * `session()` call, or a queue message.
+ *
+ * Get one with `getTraceCarrier()`; continue it with `runWithLogger({ logger, ...carrier })`.
+ */
+export interface TraceCarrier {
+  /** W3C `traceparent` value. Absent outside a Logging Context. */
+  traceparent?: string
+  /** W3C `tracestate` value, when the trace has one. */
+  tracestate?: string
+}
+
+/**
  * Structured span data logged on `span.end` by `withSpan()` and `TracedSession.traced()`.
  *
  * Trace IDs (`traceId`, `spanId`, `parentSpanId`) are already on every log line

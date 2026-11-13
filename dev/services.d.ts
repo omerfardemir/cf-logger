@@ -1,8 +1,8 @@
 /** Shared RPC service interfaces */
 
-export interface ServiceSession<T> {
-  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string): T
-}
+import type { TracedServiceBinding } from 'cf-logger'
+
+export type ServiceSession<T> = TracedServiceBinding<T>
 
 /** bind-worker: math operations + multi-hop demo */
 export interface BindService {

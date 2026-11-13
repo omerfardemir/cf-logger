@@ -30,11 +30,11 @@ Pass `traceparent` as an extra argument to every RPC method.
 
 ### ✅ Approach 4: Session Factory Pattern (Adopted)
 
-Use `RpcTarget` private fields to carry trace context. The caller calls `binding.session(traceparent)` which returns an `RpcTarget` instance with the traceparent stored in a `#private` field (never serialized over the wire). RPC methods on the session wrap their logic in `traced()` which sets up ALS with the correct trace context.
+Use `RpcTarget` private fields to carry trace context. The caller calls `binding.session({ traceparent, tracestate, fields })` which returns an `RpcTarget` instance with that object stored in a `#private` field (never serialized over the wire). RPC methods on the session wrap their logic in `traced()` which sets up ALS with the correct trace context.
 
 **Why it works:**
 
-- `binding.session(traceparent)` is a standard RPC method call — CF supports passing strings
+- `binding.session({ traceparent, tracestate, fields })` is a standard RPC method call — CF supports passing plain objects
 - Private fields (`#traceparent`) on `RpcTarget` stay server-side — only prototype methods are exposed via JSRPC
 - Each session generates a new `spanId` and links `parentSpanId` to the caller's `spanId`
 - The caller reads traceparent from ALS automatically via `withTrace()`
@@ -53,7 +53,7 @@ HTTP Request (with traceparent header)
 │                                                  │
 │  withTrace(c.env.BIND, s => s.multiHop(10))     │
 │    └─ reads traceparent from ALS                 │
-│    └─ calls BIND.session("00-abc-111-00")        │
+│    └─ calls BIND.session({ traceparent })        │
 └─────────────┬───────────────────────────────────┘
               │  JSRPC (traceparent as method arg)
               ▼
@@ -105,7 +105,7 @@ export default tracedWorker(MathSession)
 
 **`tracedWorker(SessionClass)`** generates the entrypoint:
 
-- Implements `session(traceparent)` → instantiates your session class
+- Implements `session(init)` → instantiates your session class
 - Builds one Root Logger per isolate from env vars (NAME, LOG_LEVEL, ENVIRONMENT, VERSION) and hands it to every session
 - Includes a default `fetch()` returning 404
 

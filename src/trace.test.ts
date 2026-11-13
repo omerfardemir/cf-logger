@@ -5,6 +5,9 @@ import {
   parseTraceparent,
   buildTraceparent,
   resolveTrace,
+  toCarrier,
+  extractCarrier,
+  injectCarrier,
 } from './trace'
 
 describe('generateTraceId', () => {
@@ -101,5 +104,34 @@ describe('resolveTrace', () => {
     const header = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00'
     const trace = resolveTrace(header)
     expect(trace.traceFlags).toBe(0)
+  })
+})
+
+describe('Trace Carrier', () => {
+  const TP = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+
+  it('toCarrier includes tracestate only when present', () => {
+    const trace = resolveTrace(TP)
+    expect(toCarrier(trace)).toEqual({ traceparent: buildTraceparent(trace) })
+    expect(toCarrier({ ...trace, tracestate: 'v=1' })).toEqual({
+      traceparent: buildTraceparent(trace),
+      tracestate: 'v=1',
+    })
+  })
+
+  it('extractCarrier omits absent or empty headers', () => {
+    const headers = new Headers({ traceparent: TP })
+    expect(extractCarrier((n) => headers.get(n))).toEqual({ traceparent: TP })
+    expect(extractCarrier(() => undefined)).toEqual({})
+    expect(extractCarrier(() => '')).toEqual({})
+  })
+
+  it('injectCarrier writes only present values and round-trips with extractCarrier', () => {
+    const headers = new Headers()
+    injectCarrier({ traceparent: TP }, (n, v) => headers.set(n, v))
+    expect(headers.has('tracestate')).toBe(false)
+
+    injectCarrier({ traceparent: TP, tracestate: 'v=1' }, (n, v) => headers.set(n, v))
+    expect(extractCarrier((n) => headers.get(n))).toEqual({ traceparent: TP, tracestate: 'v=1' })
   })
 })

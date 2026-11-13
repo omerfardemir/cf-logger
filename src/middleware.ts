@@ -1,7 +1,7 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import type { LogFields, Logger } from './types'
-import { buildTraceparent } from './trace'
-import { getLogger, getTraceContext, runWithLogger } from './logger'
+import { extractCarrier, injectCarrier } from './trace'
+import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './logger'
 
 /**
  * Logging Middleware for Hono.
@@ -46,8 +46,7 @@ export function useLogger<T extends LogFields = LogFields>(
 
     const contextOptions = {
       logger: rootLogger,
-      traceparent: c.req.header('traceparent'),
-      tracestate: c.req.header('tracestate'),
+      ...extractCarrier((name) => c.req.header(name)),
       fields: { requestId },
     }
     await runWithLogger(contextOptions, async () => {
@@ -75,10 +74,7 @@ export function useLogger<T extends LogFields = LogFields>(
 
       c.header('X-Request-Id', requestId)
       c.header('X-Trace-Id', trace.traceId)
-      c.header('traceparent', buildTraceparent(trace))
-      if (trace.tracestate) {
-        c.header('tracestate', trace.tracestate)
-      }
+      injectCarrier(getTraceCarrier(), (name, value) => c.header(name, value))
     })
   }
 }

@@ -27,6 +27,10 @@ The per-process configuration a Root Logger is built from: service name, minimum
 The W3C identity of the current work: trace ID, current span ID, optional parent span ID, trace flags, and optional tracestate.
 _Avoid_: trace, traceparent (that is only its wire form)
 
+**Trace Carrier**:
+The wire form of a Trace Context: a `traceparent` value plus an optional `tracestate`, as it travels in HTTP headers, an RPC `session()` call, or a queue message.
+_Avoid_: trace headers, propagation context
+
 **Span**:
 A named, timed operation within a Logging Context, reported once on completion with its duration and status.
 

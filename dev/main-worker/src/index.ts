@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { logger, useLogger } from './logger'
-import { setLoggerContext, getTraceContext, buildTraceparent, type Logger } from 'cf-logger'
+import { setLoggerContext, getTraceContext, getTraceCarrier, type Logger } from 'cf-logger'
 import { withTrace } from 'cf-logger/workers'
 import { getClientDetails } from './network'
 import type { BindService, ServiceSession } from './types'
@@ -111,7 +111,7 @@ app.get('/error', async (c) => {
 /** GET /trace Shows current trace context */
 app.get('/trace', async (c) => {
   const trace = getTraceContext()
-  const traceparent = trace ? buildTraceparent(trace) : null
+  const { traceparent = null } = getTraceCarrier()
 
   c.var.logger.info({ trace }, 'Current trace context')
 

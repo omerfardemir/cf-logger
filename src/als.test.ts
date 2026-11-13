@@ -4,6 +4,7 @@ import {
   runWithLogger,
   withSpan,
   getTraceContext,
+  getTraceCarrier,
   getLogger,
   setLoggerContext,
   _reset,
@@ -307,6 +308,33 @@ describe('tracedFetch', () => {
     const [, init] = mockFetch.mock.calls[0]
     const headers = new Headers(init.headers)
     expect(headers.get('tracestate')).toBe('congo=t61rcWkgMzE')
+  })
+})
+
+describe('getTraceCarrier', () => {
+  beforeEach(() => _reset())
+
+  it('is empty outside a Logging Context', () => {
+    expect(getTraceCarrier()).toEqual({})
+  })
+
+  it('round-trips over a queue-style transport into a continued trace', () => {
+    const logger = createLogger({ service: 'svc' })
+    let sent: ReturnType<typeof getTraceCarrier> = {}
+    let producer: ReturnType<typeof getTraceContext>
+    let consumer: ReturnType<typeof getTraceContext>
+
+    runWithLogger({ logger, tracestate: 'v=1' }, () => {
+      producer = getTraceContext()
+      sent = JSON.parse(JSON.stringify(getTraceCarrier())) // as a queue message body would
+    })
+    runWithLogger({ logger, ...sent }, () => {
+      consumer = getTraceContext()
+    })
+
+    expect(consumer!.traceId).toBe(producer!.traceId)
+    expect(consumer!.parentSpanId).toBe(producer!.spanId)
+    expect(consumer!.tracestate).toBe('v=1')
   })
 })
 

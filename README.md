@@ -152,29 +152,32 @@ app.get('/users/:id', async (c) => {
 
 ### `getTraceContext()`
 
-Read the current W3C trace context from ALS. Returns `null` outside a logging context.
+Read the current Trace Context (IDs and flags). Returns `null` outside a Logging Context.
 
 ```ts
-import { getTraceContext, buildTraceparent } from 'cf-logger'
+import { getTraceContext } from 'cf-logger'
 
 const trace = getTraceContext()
-// { traceId: '...', spanId: '...', parentSpanId: '...', traceFlags: 0 }
-
-const header = buildTraceparent(trace!)
-// '00-{traceId}-{spanId}-00'
+// { traceId: '...', spanId: '...', parentSpanId: '...', traceFlags: 1 }
 ```
 
-### Trace Utilities
+### `getTraceCarrier()`
+
+Get the current **Trace Carrier**, `{ traceparent, tracestate? }`, to pass the trace on over any transport. Returns `{}` outside a Logging Context. Its keys match `runWithLogger`'s options, so the receiving side just spreads it in.
 
 ```ts
-import {
-  generateTraceId, // → 32 hex chars
-  generateSpanId, // → 16 hex chars
-  parseTraceparent, // header string → TraceContext | null
-  buildTraceparent, // TraceContext → header string
-  resolveTrace, // parse incoming or start new root trace
-} from 'cf-logger'
+import { getTraceCarrier, runWithLogger } from 'cf-logger'
+
+// Producer: put the carrier in the message
+await env.QUEUE.send({ ...payload, trace: getTraceCarrier() })
+
+// Consumer: continue the same trace
+await runWithLogger({ logger, ...msg.body.trace }, async () => {
+  /* ... */
+})
 ```
+
+`useLogger` (HTTP headers), `tracedFetch` (outgoing requests) and `tracedSession` / `withTrace` (RPC) do this for you.
 
 ### `loggerOptionsFromEnv(env)`
 
@@ -232,7 +235,7 @@ Propagate trace context across Cloudflare Worker service bindings using the **Se
 
 ### Why?
 
-CF Workers RPC has no header/metadata channel. You can't attach a `traceparent` to `c.env.BIND.add(5, 7)`. The Session Factory solves this by passing `traceparent` via `binding.session(traceparent)` which returns an `RpcTarget` with trace context stored in a private field.
+CF Workers RPC has no header/metadata channel. You can't attach a `traceparent` to `c.env.BIND.add(5, 7)`. The Session Factory solves this by passing the Trace Carrier via `binding.session({ traceparent, tracestate, fields })`, which returns an `RpcTarget` with the trace stored in a private field.
 
 ### `TracedSession<Env>`
 
@@ -270,7 +273,7 @@ export default tracedWorker(MySession)
 
 ### `tracedWorker(SessionClass)`
 
-Creates a `WorkerEntrypoint` with a `session(traceparent)` method that instantiates your session class. Zero boilerplate.
+Creates a `WorkerEntrypoint` with a `session(init)` method that instantiates your session class. Zero boilerplate.
 
 ```ts
 // This is your entire worker export:
@@ -286,7 +289,7 @@ export default class extends tracedWorker(MySession) {
 
 ### `withTrace(binding, fn, fields?)`
 
-**Caller-side** one-liner. Reads `traceparent` from current ALS, calls `binding.session(traceparent, fields)`, passes the session to your callback.
+**Caller-side** one-liner. Calls `binding.session({ ...getTraceCarrier(), fields })` and passes the session to your callback.
 
 ```ts
 import { withTrace } from 'cf-logger/workers'
@@ -337,15 +340,15 @@ All workers in the chain share the same `traceId`.
 Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Override `loggerOptions` to customize.
 
 ```ts
-import { TracedEntrypoint, TracedSession } from 'cf-logger/workers'
+import { TracedEntrypoint, TracedSession, type SessionInit } from 'cf-logger/workers'
 
 class MySession extends TracedSession<Env> {
   /* ... */
 }
 
 export default class extends TracedEntrypoint<Env> {
-  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string) {
-    return new MySession(traceparent, this.rootLogger, this.env, fields, tracestate)
+  session(init: SessionInit) {
+    return new MySession(init, this.rootLogger, this.env)
   }
 
   async scheduled(event: ScheduledEvent) {
@@ -437,7 +440,7 @@ Only the final write differs, detected at startup:
 ```
 cf-logger/
 ├── src/                  # cf-logger source and colocated *.test.ts
-│   ├── index.ts          # Core entry: logger, ALS context, trace utilities, types
+│   ├── index.ts          # Core entry: logger, Logging Context, Trace Carrier, types
 │   ├── hono.ts           # cf-logger/hono entry
 │   └── workers.ts        # cf-logger/workers entry
 ├── dev/                  # Local Worker fixtures for e2e verification (not published)

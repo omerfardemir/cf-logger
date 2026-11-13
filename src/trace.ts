@@ -1,4 +1,4 @@
-import type { TraceContext } from './types'
+import type { TraceCarrier, TraceContext } from './types'
 
 /**
  * Generate a random 16-byte trace ID as a 32-character hex string.
@@ -121,4 +121,50 @@ export function resolveTrace(
     traceFlags: parsed?.traceFlags ?? 1,
     ...(tracestate ? { tracestate } : {}),
   }
+}
+
+/**
+ * Serialize a Trace Context into its Trace Carrier.
+ *
+ * @param {TraceContext} trace - The trace context to serialize.
+ * @returns {TraceCarrier} `traceparent`, plus `tracestate` when present.
+ */
+export function toCarrier(trace: TraceContext): TraceCarrier {
+  return {
+    traceparent: buildTraceparent(trace),
+    ...(trace.tracestate ? { tracestate: trace.tracestate } : {}),
+  }
+}
+
+/**
+ * Read a Trace Carrier from headers.
+ *
+ * Takes a getter so it works with `Headers#get`, Hono's `c.req.header`, etc.
+ *
+ * @param {(name: string) => string | null | undefined} get - Header getter.
+ * @returns {TraceCarrier} The carrier, with absent headers omitted.
+ */
+export function extractCarrier(get: (name: string) => string | null | undefined): TraceCarrier {
+  const traceparent = get('traceparent')
+  const tracestate = get('tracestate')
+  return {
+    ...(traceparent ? { traceparent } : {}),
+    ...(tracestate ? { tracestate } : {}),
+  }
+}
+
+/**
+ * Write a Trace Carrier to headers. Absent values are not written.
+ *
+ * Takes a setter so it works with `Headers#set`, Hono's `c.header`, etc.
+ *
+ * @param {TraceCarrier} carrier - The carrier to write.
+ * @param {(name: string, value: string) => void} set - Header setter.
+ */
+export function injectCarrier(
+  carrier: TraceCarrier,
+  set: (name: string, value: string) => void,
+): void {
+  if (carrier.traceparent) set('traceparent', carrier.traceparent)
+  if (carrier.tracestate) set('tracestate', carrier.tracestate)
 }

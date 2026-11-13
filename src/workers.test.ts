@@ -19,7 +19,7 @@ import {
   tracedWorker,
   loggerOptionsFromEnv,
 } from './workers'
-import type { TracedServiceBinding } from './workers'
+import type { SessionInit, TracedServiceBinding } from './workers'
 import {
   runWithLogger,
   getTraceContext,
@@ -36,33 +36,62 @@ describe('Session Factory trace propagation', () => {
     _reset()
   })
 
-  it('TracedServiceBinding describes the session factory contract', async () => {
-    interface ExampleSession {
-      add(a: number, b: number): Promise<number>
-    }
-
-    const binding: TracedServiceBinding<ExampleSession> = {
-      session(traceparent, fields, tracestate) {
-        expect(traceparent).toBe('00-11111111111111111111111111111111-2222222222222222-01')
-        expect(fields).toEqual({ requestId: 'req-1' })
-        expect(tracestate).toBe('vendor=value')
-        return {
-          async add(a, b) {
-            return a + b
-          },
-        }
+  it('tracedSession() sends one SessionInit: Trace Carrier plus fields', () => {
+    let received: SessionInit | undefined
+    const binding: TracedServiceBinding<object> = {
+      session(init) {
+        received = init
+        return {}
       },
     }
+    const context = {
+      logger: createLogger({ service: 'caller' }),
+      traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+      tracestate: 'vendor=value',
+    }
 
-    await expect(
-      binding
-        .session(
-          '00-11111111111111111111111111111111-2222222222222222-01',
-          { requestId: 'req-1' },
-          'vendor=value',
-        )
-        .add(2, 3),
-    ).resolves.toBe(5)
+    let callerSpanId: string | undefined
+    runWithLogger(context, () => {
+      callerSpanId = getTraceContext()!.spanId
+      tracedSession(binding, { requestId: 'req-1' })
+    })
+
+    expect(received).toEqual({
+      traceparent: `00-11111111111111111111111111111111-${callerSpanId}-01`,
+      tracestate: 'vendor=value',
+      fields: { requestId: 'req-1' },
+    })
+  })
+
+  it('Traced Session continues the carrier and its fields', () => {
+    const entries = _captureEntries()
+
+    class TestSession extends TracedSession {
+      work() {
+        return this.traced(() => {
+          this.logger.info('working')
+          return getTraceContext()
+        })
+      }
+    }
+
+    const session = new TestSession(
+      {
+        traceparent: '00-11111111111111111111111111111111-2222222222222222-01',
+        tracestate: 'vendor=value',
+        fields: { requestId: 'req-1' },
+      },
+      createLogger({ service: 'receiver' }),
+      {},
+    )
+    const trace = session.work()
+
+    expect(trace).toMatchObject({
+      traceId: '11111111111111111111111111111111',
+      parentSpanId: '2222222222222222',
+      tracestate: 'vendor=value',
+    })
+    expect(entries.find((e) => e.message === 'working')).toMatchObject({ requestId: 'req-1' })
   })
 
   it('loggerOptionsFromEnv maps Cloudflare env conventions', () => {
@@ -102,7 +131,7 @@ describe('Session Factory trace propagation', () => {
       }
     }
 
-    const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+    const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
     const receivedTrace = session.getTrace()
 
     expect(receivedTrace).not.toBeNull()
@@ -119,8 +148,8 @@ describe('Session Factory trace propagation', () => {
 
     let receivedTraceparent: string | undefined
     const mockBinding = {
-      session(traceparent: string) {
-        receivedTraceparent = traceparent
+      session(init: SessionInit) {
+        receivedTraceparent = init.traceparent
         return {}
       },
     }
@@ -135,17 +164,17 @@ describe('Session Factory trace propagation', () => {
     expect(callerContextTrace!.traceId).toBe(callerTrace.traceId)
   })
 
-  it('tracedSession() passes empty string when no ALS context', () => {
+  it('tracedSession() passes an empty carrier outside a Logging Context', () => {
     let receivedTraceparent: string | undefined
     const mockBinding = {
-      session(traceparent: string) {
-        receivedTraceparent = traceparent
+      session(init: SessionInit) {
+        receivedTraceparent = init.traceparent
         return {}
       },
     }
 
     tracedSession(mockBinding)
-    expect(receivedTraceparent).toBe('')
+    expect(receivedTraceparent).toBeUndefined()
   })
 
   it('propagates traceId end-to-end through session factory', () => {
@@ -161,8 +190,8 @@ describe('Session Factory trace propagation', () => {
     }
 
     const mockBinding = {
-      session(traceparent: string) {
-        return new TestSession(traceparent, createLogger({ service: 'receiver' }), {})
+      session(init: SessionInit) {
+        return new TestSession(init, createLogger({ service: 'receiver' }), {})
       },
     }
 
@@ -195,8 +224,8 @@ describe('Session Factory trace propagation', () => {
     }
 
     const mockBinding = {
-      session(traceparent: string) {
-        return new TestSession(traceparent, createLogger({ service: 'receiver' }), {})
+      session(init: SessionInit) {
+        return new TestSession(init, createLogger({ service: 'receiver' }), {})
       },
     }
 
@@ -236,7 +265,7 @@ describe('Session Factory trace propagation', () => {
       }
     }
 
-    const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+    const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
     session.doWork()
 
     const entry = entries.find((e) => e.message === 'doing work')
@@ -267,7 +296,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+      const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
       const result = session.doWork()
 
       expect(result).toBe(42)
@@ -287,7 +316,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+      const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
       const result = session.doWork()
 
       expect(result).toBe(42)
@@ -319,7 +348,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+      const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
       expect(() => session.doWork()).toThrow('boom')
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -345,7 +374,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+      const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
       expect(() => session.doWork()).toThrow('stack test')
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -373,7 +402,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+      const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
       const result = await session.doWork()
 
       expect(result).toBe(99)
@@ -402,7 +431,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+      const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
       await expect(session.doWork()).rejects.toThrow('async boom')
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -428,7 +457,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+      const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
       await expect(session.doWork()).rejects.toThrow('async stack test')
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -452,7 +481,7 @@ describe('Session Factory trace propagation', () => {
         }
       }
 
-      const session = new TestSession(traceparent, createLogger({ service: 'test-svc' }), {})
+      const session = new TestSession({ traceparent }, createLogger({ service: 'test-svc' }), {})
       session.doWork()
 
       const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))!
@@ -483,8 +512,8 @@ describe('Session Factory trace propagation', () => {
     }
 
     const mockBinding = {
-      session(traceparent: string) {
-        return new TestSession(traceparent, createLogger({ service: 'receiver' }), {})
+      session(init: SessionInit) {
+        return new TestSession(init, createLogger({ service: 'receiver' }), {})
       },
     }
 
@@ -567,7 +596,7 @@ describe('tracedWorker', () => {
     const instance = new Worker(undefined, { NAME: 'test-svc', LOG_LEVEL: 'debug' })
 
     const callerTrace = resolveTrace()
-    const session = instance.session(buildTraceparent(callerTrace))
+    const session = instance.session({ traceparent: buildTraceparent(callerTrace) })
     const receivedTrace = session.getTrace()
 
     expect(receivedTrace).not.toBeNull()
@@ -604,7 +633,7 @@ describe('tracedWorker', () => {
     _captureEntries()
 
     interface TestEnv {
-      OTHER_SERVICE: { session(tp: string): unknown }
+      OTHER_SERVICE: { session(init: SessionInit): unknown }
     }
 
     class TestSession extends TracedSession<TestEnv> {
@@ -619,7 +648,7 @@ describe('tracedWorker', () => {
     const Worker = tracedWorker(TestSession)
     const instance = new Worker(undefined, { NAME: 'svc', LOG_LEVEL: 'info', ...fakeEnv })
 
-    const session = instance.session(buildTraceparent(resolveTrace()))
+    const session = instance.session({ traceparent: buildTraceparent(resolveTrace()) })
     expect(session.hasBinding()).toBe(true)
   })
 })
@@ -646,7 +675,11 @@ describe('traceFlags sampling', () => {
       }
     }
 
-    const session = new TestSession(unsampledTp, createLogger({ service: 'test-svc' }), {})
+    const session = new TestSession(
+      { traceparent: unsampledTp },
+      createLogger({ service: 'test-svc' }),
+      {},
+    )
     const result = session.doWork()
     expect(result).toBe(42)
 
@@ -670,7 +703,11 @@ describe('traceFlags sampling', () => {
       }
     }
 
-    const session = new TestSession(sampledTp, createLogger({ service: 'test-svc' }), {})
+    const session = new TestSession(
+      { traceparent: sampledTp },
+      createLogger({ service: 'test-svc' }),
+      {},
+    )
     const result = session.doWork()
     expect(result).toBe(42)
 
