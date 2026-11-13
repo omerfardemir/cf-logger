@@ -1,4 +1,4 @@
-# cf-logger
+# loggercf
 
 Structured logging and distributed trace propagation for Cloudflare Workers (and Node.js), including across Worker-to-Worker RPC where the platform offers no header channel.
 

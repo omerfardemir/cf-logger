@@ -24,8 +24,8 @@ import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './lo
  * @example
  * ```ts
  * import { Hono } from 'hono'
- * import { useLogger } from 'cf-logger/hono'
- * import { createLogger } from 'cf-logger'
+ * import { useLogger } from 'loggercf/hono'
+ * import { createLogger } from 'loggercf'
  *
  * const app = new Hono()
  * const logger = createLogger({ service: 'api', level: 'info' })

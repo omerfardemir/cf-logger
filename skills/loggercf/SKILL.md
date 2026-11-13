@@ -1,17 +1,17 @@
 ---
-name: cf-logger
-description: Rules for logging and tracing with the cf-logger package on Cloudflare Workers or Node.js. Use when adding or changing logs, log fields, spans, trace propagation, Hono logging middleware, Worker-to-Worker RPC over service bindings, queue or cron handlers, or the Wrangler vars cf-logger reads, in a project that depends on cf-logger.
+name: loggercf
+description: Rules for logging and tracing with the loggercf package on Cloudflare Workers or Node.js. Use when adding or changing logs, log fields, spans, trace propagation, Hono logging middleware, Worker-to-Worker RPC over service bindings, queue or cron handlers, or the Wrangler vars loggercf reads, in a project that depends on loggercf.
 ---
 
-# cf-logger
+# loggercf
 
-cf-logger is new and is not pino's API: use only what this file and the package itself show. For signatures and full examples, read `node_modules/cf-logger/README.md`; for exact types, read `node_modules/cf-logger/dist/*.d.ts`. Where they disagree with this file, they win.
+loggercf is new and is not pino's API: use only what this file and the package itself show. For signatures and full examples, read `node_modules/loggercf/README.md`; for exact types, read `node_modules/loggercf/dist/*.d.ts`. Where they disagree with this file, they win.
 
 Imports come from exactly three entry points:
 
-- `cf-logger`: core, any runtime.
-- `cf-logger/hono`: `useLogger`.
-- `cf-logger/workers`: Traced Sessions. This imports `cloudflare:workers`, so it is Workers-only.
+- `loggercf`: core, any runtime.
+- `loggercf/hono`: `useLogger`.
+- `loggercf/workers`: Traced Sessions. This imports `cloudflare:workers`, so it is Workers-only.
 
 ## Terms
 
@@ -38,8 +38,8 @@ Imports come from exactly three entry points:
 Queue consumer continuing a producer's trace:
 
 ```ts
-import { createLogger, getLogger, loggerOptionsFromEnv, runWithLogger } from 'cf-logger'
-import type { Logger, TraceCarrier } from 'cf-logger'
+import { createLogger, getLogger, loggerOptionsFromEnv, runWithLogger } from 'loggercf'
+import type { Logger, TraceCarrier } from 'loggercf'
 
 interface Job {
   orderId: string
@@ -69,8 +69,8 @@ An isolate serves many requests at once. Build the Root Logger once, at module s
 
 ```ts
 import { Hono } from 'hono'
-import { createLogger, loggerOptionsFromEnv, type Logger } from 'cf-logger'
-import { useLogger } from 'cf-logger/hono'
+import { createLogger, loggerOptionsFromEnv, type Logger } from 'loggercf'
+import { useLogger } from 'loggercf/hono'
 
 let rootLogger: Logger | undefined
 const app = new Hono()
@@ -89,8 +89,8 @@ Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `
 
 ```ts
 import { Hono } from 'hono'
-import { createLogger, setLoggerContext, type Logger } from 'cf-logger'
-import { useLogger } from 'cf-logger/hono'
+import { createLogger, setLoggerContext, type Logger } from 'loggercf'
+import { useLogger } from 'loggercf/hono'
 
 // useLogger sets c.var.logger, c.var.requestId and c.var.traceId; declare them to use them typed
 const app = new Hono<{ Variables: { logger: Logger; requestId: string; traceId: string } }>()
@@ -125,12 +125,7 @@ Call these inside `useLogger`, `this.traced`, or `runWithLogger`. Outside a Logg
 Wrap the body of every RPC method in `this.traced(fn, 'svc.op')`. The operation name makes the call a Span. Inside `traced`, `this.logger` is the Logging Context's logger. Outside it, `this.logger` is the bare Root Logger, with no trace IDs.
 
 ```ts
-import {
-  TracedSession,
-  tracedWorker,
-  withTrace,
-  type TracedServiceBinding,
-} from 'cf-logger/workers'
+import { TracedSession, tracedWorker, withTrace, type TracedServiceBinding } from 'loggercf/workers'
 
 interface MathService {
   multiply(a: number, b: number): Promise<number>
@@ -157,8 +152,8 @@ export default tracedWorker(BillingSession)
 `tracedWorker(S)` builds the entrypoint: one Root Logger per isolate from the env vars, a `session(init)` method, and a 404 `fetch`. When the Worker also needs `scheduled`, `queue` or a real `fetch` with logging, extend `TracedEntrypoint` instead. It gives you `this.rootLogger`. A session's constructor is `(init, rootLogger, env)`, and `session()` takes one object, `{ traceparent?, tracestate?, fields? }`:
 
 ```ts
-import { runWithLogger } from 'cf-logger'
-import { TracedEntrypoint, TracedSession, type SessionInit } from 'cf-logger/workers'
+import { runWithLogger } from 'loggercf'
+import { TracedEntrypoint, TracedSession, type SessionInit } from 'loggercf/workers'
 
 interface Env {
   NAME: string
@@ -189,7 +184,7 @@ export default class extends TracedEntrypoint<Env> {
 The object comes first and the message second. An `Error` is kept under `err` either as the first argument or as `{ err }`. It is serialized with type, message, stack, own fields and `cause`.
 
 ```ts
-import { createLogger } from 'cf-logger'
+import { createLogger } from 'loggercf'
 
 const logger = createLogger({ service: 'api' })
 const err = new Error('payment declined')
@@ -220,7 +215,7 @@ logger.info('charged', { orderId }) // the object is dropped from the line
 }
 ```
 
-- `nodejs_compat` is required, because cf-logger uses `AsyncLocalStorage` from `node:async_hooks`.
+- `nodejs_compat` is required, because loggercf uses `AsyncLocalStorage` from `node:async_hooks`.
 - `loggerOptionsFromEnv(env)`, `tracedWorker` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. When a var is missing it falls back to `'unknown'`, or to `'info'` for `LOG_LEVEL`.
 - `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error` or `fatal`. Any other value makes `createLogger` throw `unknown level`.
 - On Node.js there is no Wrangler config: call `createLogger({ service, level, environment, version })` or `createLogger(loggerOptionsFromEnv(process.env))` at startup.

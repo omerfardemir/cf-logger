@@ -8,7 +8,7 @@ name: Publish
 #   5. creates the GitHub Release with generated notes.
 #
 # npm auth is Trusted Publishing (OIDC): no token or secret. npmjs.com must list this
-# repository and workflow file as cf-logger's trusted publisher (see README → Releasing).
+# repository and workflow file as loggercf's trusted publisher (see README → Releasing).
 
 on:
   workflow_dispatch:
