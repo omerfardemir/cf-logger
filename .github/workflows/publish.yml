@@ -4,10 +4,11 @@ name: Publish
 #   1. runs the full CI suite on the chosen main commit,
 #   2. bumps package.json, commits "chore(release): vX.Y.Z" and tags vX.Y.Z,
 #   3. pushes the commit and tag to main (atomically; fails if main moved),
-#   4. publishes to npm,
+#   4. publishes to npm with provenance,
 #   5. creates the GitHub Release with generated notes.
 #
-# Needs the NPM_TOKEN repository secret (see README → Releasing).
+# npm auth is Trusted Publishing (OIDC): no token or secret. npmjs.com must list this
+# repository and workflow file as cf-logger's trusted publisher (see README → Releasing).
 
 on:
   workflow_dispatch:
@@ -47,9 +48,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write
-    env:
-      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      contents: write # push the release commit and tag, create the release
+      id-token: write # npm Trusted Publishing (OIDC) and provenance
     steps:
       - uses: actions/checkout@v7
         with:
@@ -58,16 +58,15 @@ jobs:
           fetch-depth: 0
 
       - uses: ./.github/actions/setup
-        with:
-          registry-url: https://registry.npmjs.org
 
-      - name: Check npm auth
+      - name: Check npm CLI supports Trusted Publishing
         run: |
-          if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "::error::The NPM_TOKEN repository secret is not set."
+          npm_version="$(npm --version)"
+          if ! node -e "const [a,b,c]=process.argv[1].split('.').map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)" "$npm_version"; then
+            echo "::error::npm ${npm_version} is too old for Trusted Publishing (needs 11.5.1+)."
             exit 1
           fi
-          echo "Publishing as $(npm whoami)"
+          echo "npm ${npm_version}"
 
       - name: Bump version
         id: version
@@ -101,6 +100,7 @@ jobs:
         # Atomic: both refs land or neither does. Rejected if main moved since dispatch.
         run: git push --atomic origin HEAD:refs/heads/main "refs/tags/v${VERSION}"
 
+      # Authenticates through OIDC and attaches provenance automatically.
       # prepack builds, typechecks and tests again from the tagged tree.
       - name: Publish to npm
         run: npm publish --access public

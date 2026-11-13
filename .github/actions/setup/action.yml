@@ -1,12 +1,6 @@
 name: Setup
 description: Install pnpm (version from package.json "packageManager"), Node.js, and dependencies.
 
-inputs:
-  registry-url:
-    description: npm registry to write into .npmrc (only needed for publishing).
-    required: false
-    default: ''
-
 runs:
   using: composite
   steps:
@@ -16,7 +10,6 @@ runs:
       with:
         node-version: 24
         cache: pnpm
-        registry-url: ${{ inputs.registry-url }}
 
     - name: Install dependencies
       shell: bash
