@@ -1,0 +1,112 @@
+name: Publish
+
+# Manual release: pick the semver bump, and this workflow
+#   1. runs the full CI suite on the chosen main commit,
+#   2. bumps package.json, commits "chore(release): vX.Y.Z" and tags vX.Y.Z,
+#   3. pushes the commit and tag to main (atomically; fails if main moved),
+#   4. publishes to npm,
+#   5. creates the GitHub Release with generated notes.
+#
+# Needs the NPM_TOKEN repository secret (see README → Releasing).
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    name: Release from main only
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check ref
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Publish must run on main (got ${GITHUB_REF})."
+          exit 1
+
+  verify:
+    name: CI
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Bump, tag, publish, release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Exactly the commit CI just verified, not whatever main is now.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup
+        with:
+          registry-url: https://registry.npmjs.org
+
+      - name: Check npm auth
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "::error::The NPM_TOKEN repository secret is not set."
+            exit 1
+          fi
+          echo "Publishing as $(npm whoami)"
+
+      - name: Bump version
+        id: version
+        run: |
+          npm version "${{ inputs.bump }}" --no-git-tag-version
+          version="$(node -p "require('./package.json').version")"
+          name="$(node -p "require('./package.json').name")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "::error::${name}@${version} is already on npm."
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            echo "::error::Tag v${version} already exists."
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${name}@${version}"
+
+      - name: Commit and tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "chore(release): v${VERSION}"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+
+      - name: Push commit and tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        # Atomic: both refs land or neither does. Rejected if main moved since dispatch.
+        run: git push --atomic origin HEAD:refs/heads/main "refs/tags/v${VERSION}"
+
+      # prepack builds, typechecks and tests again from the tagged tree.
+      - name: Publish to npm
+        run: npm publish --access public
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh release create "v${VERSION}" --verify-tag --title "v${VERSION}" --generate-notes
