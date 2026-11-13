@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { createLogger, _captureEntries, _reset } from './logger'
+import { createLogger, _captureEntries, _captureLines, _reset } from './logger'
+import type { Logger } from './types'
 import { useLogger } from './middleware'
 
 function setup() {
@@ -169,7 +170,7 @@ describe('useLogger lifecycle logging', () => {
     expect(end!.duration).toBeGreaterThanOrEqual(40)
   })
 
-  it('creates per-request child logger with requestId binding', async () => {
+  it('exposes a per-request logger whose lines carry requestId', async () => {
     const { entries, app } = setup()
     let capturedLogger: unknown
 
@@ -181,10 +182,26 @@ describe('useLogger lifecycle logging', () => {
 
     await app.request('/child')
 
-    // The handler log should have requestId from child binding (not just ALS)
     const handlerLog = entries.find((e) => e.message === 'from handler')
     expect(handlerLog).toBeDefined()
     expect(handlerLog!.requestId).toBeDefined()
+  })
+
+  it('writes requestId exactly once per log line', async () => {
+    const lines = _captureLines()
+    const app = new Hono()
+    app.use(useLogger(createLogger({ service: 'test-mw' })))
+    app.get('/once', (c) => {
+      ;(c.get('logger' as never) as Logger).info('from handler')
+      return c.text('ok')
+    })
+
+    await app.request('/once', { headers: { 'X-Request-Id': 'req-once' } })
+
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
+      expect(line.match(/"requestId":/g)).toHaveLength(1)
+    }
   })
 
   it('gives different logger instances to concurrent requests', async () => {

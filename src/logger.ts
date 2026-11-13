@@ -353,7 +353,7 @@ export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
     logger: Logger<T>
     trace?: TraceContext
     traceparent?: string | null
-    fields?: Partial<T>
+    fields?: Partial<T> | LogFields
   },
   fn: () => R,
 ): R {
@@ -420,6 +420,21 @@ export function _captureEntries(): Record<string, unknown>[] {
     entries.push(JSON.parse(msg))
   }
   return entries
+}
+
+/**
+ * Redirect log output to an in-memory array of raw JSON lines.
+ *
+ * Unlike `_captureEntries()`, lines are not parsed, so duplicate keys stay visible.
+ *
+ * @internal Test helper, not part of the public API.
+ */
+export function _captureLines(): string[] {
+  const lines: string[] = []
+  _writeFn = (msg) => {
+    lines.push(msg.trimEnd())
+  }
+  return lines
 }
 
 /**

@@ -1,7 +1,7 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import type { LogFields, Logger } from './types'
 import { resolveTrace, buildTraceparent } from './trace'
-import { runWithLogger, setLoggerContext } from './logger'
+import { runWithLogger } from './logger'
 
 /**
  * Logging Middleware for Hono.
@@ -43,14 +43,14 @@ export function useLogger<T extends LogFields = LogFields>(
     const requestId = c.req.header('X-Request-Id') || c.var?.requestId || crypto.randomUUID()
     const method = c.req.method
     const path = new URL(c.req.url).pathname
-    const logger = baseLogger.child({ requestId })
+    // requestId lives only in the Context Fields; binding it on the logger too
+    // would write the key twice on every line.
+    const logger = baseLogger.child({})
 
-    await runWithLogger({ logger, trace }, async () => {
+    await runWithLogger({ logger, trace, fields: { requestId } }, async () => {
       c.set('logger' as never, logger as never)
       c.set('requestId' as never, requestId as never)
       c.set('traceId' as never, trace.traceId as never)
-
-      setLoggerContext({ requestId })
 
       logger.info({ method, path }, `request.start ${method} ${path}`)
 
