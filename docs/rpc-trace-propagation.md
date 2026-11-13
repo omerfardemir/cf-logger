@@ -30,11 +30,11 @@ Pass `traceparent` as an extra argument to every RPC method.
 
 ### ✅ Approach 4: Session Factory Pattern (Adopted)
 
-Use `RpcTarget` private fields to carry trace context. The caller calls `binding.session(traceparent)` which returns an `RpcTarget` instance with the traceparent stored in a `#private` field (never serialized over the wire). RPC methods on the session wrap their logic in `traced()` which sets up ALS with the correct trace context.
+Use `RpcTarget` private fields to carry trace context. The caller calls `binding.session({ traceparent, tracestate, fields })` which returns an `RpcTarget` instance with that object stored in a `#private` field (never serialized over the wire). RPC methods on the session wrap their logic in `traced()` which sets up ALS with the correct trace context.
 
 **Why it works:**
 
-- `binding.session(traceparent)` is a standard RPC method call — CF supports passing strings
+- `binding.session({ traceparent, tracestate, fields })` is a standard RPC method call — CF supports passing plain objects
 - Private fields (`#traceparent`) on `RpcTarget` stay server-side — only prototype methods are exposed via JSRPC
 - Each session generates a new `spanId` and links `parentSpanId` to the caller's `spanId`
 - The caller reads traceparent from ALS automatically via `withTrace()`
@@ -53,7 +53,7 @@ HTTP Request (with traceparent header)
 │                                                  │
 │  withTrace(c.env.BIND, s => s.multiHop(10))     │
 │    └─ reads traceparent from ALS                 │
-│    └─ calls BIND.session("00-abc-111-00")        │
+│    └─ calls BIND.session({ traceparent })        │
 └─────────────┬───────────────────────────────────┘
               │  JSRPC (traceparent as method arg)
               ▼
@@ -99,14 +99,14 @@ export default tracedWorker(MathSession)
 **`TracedSession`** handles:
 
 - Stores `traceparent` in `#private` field (never sent over wire)
-- `traced(fn, operation?)` sets up ALS with logger + parsed trace context
-- `this.logger` returns the request-scoped logger with traceId/spanId
+- `traced(fn, operation?)` opens a Logging Context (`runWithLogger`) continuing the caller's trace; with `operation`, the call is reported as a Span
+- `this.logger` returns the Logging Context's logger with traceId/spanId
 - `this.env` provides access to bindings for multi-hop RPC
 
 **`tracedWorker(SessionClass)`** generates the entrypoint:
 
-- Implements `session(traceparent)` → instantiates your session class
-- Reads `LoggerOptions` from env vars (NAME, LOG_LEVEL, ENVIRONMENT, VERSION)
+- Implements `session(init)` → instantiates your session class
+- Builds one Root Logger per isolate from env vars (NAME, LOG_LEVEL, ENVIRONMENT, VERSION) and hands it to every session
 - Includes a default `fetch()` returning 404
 
 ### Caller Side
@@ -208,6 +208,6 @@ Span logging is **optional**. Omit the operation name and `traced()` has zero sp
 | Session Factory over Proxy           | CF platform limitation (workerd #6358) blocks Proxy on Fetcher stubs |
 | Private fields for traceparent       | `#field` on RpcTarget stays server-side, never serialized            |
 | `withTrace()` one-liner API          | Clean DX without changing method signatures                          |
-| Span data excludes trace IDs         | Already on every log line via ALS mixin — no duplicate bytes         |
+| Span data excludes trace IDs         | Already on every log line — no duplicate bytes                       |
 | Optional span logging                | Zero overhead when you don't need timing                             |
 | Env var convention (NAME, LOG_LEVEL) | Consistent across workers, readable from wrangler config             |

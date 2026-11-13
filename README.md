@@ -12,11 +12,11 @@ pnpm add hono
 
 ## Entry Points
 
-| Import              | Contents                                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `cf-logger`         | Core: `createLogger`, `createSimpleLogger`, `LoggerFactory`, `loggerOptionsFromEnv`, ALS context, trace utilities, types |
-| `cf-logger/hono`    | `useLogger`, `generateId` — Hono middleware                                                                              |
-| `cf-logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                        |
+| Import              | Contents                                                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `cf-logger`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
+| `cf-logger/hono`    | `useLogger`, `generateId` — Hono middleware                                                                                        |
+| `cf-logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                                  |
 
 ## How Trace Propagation Works
 
@@ -61,7 +61,7 @@ The package expects these environment variables when using `loggerOptionsFromEnv
 
 ### `createLogger(options)`
 
-Create a logger with service name and additional fields baked in. Platform-aware: uses Pino `mixin` + stream on Node.js, `browser.write` on CF Workers.
+Create a **Root Logger**: build it once per process or isolate and share it. Works the same on Node.js and CF Workers (see [Log Output](#log-output)).
 
 ```ts
 import { createLogger } from 'cf-logger'
@@ -71,41 +71,32 @@ const logger = createLogger({
   level: 'debug',
   environment: 'production',
   version: '1.2.3',
-  requestId: '550e8400-e29b-41d4-a716-446655440000',
 })
 
 logger.info({ userId: 'u-42' }, 'Request started')
-// → {"time":"...","level":"INFO","service":"my-worker","environment":"production","version":"1.2.3","requestId":"550e...","userId":"u-42","message":"Request started"}
+// → {"time":"...","level":"INFO","service":"my-worker","environment":"production","version":"1.2.3","userId":"u-42","message":"Request started"}
 ```
 
-All extra keys beyond `service` and `level` become persistent bindings on every log line.
-
-### `createSimpleLogger(options)`
-
-Minimal logger with just `service` — no extra bindings. Useful for standalone scripts, cron handlers, queue consumers.
-
-```ts
-const logger = createSimpleLogger({ service: 'cron-handler', level: 'info' })
-```
+`level` defaults to `'info'`. `service`, `environment` and `version` are on every line. An optional second argument adds more fixed fields. Keep these to per-process data: an isolate serves many requests at once, so per-request data (`requestId`, `userId`, ...) belongs in a Logging Context's fields (see `runWithLogger`).
 
 ### `getLogger(service?)`
 
-Get the current request-scoped logger (inside ALS) or a cached standalone logger (outside ALS).
+Get the current Logging Context's logger. Outside any Logging Context, it returns a standalone logger cached per `service` (default `'unknown'`), useful for code that doesn't know whether it runs inside a context. Where you do know, prefer your Root Logger or `runWithLogger`.
 
 ```ts
 import { getLogger } from 'cf-logger'
 
-// Inside middleware/traced():
-const log = getLogger() // returns the ALS-scoped logger
+// Inside useLogger / traced() / runWithLogger:
+const log = getLogger() // the Logging Context's logger
 log.info('has traceId automatically')
 
-// Outside ALS:
+// Outside a Logging Context:
 const log = getLogger('cron') // cached standalone logger
 ```
 
 ### `setLoggerContext(fields)`
 
-Add fields to the current request's logging context. All subsequent log lines in the same request include these fields.
+Add fields to the current Logging Context. All subsequent log lines in that context include them. Fields set inside a `withSpan()` stay inside that span.
 
 ```ts
 import { setLoggerContext } from 'cf-logger'
@@ -114,54 +105,79 @@ setLoggerContext({ userId: 'u-42', feature: 'checkout' })
 // All logs from this point include userId and feature
 ```
 
+Outside a Logging Context the fields are **ignored**, and one `WARN` line naming the ignored keys is written per isolate. An isolate serves many requests at once, so fields stored outside a context would leak into unrelated requests.
+
 ### `runWithLogger(options, fn)`
 
-Run a function within a logging context. Framework-agnostic — works in any runtime.
+Open a **Logging Context**: the single way to scope logging to one unit of work (HTTP request, RPC call, queue message, cron run). `useLogger` and `TracedSession` use it under the hood.
 
 ```ts
-import { runWithLogger, createLogger, resolveTrace } from 'cf-logger'
+import { runWithLogger, createLogger, getLogger } from 'cf-logger'
 
-const logger = createLogger({ service: 'queue-handler' })
-const trace = resolveTrace() // new root trace
+const logger = createLogger({ service: 'queue-handler' }) // Root Logger, created once
 
-runWithLogger({ logger, trace }, () => {
-  getLogger().info('Inside ALS context — has traceId')
-})
+export default {
+  async queue(batch) {
+    for (const msg of batch.messages) {
+      await runWithLogger(
+        {
+          logger,
+          traceparent: msg.body.traceparent, // optional: continue a trace
+          tracestate: msg.body.tracestate, // optional
+          fields: { messageId: msg.id }, // optional: per-unit-of-work fields
+        },
+        async () => {
+          getLogger().info('processing') // has traceId, spanId, messageId
+        },
+      )
+    }
+  },
+}
 ```
 
-You can also pass a `traceparent` string instead of a resolved trace:
+Without a valid `traceparent` a new root trace starts. Either way the context gets its own `spanId`. `fields` is copied, never mutated.
+
+### `withSpan(operation, fn)`
+
+Time a sub-operation as a **Span** nested in the current Logging Context: new `spanId`, `parentSpanId` = the current span, same `traceId`. Works sync or async; errors are logged and rethrown. Logs `span.end` only when the trace is sampled. Outside a Logging Context it just runs `fn`.
 
 ```ts
-runWithLogger({ logger, traceparent: incomingTraceparent }, () => {
-  // trace is parsed and continued automatically
+import { withSpan } from 'cf-logger'
+
+app.get('/users/:id', async (c) => {
+  const user = await withSpan('db.getUser', () => db.getUser(c.req.param('id')))
+  return c.json(user)
 })
 ```
 
 ### `getTraceContext()`
 
-Read the current W3C trace context from ALS. Returns `null` outside a logging context.
+Read the current Trace Context (IDs and flags). Returns `null` outside a Logging Context.
 
 ```ts
-import { getTraceContext, buildTraceparent } from 'cf-logger'
+import { getTraceContext } from 'cf-logger'
 
 const trace = getTraceContext()
-// { traceId: '...', spanId: '...', parentSpanId: '...', traceFlags: 0 }
-
-const header = buildTraceparent(trace!)
-// '00-{traceId}-{spanId}-00'
+// { traceId: '...', spanId: '...', parentSpanId: '...', traceFlags: 1 }
 ```
 
-### Trace Utilities
+### `getTraceCarrier()`
+
+Get the current **Trace Carrier**, `{ traceparent, tracestate? }`, to pass the trace on over any transport. Returns `{}` outside a Logging Context. Its keys match `runWithLogger`'s options, so the receiving side just spreads it in.
 
 ```ts
-import {
-  generateTraceId, // → 32 hex chars
-  generateSpanId, // → 16 hex chars
-  parseTraceparent, // header string → TraceContext | null
-  buildTraceparent, // TraceContext → header string
-  resolveTrace, // parse incoming or start new root trace
-} from 'cf-logger'
+import { getTraceCarrier, runWithLogger } from 'cf-logger'
+
+// Producer: put the carrier in the message
+await env.QUEUE.send({ ...payload, trace: getTraceCarrier() })
+
+// Consumer: continue the same trace
+await runWithLogger({ logger, ...msg.body.trace }, async () => {
+  /* ... */
+})
 ```
+
+`useLogger` (HTTP headers), `tracedFetch` (outgoing requests) and `tracedSession` / `withTrace` (RPC) do this for you.
 
 ### `loggerOptionsFromEnv(env)`
 
@@ -181,36 +197,26 @@ const logger = createLogger(loggerOptionsFromEnv(env))
 
 Creates a Hono middleware that:
 
-1. Parses `traceparent` from the incoming request header
-2. Reads `X-Request-Id` from the request or generates a new UUID
-3. Creates an ALS context via `runWithLogger` with the logger and trace
+1. Reads `X-Request-Id` from the request or generates a new UUID
+2. Opens a Logging Context via `runWithLogger`, continuing `traceparent` / `tracestate` from the request
+3. Adds `requestId` to the Logging Context's fields so it appears on every log line
 4. Sets `c.var.logger`, `c.var.requestId`, and `c.var.traceId` for use in route handlers
-5. Adds `requestId` to the ALS logger context so it appears on every log line
-6. Sets response headers: `X-Request-Id`, `X-Trace-Id`, `traceparent`
-7. Lets Hono own error responses, then logs `request.error` and `request.end` using the final `c.res.status`
+5. Sets response headers: `X-Request-Id`, `X-Trace-Id`, `traceparent` (and `tracestate` when present)
+6. Lets Hono own error responses, then logs `request.error` and `request.end` using the final `c.res.status`
 
 ```ts
 import { Hono } from 'hono'
 import { useLogger } from 'cf-logger/hono'
-import { createLogger, setLoggerContext } from 'cf-logger'
+import { createLogger, loggerOptionsFromEnv, setLoggerContext, type Logger } from 'cf-logger'
 
 const app = new Hono()
 
-// Option A: per-request logger factory (recommended)
-app.use(
-  useLogger((c) =>
-    createLogger({
-      service: c.env.NAME,
-      level: c.env.LOG_LEVEL,
-      environment: c.env.ENVIRONMENT,
-      version: c.env.VERSION,
-      requestId: c.var.requestId,
-    }),
-  ),
-)
-
-// Option B: shared logger instance
+// Option A: shared Root Logger (recommended)
 app.use(useLogger(createLogger({ service: 'my-worker' })))
+
+// Option B: build the Root Logger from c.env, once per isolate
+let rootLogger: Logger | undefined
+app.use(useLogger((c) => (rootLogger ??= createLogger(loggerOptionsFromEnv(c.env)))))
 
 app.get('/', (c) => {
   setLoggerContext({ userId: 'u-42' })
@@ -229,7 +235,7 @@ Propagate trace context across Cloudflare Worker service bindings using the **Se
 
 ### Why?
 
-CF Workers RPC has no header/metadata channel. You can't attach a `traceparent` to `c.env.BIND.add(5, 7)`. The Session Factory solves this by passing `traceparent` via `binding.session(traceparent)` which returns an `RpcTarget` with trace context stored in a private field.
+CF Workers RPC has no header/metadata channel. You can't attach a `traceparent` to `c.env.BIND.add(5, 7)`. The Session Factory solves this by passing the Trace Carrier via `binding.session({ traceparent, tracestate, fields })`, which returns an `RpcTarget` with the trace stored in a private field.
 
 ### `TracedSession<Env>`
 
@@ -259,15 +265,15 @@ export default tracedWorker(MySession)
 
 **Key members:**
 
-| Member                        | Description                                                                   |
-| ----------------------------- | ----------------------------------------------------------------------------- |
-| `this.traced(fn, operation?)` | Runs `fn` within ALS trace context. Optional `operation` enables span timing. |
-| `this.logger`                 | Request-scoped logger (must be called inside `traced()`)                      |
-| `this.env`                    | Worker env (bindings, vars) — for multi-hop RPC calls                         |
+| Member                        | Description                                                                                                    |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `this.traced(fn, operation?)` | Runs `fn` in a Logging Context continuing the caller's trace. Optional `operation` reports the call as a Span. |
+| `this.logger`                 | Request-scoped logger (must be called inside `traced()`)                                                       |
+| `this.env`                    | Worker env (bindings, vars) — for multi-hop RPC calls                                                          |
 
 ### `tracedWorker(SessionClass)`
 
-Creates a `WorkerEntrypoint` with a `session(traceparent)` method that instantiates your session class. Zero boilerplate.
+Creates a `WorkerEntrypoint` with a `session(init)` method that instantiates your session class. Zero boilerplate.
 
 ```ts
 // This is your entire worker export:
@@ -283,7 +289,7 @@ export default class extends tracedWorker(MySession) {
 
 ### `withTrace(binding, fn, fields?)`
 
-**Caller-side** one-liner. Reads `traceparent` from current ALS, calls `binding.session(traceparent, fields)`, passes the session to your callback.
+**Caller-side** one-liner. Calls `binding.session({ ...getTraceCarrier(), fields })` and passes the session to your callback.
 
 ```ts
 import { withTrace } from 'cf-logger/workers'
@@ -331,18 +337,18 @@ All workers in the chain share the same `traceId`.
 
 ### `TracedEntrypoint<Env>`
 
-Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`).
+Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Override `loggerOptions` to customize.
 
 ```ts
-import { TracedEntrypoint, TracedSession } from 'cf-logger/workers'
+import { TracedEntrypoint, TracedSession, type SessionInit } from 'cf-logger/workers'
 
 class MySession extends TracedSession<Env> {
   /* ... */
 }
 
 export default class extends TracedEntrypoint<Env> {
-  session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string) {
-    return new MySession(traceparent, this.loggerOptions, this.env, fields, tracestate)
+  session(init: SessionInit) {
+    return new MySession(init, this.rootLogger, this.env)
   }
 
   async scheduled(event: ScheduledEvent) {
@@ -377,7 +383,7 @@ interface Env {
 
 ## Span Logging
 
-Pass an operation name as the second argument to `traced()` to get structured span logs with timing:
+Pass an operation name as the second argument to `traced()` to report the RPC call as a Span (or use `withSpan()` for a sub-operation anywhere in a Logging Context):
 
 ```ts
 return this.traced(() => {
@@ -407,20 +413,25 @@ Emits a span-end log on completion:
 
 On error, `status` is `"ERROR"` with an `error` field, logged at error level.
 
-The span object intentionally does **not** duplicate `traceId`/`spanId`/`parentSpanId` — those are already on every log line via the ALS mixin.
+The span object intentionally does **not** duplicate `traceId`/`spanId`/`parentSpanId` — those are already on every log line.
 
-Span logging is **optional**. Without an operation name, `traced()` has zero overhead beyond ALS setup.
+Span logging is **optional**. Without an operation name, `traced()` only opens the Logging Context. Span logs are skipped when the trace is unsampled (`traceFlags` bit 0 unset).
 
 ---
 
-## Platform Detection
+## Log Output
 
-The logger automatically detects the runtime:
+Every runtime builds the same JSON line, one per log call (covered by a test that compares the two):
 
-- **CF Workers**: `navigator.userAgent === 'Cloudflare-Workers'` → uses `browser.write` (no streams)
-- **Node.js**: uses Pino `mixin` + stream to `console.log`
+- Starts with `time` (ISO 8601) and `level` (`TRACE` … `FATAL`); no `pid` or `hostname`.
+- When keys collide, strongest first: trace IDs (`traceId`, `spanId`, `parentSpanId`, which can't be overridden) → fields passed to the log call → logger fields (`createLogger` / `.child()`) → Context Fields.
+- Errors become `{ type, message, stack, ...own fields (e.g. code), cause }`, with `cause` nested the same way. `logger.error(err)` and `logger.error(err, 'msg')` both keep the error under `err`.
+- Circular references are written as `"[Circular]"` and `BigInt` as a string; logging never throws.
 
-Both produce identical JSON output with uppercase level strings.
+Only the final write differs, detected at startup:
+
+- **CF Workers** (`navigator.userAgent === 'Cloudflare-Workers'`): `console.debug` / `info` / `warn` / `error` by level, so Cloudflare assigns the right severity.
+- **Node.js**: `console.log` for every level (stdout).
 
 ---
 
@@ -429,7 +440,7 @@ Both produce identical JSON output with uppercase level strings.
 ```
 cf-logger/
 ├── src/                  # cf-logger source and colocated *.test.ts
-│   ├── index.ts          # Core entry: logger, ALS context, trace utilities, types
+│   ├── index.ts          # Core entry: logger, Logging Context, Trace Carrier, types
 │   ├── hono.ts           # cf-logger/hono entry
 │   └── workers.ts        # cf-logger/workers entry
 ├── dev/                  # Local Worker fixtures for e2e verification (not published)

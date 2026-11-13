@@ -60,10 +60,23 @@ export interface TraceContext {
 }
 
 /**
- * Structured span data emitted by `traced()` when an operation name is provided.
+ * The wire form of a Trace Context, as it travels in HTTP headers, an RPC
+ * `session()` call, or a queue message.
+ *
+ * Get one with `getTraceCarrier()`; continue it with `runWithLogger({ logger, ...carrier })`.
+ */
+export interface TraceCarrier {
+  /** W3C `traceparent` value. Absent outside a Logging Context. */
+  traceparent?: string
+  /** W3C `tracestate` value, when the trace has one. */
+  tracestate?: string
+}
+
+/**
+ * Structured span data logged on `span.end` by `withSpan()` and `TracedSession.traced()`.
  *
  * Trace IDs (`traceId`, `spanId`, `parentSpanId`) are already on every log line
- * via the ALS mixin they are not duplicated inside the span object.
+ * from the Logging Context, so they are not duplicated inside the span object.
  */
 export interface SpanContext {
   /** Human-readable operation name (e.g. `'bind.add'`). */
@@ -81,9 +94,9 @@ export interface SpanContext {
 }
 
 /**
- * Shape of the `AsyncLocalStorage` store for each request.
+ * Shape of the `AsyncLocalStorage` store behind each Logging Context.
  *
- * Created internally by `runWithLogger()` and the Hono middleware.
+ * Created internally by `runWithLogger()` and `withSpan()`; never exposed.
  *
  * @template T - The type of user-defined log fields.
  */
@@ -111,7 +124,7 @@ export interface ALSStore<T extends LogFields = LogFields> {
 export interface LoggerOptions {
   /** Service name included on every log line. */
   service: string
-  /** Minimum log level. Defaults to `'debug'`. */
+  /** Minimum log level. Defaults to `'info'`. */
   level?: LogLevel
   /** Deployment environment (e.g. `'production'`, `'development'`). */
   environment?: string

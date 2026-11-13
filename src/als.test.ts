@@ -1,13 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
-  LoggerFactory,
+  createLogger,
+  runWithLogger,
+  withSpan,
+  getTraceContext,
+  getTraceCarrier,
   getLogger,
   setLoggerContext,
   _reset,
   _captureEntries,
   tracedFetch,
 } from './logger'
-import { resolveTrace, buildTraceparent } from './trace'
+import { buildTraceparent } from './trace'
 
 describe('getLogger outside ALS context', () => {
   beforeEach(() => {
@@ -54,8 +58,8 @@ describe('getLogger outside ALS context', () => {
     const entries = _captureEntries()
 
     // ALS logger
-    const factory = new LoggerFactory({ service: 'shape-svc' })
-    factory.runInContext(resolveTrace(undefined), () => {
+    const rootLogger = createLogger({ service: 'shape-svc' })
+    runWithLogger({ logger: rootLogger }, () => {
       getLogger().info({ key: 'val' }, 'als log')
     })
 
@@ -73,22 +77,39 @@ describe('getLogger outside ALS context', () => {
   })
 })
 
-describe('setLoggerContext outside ALS', () => {
+const WARNING = 'setLoggerContext called outside a Logging Context; fields ignored'
+
+describe('setLoggerContext outside a Logging Context', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     _reset()
   })
 
-  it('stores fields as child bindings on the cached logger', () => {
+  it('ignores the fields, so they never reach later work in the isolate', () => {
+    const entries = _captureEntries()
+    getLogger('ctx-svc') // cached before the call, as in a long-lived isolate
+
+    setLoggerContext({ userId: 'user-42' })
+    getLogger('ctx-svc').info({}, 'standalone after')
+    runWithLogger({ logger: createLogger({ service: 'ctx-svc' }) }, () => {
+      getLogger().info({}, 'next request')
+    })
+
+    const later = entries.filter((e) => e.message !== WARNING)
+    expect(later).toHaveLength(2)
+    for (const entry of later) expect(entry.userId).toBeUndefined()
+  })
+
+  it('warns once per isolate, naming the ignored keys but not their values', () => {
     const entries = _captureEntries()
 
-    getLogger('ctx-svc').info({}, 'before')
-    setLoggerContext({ userId: 'user-42' })
-    getLogger('ctx-svc').info({}, 'after')
+    setLoggerContext({ userId: 'user-42', tenant: 'acme' })
+    setLoggerContext({ other: 'x' })
 
-    expect(entries.length).toBe(2)
-    expect(entries[0].userId).toBeUndefined()
-    expect(entries[1].userId).toBe('user-42')
+    const warnings = entries.filter((e) => e.message === WARNING)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatchObject({ level: 'WARN', ignoredFields: ['userId', 'tenant'] })
+    expect(JSON.stringify(warnings[0])).not.toContain('user-42')
   })
 })
 
@@ -100,9 +121,9 @@ describe('setLoggerContext', () => {
   it('makes fields visible on all log lines within the same request', () => {
     const entries = _captureEntries()
 
-    const factory = new LoggerFactory({ service: 'ctx-svc' })
+    const rootLogger = createLogger({ service: 'ctx-svc' })
 
-    factory.runInContext(resolveTrace(undefined), () => {
+    runWithLogger({ logger: rootLogger }, () => {
       const logger = getLogger()
       logger.info({}, 'before setLoggerContext')
 
@@ -130,13 +151,13 @@ describe('ALS context isolation', () => {
   it('concurrent contexts do not leak fields between each other', async () => {
     const entries = _captureEntries()
 
-    const factory = new LoggerFactory({ service: 'iso-svc' })
+    const rootLogger = createLogger({ service: 'iso-svc' })
 
     // Run two contexts concurrently
     await Promise.all([
       new Promise<void>((resolve) => {
-        factory.runInContext(
-          { traceId: 'aaaa'.repeat(8), spanId: 'bbbb'.repeat(4), traceFlags: 0 },
+        runWithLogger(
+          { logger: rootLogger, traceparent: `00-${'aaaa'.repeat(8)}-${'bbbb'.repeat(4)}-00` },
           () => {
             setLoggerContext({ userId: 'user-A' })
             getLogger().info({}, 'from context A')
@@ -145,8 +166,8 @@ describe('ALS context isolation', () => {
         )
       }),
       new Promise<void>((resolve) => {
-        factory.runInContext(
-          { traceId: 'cccc'.repeat(8), spanId: 'dddd'.repeat(4), traceFlags: 0 },
+        runWithLogger(
+          { logger: rootLogger, traceparent: `00-${'cccc'.repeat(8)}-${'dddd'.repeat(4)}-00` },
           () => {
             setLoggerContext({ userId: 'user-B' })
             getLogger().info({}, 'from context B')
@@ -177,9 +198,9 @@ describe('child logger', () => {
   it('inherits ALS trace fields and adds its own bindings', () => {
     const entries = _captureEntries()
 
-    const factory = new LoggerFactory({ service: 'child-svc' })
+    const rootLogger = createLogger({ service: 'child-svc' })
 
-    factory.runInContext(resolveTrace(undefined), () => {
+    runWithLogger({ logger: rootLogger }, () => {
       const logger = getLogger()
       const child = logger.child({ component: 'cache' })
 
@@ -208,10 +229,11 @@ describe('tracedFetch', () => {
     const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
     vi.stubGlobal('fetch', mockFetch)
 
-    const trace = resolveTrace(undefined)
-    const factory = new LoggerFactory({ service: 'fetch-svc' })
+    const rootLogger = createLogger({ service: 'fetch-svc' })
+    let trace: ReturnType<typeof getTraceContext>
 
-    await factory.runInContext(trace, async () => {
+    await runWithLogger({ logger: rootLogger }, async () => {
+      trace = getTraceContext()
       await tracedFetch('https://example.com/api')
     })
 
@@ -219,16 +241,16 @@ describe('tracedFetch', () => {
     const [url, init] = mockFetch.mock.calls[0]
     expect(url).toBe('https://example.com/api')
     const headers = new Headers(init.headers)
-    expect(headers.get('traceparent')).toBe(buildTraceparent(trace))
+    expect(headers.get('traceparent')).toBe(buildTraceparent(trace!))
   })
 
   it('preserves existing headers', async () => {
     const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
     vi.stubGlobal('fetch', mockFetch)
 
-    const factory = new LoggerFactory({ service: 'fetch-svc' })
+    const rootLogger = createLogger({ service: 'fetch-svc' })
 
-    await factory.runInContext(resolveTrace(undefined), async () => {
+    await runWithLogger({ logger: rootLogger }, async () => {
       await tracedFetch('https://example.com/api', {
         headers: { Authorization: 'Bearer abc', 'Content-Type': 'application/json' },
       })
@@ -257,10 +279,10 @@ describe('tracedFetch', () => {
     const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
     vi.stubGlobal('fetch', mockFetch)
 
-    const factory = new LoggerFactory({ service: 'fetch-svc' })
+    const rootLogger = createLogger({ service: 'fetch-svc' })
     const originalInit = { headers: { 'X-Custom': 'value' } }
 
-    await factory.runInContext(resolveTrace(undefined), async () => {
+    await runWithLogger({ logger: rootLogger }, async () => {
       await tracedFetch('https://example.com/api', originalInit)
     })
 
@@ -272,18 +294,211 @@ describe('tracedFetch', () => {
     const mockFetch = vi.fn().mockResolvedValue(new Response('ok'))
     vi.stubGlobal('fetch', mockFetch)
 
-    const trace = resolveTrace(
-      '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
-      'congo=t61rcWkgMzE',
-    )
-    const factory = new LoggerFactory({ service: 'fetch-svc' })
+    const rootLogger = createLogger({ service: 'fetch-svc' })
+    const context = {
+      logger: rootLogger,
+      traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
+      tracestate: 'congo=t61rcWkgMzE',
+    }
 
-    await factory.runInContext(trace, async () => {
+    await runWithLogger(context, async () => {
       await tracedFetch('https://example.com/api')
     })
 
     const [, init] = mockFetch.mock.calls[0]
     const headers = new Headers(init.headers)
     expect(headers.get('tracestate')).toBe('congo=t61rcWkgMzE')
+  })
+})
+
+describe('getTraceCarrier', () => {
+  beforeEach(() => _reset())
+
+  it('is empty outside a Logging Context', () => {
+    expect(getTraceCarrier()).toEqual({})
+  })
+
+  it('round-trips over a queue-style transport into a continued trace', () => {
+    const logger = createLogger({ service: 'svc' })
+    let sent: ReturnType<typeof getTraceCarrier> = {}
+    let producer: ReturnType<typeof getTraceContext>
+    let consumer: ReturnType<typeof getTraceContext>
+
+    runWithLogger({ logger, tracestate: 'v=1' }, () => {
+      producer = getTraceContext()
+      sent = JSON.parse(JSON.stringify(getTraceCarrier())) // as a queue message body would
+    })
+    runWithLogger({ logger, ...sent }, () => {
+      consumer = getTraceContext()
+    })
+
+    expect(consumer!.traceId).toBe(producer!.traceId)
+    expect(consumer!.parentSpanId).toBe(producer!.spanId)
+    expect(consumer!.tracestate).toBe('v=1')
+  })
+})
+
+describe('runWithLogger', () => {
+  const INCOMING = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+  })
+
+  it('continues an incoming trace with a new span', () => {
+    _captureEntries()
+    let trace: ReturnType<typeof getTraceContext>
+
+    runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent: INCOMING }, () => {
+      trace = getTraceContext()
+    })
+
+    expect(trace!.traceId).toBe('0af7651916cd43dd8448eb211c80319c')
+    expect(trace!.parentSpanId).toBe('b7ad6b7169203331')
+    expect(trace!.spanId).not.toBe('b7ad6b7169203331')
+  })
+
+  it('starts a sampled root trace when no traceparent is given', () => {
+    let trace: ReturnType<typeof getTraceContext>
+
+    runWithLogger({ logger: createLogger({ service: 'svc' }) }, () => {
+      trace = getTraceContext()
+    })
+
+    expect(trace!.traceId).toMatch(/^[0-9a-f]{32}$/)
+    expect(trace!.parentSpanId).toBeUndefined()
+    expect(trace!.traceFlags).toBe(1)
+  })
+
+  it('carries tracestate into the Trace Context', () => {
+    let trace: ReturnType<typeof getTraceContext>
+    const context = {
+      logger: createLogger({ service: 'svc' }),
+      traceparent: INCOMING,
+      tracestate: 'congo=t61rcWkgMzE',
+    }
+
+    runWithLogger(context, () => {
+      trace = getTraceContext()
+    })
+
+    expect(trace!.tracestate).toBe('congo=t61rcWkgMzE')
+  })
+
+  it('puts initial fields on every line and never mutates the caller object', () => {
+    const entries = _captureEntries()
+    const fields = { requestId: 'req-1' }
+
+    runWithLogger({ logger: createLogger({ service: 'svc' }), fields }, () => {
+      setLoggerContext({ userId: 'user-1' })
+      getLogger().info('hello')
+    })
+
+    expect(entries[0]).toMatchObject({ requestId: 'req-1', userId: 'user-1' })
+    expect(fields).toEqual({ requestId: 'req-1' })
+  })
+})
+
+const isSpanEnd = (e: Record<string, unknown>) => (e.message as string)?.startsWith('span.end')
+
+describe('withSpan', () => {
+  const SAMPLED = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+  const UNSAMPLED = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-00'
+
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+  })
+
+  it('outside a Logging Context, just runs fn', () => {
+    const entries = _captureEntries()
+
+    const result = withSpan('noop', () => 7)
+
+    expect(result).toBe(7)
+    expect(entries).toHaveLength(0)
+  })
+
+  it('nests a child span on the same trace and restores the outer span after', () => {
+    const entries = _captureEntries()
+    let outer: ReturnType<typeof getTraceContext>
+    let inner: ReturnType<typeof getTraceContext>
+    let after: ReturnType<typeof getTraceContext>
+
+    runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent: SAMPLED }, () => {
+      outer = getTraceContext()
+      withSpan('db.query', () => {
+        inner = getTraceContext()
+      })
+      after = getTraceContext()
+    })
+
+    expect(inner!.traceId).toBe(outer!.traceId)
+    expect(inner!.parentSpanId).toBe(outer!.spanId)
+    expect(inner!.spanId).not.toBe(outer!.spanId)
+    expect(after!).toEqual(outer!)
+
+    const spanEnd = entries.find(isSpanEnd)!
+    expect(spanEnd.message).toBe('span.end db.query')
+    expect(spanEnd.spanId).toBe(inner!.spanId)
+    expect(spanEnd.parentSpanId).toBe(outer!.spanId)
+    expect((spanEnd.span as Record<string, unknown>).status).toBe('OK')
+  })
+
+  it('logs ERROR with err and rethrows when async fn rejects', async () => {
+    const entries = _captureEntries()
+
+    await runWithLogger(
+      { logger: createLogger({ service: 'svc' }), traceparent: SAMPLED },
+      async () => {
+        await expect(
+          withSpan('db.write', async () => {
+            throw new Error('disk full')
+          }),
+        ).rejects.toThrow('disk full')
+      },
+    )
+
+    const spanEnd = entries.find(isSpanEnd)!
+    expect(spanEnd.level).toBe('ERROR')
+    expect((spanEnd.span as Record<string, unknown>).status).toBe('ERROR')
+    expect((spanEnd.span as Record<string, unknown>).error).toBe('disk full')
+    expect((spanEnd.err as Record<string, unknown>).message).toBe('disk full')
+  })
+
+  it('does not log span.end when the trace is unsampled, but still nests', () => {
+    const entries = _captureEntries()
+    let outer: ReturnType<typeof getTraceContext>
+    let inner: ReturnType<typeof getTraceContext>
+
+    runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent: UNSAMPLED }, () => {
+      outer = getTraceContext()
+      withSpan('db.query', () => {
+        inner = getTraceContext()
+      })
+    })
+
+    expect(entries.find(isSpanEnd)).toBeUndefined()
+    expect(inner!.parentSpanId).toBe(outer!.spanId)
+  })
+
+  it('copies Context Fields in; fields set inside stay inside', () => {
+    const entries = _captureEntries()
+    const context = { logger: createLogger({ service: 'svc' }), fields: { requestId: 'req-1' } }
+
+    runWithLogger(context, () => {
+      withSpan('step', () => {
+        setLoggerContext({ userId: 'user-1' })
+        getLogger().info('inside')
+      })
+      getLogger().info('outside')
+    })
+
+    const inside = entries.find((e) => e.message === 'inside')!
+    const outside = entries.find((e) => e.message === 'outside')!
+    expect(inside).toMatchObject({ requestId: 'req-1', userId: 'user-1' })
+    expect(outside.requestId).toBe('req-1')
+    expect(outside.userId).toBeUndefined()
   })
 })

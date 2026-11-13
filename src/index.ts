@@ -1,21 +1,22 @@
-export type { LogFields, TraceContext, SpanContext, LoggerOptions, Logger, LogLevel } from './types'
+export type {
+  LogFields,
+  TraceContext,
+  TraceCarrier,
+  SpanContext,
+  LoggerOptions,
+  Logger,
+  LogLevel,
+} from './types'
 
 export {
   createLogger,
-  createSimpleLogger,
-  LoggerFactory,
+  runWithLogger,
+  withSpan,
   getLogger,
   setLoggerContext,
-  runWithLogger,
   getTraceContext,
+  getTraceCarrier,
   tracedFetch,
 } from './logger'
 export { loggerOptionsFromEnv } from './env'
-export type { TracedServiceBinding } from './workers'
-export {
-  resolveTrace,
-  buildTraceparent,
-  parseTraceparent,
-  generateTraceId,
-  generateSpanId,
-} from './trace'
+export type { TracedServiceBinding, SessionInit } from './workers'

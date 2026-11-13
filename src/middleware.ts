@@ -1,20 +1,21 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import type { LogFields, Logger } from './types'
-import { resolveTrace, buildTraceparent } from './trace'
-import { runWithLogger, setLoggerContext } from './logger'
+import { extractCarrier, injectCarrier } from './trace'
+import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './logger'
 
 /**
  * Logging Middleware for Hono.
  *
- * Initializes the ALS logging context for each request.
- * Accepts either a `Logger` instance (shared across requests) or a factory
- * function `(c) => Logger` that is called per-request.
+ * Opens a Logging Context (via `runWithLogger()`) for each request.
+ * Accepts either a Root Logger (shared across requests) or a function
+ * `(c) => Logger` called per request that returns one.
  *
- * Handles `X-Request-Id`, `X-Trace-Id`, and `traceparent` headers automatically:
- * - Reads from the incoming request header if present, otherwise generates a new value.
- * - Sets all three on the response headers.
- * - Adds `requestId` to the ALS logger context so it appears on every log line.
- * - `traceId` is already on every log line via the ALS trace context.
+ * Handles `X-Request-Id`, `X-Trace-Id`, `traceparent`, and `tracestate` headers:
+ * - Continues the incoming trace, or starts a new one.
+ * - Reuses an incoming `X-Request-Id`, otherwise generates one.
+ * - Adds `requestId` to the Context Fields so it appears on every log line.
+ * - Logs `request.start` / `request.end` (and `request.error` when Hono caught one).
+ * - Sets `c.var.logger`, `c.var.requestId`, `c.var.traceId` and the response headers.
  *
  * @template T - The type of user-defined log fields.
  * @param {Logger<T> | ((c: Context) => Logger<T>)} loggerOrFactory - A logger instance or a per-request factory.
@@ -37,20 +38,23 @@ export function useLogger<T extends LogFields = LogFields>(
   loggerOrFactory: Logger<T> | ((c: Parameters<MiddlewareHandler>[0]) => Logger<T>),
 ): MiddlewareHandler {
   return async (c, next) => {
-    const baseLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
+    const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
 
-    const trace = resolveTrace(c.req.header('traceparent'), c.req.header('tracestate'))
     const requestId = c.req.header('X-Request-Id') || c.var?.requestId || crypto.randomUUID()
     const method = c.req.method
     const path = new URL(c.req.url).pathname
-    const logger = baseLogger.child({ requestId })
 
-    await runWithLogger({ logger, trace }, async () => {
+    const contextOptions = {
+      logger: rootLogger,
+      ...extractCarrier((name) => c.req.header(name)),
+      fields: { requestId },
+    }
+    await runWithLogger(contextOptions, async () => {
+      const logger = getLogger<T>()
+      const trace = getTraceContext()!
       c.set('logger' as never, logger as never)
       c.set('requestId' as never, requestId as never)
       c.set('traceId' as never, trace.traceId as never)
-
-      setLoggerContext({ requestId })
 
       logger.info({ method, path }, `request.start ${method} ${path}`)
 
@@ -70,10 +74,7 @@ export function useLogger<T extends LogFields = LogFields>(
 
       c.header('X-Request-Id', requestId)
       c.header('X-Trace-Id', trace.traceId)
-      c.header('traceparent', buildTraceparent(trace))
-      if (trace.tracestate) {
-        c.header('tracestate', trace.tracestate)
-      }
+      injectCarrier(getTraceCarrier(), (name, value) => c.header(name, value))
     })
   }
 }

@@ -1,7 +1,23 @@
-import pino from 'pino'
+import pino from 'pino/browser.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { LogFields, LoggerOptions, Logger, TraceContext, ALSStore } from './types'
-import { resolveTrace, buildTraceparent } from './trace'
+import type {
+  LogFields,
+  LoggerOptions,
+  Logger,
+  TraceCarrier,
+  TraceContext,
+  ALSStore,
+  SpanContext,
+} from './types'
+import { resolveTrace, generateSpanId, injectCarrier, toCarrier } from './trace'
+import {
+  buildRecord,
+  nodeSink,
+  stringifyRecord,
+  workersSink,
+  type LogRecord,
+  type Sink,
+} from './output'
 
 const als = new AsyncLocalStorage<ALSStore>()
 
@@ -13,165 +29,78 @@ const als = new AsyncLocalStorage<ALSStore>()
 const IS_WORKERS = typeof navigator !== 'undefined' && navigator.userAgent === 'Cloudflare-Workers'
 
 /**
- * Cast a pino instance to the public Logger interface.
+ * Where finished records go. Chosen by runtime; tests swap it via `_setSink()`.
+ * Only the final write differs between runtimes: records are built identically.
+ */
+let sink: Sink = IS_WORKERS ? workersSink : nodeSink
+
+const LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'] as const
+
+/**
+ * Wrap a pino instance in the public `Logger` interface.
+ *
+ * Normalizes a bare `Error` first argument (`logger.error(err, msg?)`) into
+ * `{ err }` with `msg` defaulting to `err.message`, because pino's object mode
+ * would otherwise drop the error entirely.
  *
  * @template T - The type of user-defined log fields.
- * @param {pino.Logger} p - The pino logger instance to cast.
- * @returns {Logger<T>} The typed Logger wrapper.
+ * @param {pino.Logger} p - The pino instance to wrap.
+ * @returns {Logger<T>} The Logger.
  */
-function asLogger<T extends LogFields = LogFields>(p: pino.Logger): Logger<T> {
-  return p as unknown as Logger<T>
-}
-
-/**
- * Pluggable write function for the Node.js destination.
- * Tests replace this via `_captureEntries()` to receive structured objects.
- */
-let _writeFn: (msg: string) => void = (msg) => {
-  console.log(msg.trimEnd())
-}
-
-/**
- * Node.js destination that delegates to `_writeFn`.
- */
-const consoleDestination = {
-  write(msg: string) {
-    _writeFn(msg)
-  },
-}
-
-/**
- * Build the merged ALS fields (trace context + user fields) for the current request.
- *
- * @returns {Record<string, unknown>} The combined fields from ALS store.
- */
-function getALSFields(): Record<string, unknown> {
-  const store = als.getStore()
-  if (!store) return {}
-  const { trace, fields: context } = store
-  return {
-    traceId: trace.traceId,
-    spanId: trace.spanId,
-    ...(trace.parentSpanId ? { parentSpanId: trace.parentSpanId } : {}),
-    ...context,
+function wrap<T extends LogFields = LogFields>(p: pino.Logger): Logger<T> {
+  const logger = {
+    child: (bindings: Record<string, unknown>) => wrap<T>(p.child(bindings)),
+  } as Logger<T>
+  for (const level of LEVELS) {
+    logger[level] = (...args: unknown[]) => {
+      const [first, msg, ...rest] = args
+      if (first instanceof Error) {
+        ;(p[level] as (...a: unknown[]) => void)({ err: first }, msg ?? first.message, ...rest)
+        return
+      }
+      ;(p[level] as (...a: unknown[]) => void)(...args)
+    }
   }
+  return logger
 }
 
 /**
- * Pino options for Node.js, uses `mixin` for ALS fields and a stream destination.
- *
- * @param {string} level - The minimum log level.
- * @returns {pino.LoggerOptions} Pino configuration for Node.js.
- */
-function nodePinoOptions(level: string): pino.LoggerOptions {
-  return {
-    level,
-    messageKey: 'message',
-    formatters: {
-      level(label) {
-        return { level: label.toUpperCase() }
-      },
-    },
-    serializers: { err: pino.stdSerializers.err },
-    timestamp: pino.stdTimeFunctions.isoTime,
-    mixin: getALSFields,
-  }
-}
-
-/**
- * Map pino level labels to `console` methods for correct OTLP severity.
- */
-const LEVEL_TO_CONSOLE: Record<string, 'debug' | 'info' | 'warn' | 'error'> = {
-  TRACE: 'debug',
-  DEBUG: 'debug',
-  INFO: 'info',
-  WARN: 'warn',
-  ERROR: 'error',
-  FATAL: 'error',
-}
-
-/**
- * Pino options for Cloudflare Workers, uses `browser.write` to inject ALS fields.
- *
- * @param {string} level - The minimum log level.
- * @returns {pino.LoggerOptions} Pino configuration for Workers.
- */
-function workersPinoOptions(level: string): pino.LoggerOptions {
-  return {
-    level,
-    messageKey: 'message',
-    browser: {
-      asObject: true,
-      formatters: {
-        level(label) {
-          return { level: label.toUpperCase() }
-        },
-      },
-      write: (o: object) => {
-        const raw = o as Record<string, unknown>
-        const obj = { ...raw, ...getALSFields() }
-        // Serialize err field if present (browser path doesn't use Pino serializers)
-        if (obj.err instanceof Error) {
-          const e = obj.err
-          obj.err = { type: e.constructor.name, message: e.message, stack: e.stack }
-        }
-        const msg = JSON.stringify(obj)
-        const method = LEVEL_TO_CONSOLE[obj.level as string] ?? 'info'
-        console[method](msg)
-      },
-    },
-    timestamp: pino.stdTimeFunctions.isoTime,
-  }
-}
-
-/**
- * Create a pino instance with platform-appropriate configuration.
- *
- * Detects Cloudflare Workers vs Node.js and applies the matching options.
+ * Create a pino instance. The same configuration on every runtime: pino's
+ * object mode hands each entry to `buildRecord()`, then to the current sink.
  *
  * @param {string} level - The minimum log level.
  * @returns {pino.Logger} A configured pino instance.
  */
 function createPino(level: string): pino.Logger {
-  if (IS_WORKERS) {
-    return pino(workersPinoOptions(level))
-  }
-  return pino(nodePinoOptions(level), consoleDestination)
+  return pino({
+    level,
+    messageKey: 'message',
+    timestamp: pino.stdTimeFunctions.isoTime,
+    browser: {
+      asObject: true,
+      formatters: {
+        level(label: string) {
+          return { level: label.toUpperCase() }
+        },
+      },
+      write: (entry: object) => {
+        sink.write(buildRecord(entry as LogRecord, als.getStore()))
+      },
+    },
+  })
 }
 
 /**
- * Create a simple logger without ALS or factory overhead.
+ * Create a Root Logger.
  *
- * Use this when you need a logger outside of request context
- * (e.g. startup, CLI scripts, background jobs).
- *
- * @template T - The type of user-defined log fields.
- * @param {LoggerOptions} options - Logger configuration.
- * @returns {Logger<T>} A standalone logger instance.
- *
- * @example
- * ```ts
- * const logger = createSimpleLogger({ service: 'cli', level: 'debug' })
- * logger.info('ready')
- * ```
- */
-export function createSimpleLogger<T extends LogFields = LogFields>(
-  options: LoggerOptions,
-): Logger<T> {
-  const p = createPino(options.level ?? 'debug')
-  return asLogger<T>(p.child({ service: options.service }))
-}
-
-/**
- * Create a standalone root logger with context fields baked in.
- *
- * `options` configures the logger; `bindings` become persistent fields
- * on every log line.
+ * Build it once per process or isolate and share it. `service`, `environment`
+ * and `version` appear on every line; `bindings` add more fixed fields. Keep
+ * both to per-process data: per-unit-of-work data belongs in Context Fields.
  *
  * @template T - The type of user-defined log fields.
- * @param {LoggerOptions} options - Logger configuration.
- * @param {Partial<T>} [bindings] - Extra key-value pairs included on every log line.
- * @returns {Logger<T>} A logger with the extra fields attached.
+ * @param {LoggerOptions} options - Logger Options. `level` defaults to `'info'`.
+ * @param {Partial<T>} [bindings] - Extra per-process fields included on every log line.
+ * @returns {Logger<T>} The Root Logger.
  *
  * @example
  * ```ts
@@ -186,8 +115,8 @@ export function createLogger<T extends LogFields = LogFields>(
   bindings?: Partial<T>,
 ): Logger<T> {
   const { service, level, environment, version } = options
-  const p = createPino(level ?? 'debug')
-  return asLogger<T>(
+  const p = createPino(level ?? 'info')
+  return wrap<T>(
     p.child({
       service,
       ...(environment ? { environment } : {}),
@@ -198,66 +127,15 @@ export function createLogger<T extends LogFields = LogFields>(
 }
 
 /**
- * Logger factory that creates per-request child loggers within ALS context.
- *
- * @template T - The type of user-defined log fields.
- *
- * @example
- * ```ts
- * const factory = new LoggerFactory({ service: 'api', level: 'info' })
- * factory.runInContext(trace, () => {
- *   getLogger().info('inside ALS')
- * })
- * ```
- */
-export class LoggerFactory<T extends LogFields = LogFields> {
-  private readonly basePino: pino.Logger
-
-  constructor(private readonly options: LoggerOptions) {
-    this.basePino = createPino(options.level ?? 'debug')
-  }
-
-  /**
-   * Run a function within an ALS context with the given trace context.
-   *
-   * Creates a per-request Pino child and Logger wrapper.
-   *
-   * @param {TraceContext} trace - The W3C trace context for this request.
-   * @param {() => R} fn - The function to execute within the logging context.
-   * @param {Partial<T>} [contextFields] - Optional initial log fields.
-   * @param {string} [levelOverride] - Optional per-request level override.
-   * @returns {R} The return value of `fn`.
-   */
-  runInContext<R>(
-    trace: TraceContext,
-    fn: () => R,
-    contextFields?: Partial<T>,
-    levelOverride?: string,
-  ): R {
-    const { service, level: _level, environment, version } = this.options
-    const childOpts: Record<string, unknown> = {
-      service,
-      ...(environment ? { environment } : {}),
-      ...(version ? { version } : {}),
-    }
-    if (levelOverride) {
-      childOpts.level = levelOverride
-    }
-    const requestPino = this.basePino.child(childOpts)
-    const logger = asLogger<T>(requestPino)
-    const store: ALSStore = {
-      trace,
-      fields: (contextFields ?? {}) as T & LogFields,
-      logger,
-    }
-    return als.run(store, fn)
-  }
-}
-
-/**
- * Cached standalone loggers keyed by service name.
+ * Cached standalone loggers keyed by service name, shared by the whole isolate.
+ * Safe only because nothing mutates them after creation.
  */
 const _cache = new Map<string | symbol, Logger>()
+
+/** Whether the outside-a-Logging-Context warning has been written in this isolate. */
+let warnedOutsideContext = false
+
+const OUTSIDE_CONTEXT_WARNING = 'setLoggerContext called outside a Logging Context; fields ignored'
 
 /**
  * Default key when no service name is provided.
@@ -267,10 +145,10 @@ const DEFAULT_KEY = Symbol('default')
 /**
  * Get a logger for the current context.
  *
- * - **Inside ALS** (middleware / `runWithLogger`): returns the request-scoped
- *   logger with trace context. `service` is ignored (already set by factory).
- * - **Outside ALS**: returns a cached standalone logger, optionally tagged with
- *   a service name.
+ * - **Inside a Logging Context** (`runWithLogger`, `useLogger`, Traced Sessions):
+ *   returns the context's logger. `service` is ignored.
+ * - **Outside a Logging Context**: returns a cached standalone logger (built with
+ *   `createLogger`) tagged with `service`, or `'unknown'` when omitted.
  *
  * @template T - The type of user-defined log fields.
  * @param {string} [service] - Service name used for the standalone fallback logger.
@@ -289,19 +167,20 @@ export function getLogger<T extends LogFields = LogFields>(service?: string): Lo
   const key = service ?? DEFAULT_KEY
   let logger = _cache.get(key)
   if (!logger) {
-    logger = createSimpleLogger({ service: service ?? 'unknown' })
+    logger = createLogger({ service: service ?? 'unknown' })
     _cache.set(key, logger)
   }
   return logger as Logger<T>
 }
 
 /**
- * Enrich the current logging context with extra fields.
+ * Add Context Fields to the current Logging Context.
  *
- * - **Inside ALS**: fields appear on all subsequent log lines in the same request
- *   (via pino mixin).
- * - **Outside ALS**: replaces every cached logger with a child that includes these
- *   fields, so subsequent `getLogger(service)` calls include them.
+ * - **Inside a Logging Context**: fields appear on all subsequent log lines in
+ *   this context and in Spans opened after this call (not in the outer context).
+ * - **Outside a Logging Context**: the fields are ignored, and a single `WARN` line
+ *   (naming the ignored keys, not their values) is written once per isolate.
+ *   An isolate serves many requests at once, so there is nowhere safe to keep them.
  *
  * @template T - The type of user-defined log fields.
  * @param {Partial<T>} fields - Key-value pairs to merge into the logging context.
@@ -318,65 +197,154 @@ export function setLoggerContext<T extends LogFields = LogFields>(fields: Partia
     return
   }
 
-  // Outside ALS upgrade every cached logger with a child that has these bindings
-  for (const [key, logger] of _cache) {
-    _cache.set(key, logger.child(fields))
+  if (!warnedOutsideContext) {
+    warnedOutsideContext = true
+    getLogger().warn({ ignoredFields: Object.keys(fields) }, OUTSIDE_CONTEXT_WARNING)
   }
 }
 
 /**
- * Run a function within a logging context.
+ * Run a function within a Logging Context.
  *
- * Framework-agnostic, use this directly in any runtime (Node.js, CF Workers,
- * RPC entrypoints, scheduled handlers, queue consumers, etc.).
+ * The single way to open a Logging Context, in any runtime (Hono, RPC sessions,
+ * scheduled handlers, queue consumers, Node.js). It continues the trace from
+ * `traceparent` / `tracestate` when they are valid, otherwise starts a new root
+ * trace, and always gives this work its own span ID.
+ *
+ * `logger` is a Root Logger: create it once per process or isolate and pass the
+ * same instance to every context. It must carry only per-process data; put
+ * per-unit-of-work data (`requestId`, `userId`, ...) in `fields`.
  *
  * @template T - The type of user-defined log fields.
  * @template R - The return type of `fn`.
  * @param {object} options - Context options.
- * @param {Logger<T>} options.logger - The logger instance for this context.
- * @param {TraceContext} [options.trace] - An already-parsed trace context.
- * @param {string | null} [options.traceparent] - A raw `traceparent` header to parse. Ignored when `trace` is set.
- * @param {Partial<T>} [options.fields] - Initial log fields.
- * @param {() => R} fn - The function to execute inside the ALS context.
+ * @param {Logger<T>} options.logger - The Root Logger this context logs through.
+ * @param {string | null} [options.traceparent] - Incoming W3C `traceparent` value.
+ * @param {string | null} [options.tracestate] - Incoming W3C `tracestate` value.
+ * @param {Partial<T>} [options.fields] - Initial Context Fields. Copied, never mutated.
+ * @param {() => R} fn - The function to execute inside the Logging Context.
  * @returns {R} The return value of `fn`.
  *
  * @example
  * ```ts
  * const logger = createLogger({ service: 'worker' })
  * runWithLogger({ logger, traceparent: req.headers.get('traceparent') }, () => {
- *   getLogger().info('inside ALS')
+ *   getLogger().info('inside the logging context')
  * })
  * ```
  */
 export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
   options: {
     logger: Logger<T>
-    trace?: TraceContext
     traceparent?: string | null
-    fields?: Partial<T>
+    tracestate?: string | null
+    fields?: Partial<T> | LogFields
   },
   fn: () => R,
 ): R {
-  const trace = options.trace ?? resolveTrace(options.traceparent)
   const store: ALSStore = {
-    trace,
-    fields: (options.fields ?? {}) as T,
-    logger: options.logger,
+    trace: resolveTrace(options.traceparent, options.tracestate),
+    fields: { ...options.fields } as LogFields,
+    logger: options.logger.child({}),
   }
   return als.run(store, fn)
 }
 
 /**
- * Read the current trace context from ALS.
+ * Run `fn` as a named Span nested inside the current Logging Context.
  *
- * @returns {TraceContext | null} The current trace context, or `null` if called outside a logging context.
+ * The Span gets a new span ID whose parent is the current span ID, on the same
+ * trace. Context Fields are copied in: fields set inside the Span stay inside it.
+ * When the trace is sampled, a `span.end` line with timing and status is logged
+ * once `fn` settles (sync or async). Errors are logged and rethrown.
+ *
+ * Outside a Logging Context, `fn` simply runs: no Span, no error.
+ *
+ * @template R - The return type of `fn`.
+ * @param {string} operation - Operation name (e.g. `'db.query'`).
+ * @param {() => R} fn - The work to time.
+ * @returns {R} The return value of `fn`.
  *
  * @example
  * ```ts
- * const trace = getTraceContext()
- * if (trace) {
- *   c.header('traceparent', buildTraceparent(trace))
- * }
+ * const user = await withSpan('db.getUser', () => db.getUser(id))
+ * ```
+ */
+export function withSpan<R>(operation: string, fn: () => R): R {
+  const outer = als.getStore()
+  if (!outer) return fn()
+
+  const store: ALSStore = {
+    trace: { ...outer.trace, spanId: generateSpanId(), parentSpanId: outer.trace.spanId },
+    fields: { ...outer.fields },
+    logger: outer.logger,
+  }
+  return als.run(store, () => recordSpan(operation, fn))
+}
+
+/**
+ * Time `fn` as a Span covering the *current* Logging Context (no new span ID).
+ *
+ * Used by `withSpan()` after it opens a nested context, and by Traced Sessions,
+ * whose whole Logging Context is the Span. Logs only when the trace is sampled.
+ *
+ * @internal Not exported from the package entry points.
+ */
+export function recordSpan<R>(operation: string, fn: () => R): R {
+  const store = als.getStore()
+  if (!store || (store.trace.traceFlags & 0x01) !== 0x01) return fn()
+
+  const { logger } = store
+  const startTime = Date.now()
+
+  const emit = (status: SpanContext['status'], error?: unknown) => {
+    const endTime = Date.now()
+    const span: SpanContext = {
+      operation,
+      startTime,
+      endTime,
+      duration: endTime - startTime,
+      status,
+      ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+    }
+    if (status === 'ERROR') {
+      logger.error({ span, err: error }, 'span.end %s', operation)
+    } else {
+      logger.info({ span }, 'span.end %s', operation)
+    }
+  }
+
+  let result: R
+  try {
+    result = fn()
+  } catch (err) {
+    emit('ERROR', err)
+    throw err
+  }
+  if (result instanceof Promise) {
+    return result.then(
+      (value) => {
+        emit('OK')
+        return value
+      },
+      (err) => {
+        emit('ERROR', err)
+        throw err
+      },
+    ) as R
+  }
+  emit('OK')
+  return result
+}
+
+/**
+ * Read the current Trace Context (IDs and flags).
+ *
+ * @returns {TraceContext | null} A copy of the current Trace Context, or `null` outside a Logging Context.
+ *
+ * @example
+ * ```ts
+ * const traceId = getTraceContext()?.traceId
  * ```
  */
 export function getTraceContext(): TraceContext | null {
@@ -385,48 +353,81 @@ export function getTraceContext(): TraceContext | null {
 }
 
 /**
- * A `fetch` wrapper that injects the current `traceparent` header from ALS.
+ * Get the current Trace Carrier, to pass the trace on over any transport.
  *
- * Outside an ALS context, behaves like regular `fetch()`.
+ * On the receiving side, continue it with `runWithLogger({ logger, ...carrier })`.
+ *
+ * @returns {TraceCarrier} `{ traceparent, tracestate? }`, or `{}` outside a Logging Context.
+ *
+ * @example
+ * ```ts
+ * await env.QUEUE.send({ ...payload, trace: getTraceCarrier() })
+ * ```
+ */
+export function getTraceCarrier(): TraceCarrier {
+  const store = als.getStore()
+  return store ? toCarrier(store.trace) : {}
+}
+
+/**
+ * A `fetch` wrapper that sends the current Trace Carrier as
+ * `traceparent` / `tracestate` headers.
+ *
+ * Outside a Logging Context, behaves like regular `fetch()`.
  *
  * @param {RequestInfo | URL} input - The fetch URL or Request.
- * @param {RequestInit} [init] - Optional fetch init options.
+ * @param {RequestInit} [init] - Optional fetch init options. Never mutated.
  * @returns {Promise<Response>} The fetch response.
  */
 export function tracedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const trace = getTraceContext()
-  if (!trace) return fetch(input, init)
+  const carrier = getTraceCarrier()
+  if (!carrier.traceparent) return fetch(input, init)
 
-  const traceparent = buildTraceparent(trace)
   const headers = new Headers(init?.headers)
-  headers.set('traceparent', traceparent)
-  if (trace.tracestate) {
-    headers.set('tracestate', trace.tracestate)
-  }
+  injectCarrier(carrier, (name, value) => headers.set(name, value))
   return fetch(input, { ...init, headers })
 }
 
 /**
- * Redirect log output to an in-memory array of parsed objects.
+ * Replace the sink that receives finished records. Returns the previous sink.
  *
- * Returns the array; entries are pushed as logging occurs.
- * Call `_reset()` to restore normal console output.
+ * @internal Test seam, not exported from the package entry points.
+ */
+export function _setSink(next: Sink): Sink {
+  const previous = sink
+  sink = next
+  return previous
+}
+
+/**
+ * Redirect log output to an in-memory array of records, exactly as a runtime
+ * sink would serialize them (round-tripped through JSON).
  *
  * @internal Test helper, not part of the public API.
  */
 export function _captureEntries(): Record<string, unknown>[] {
   const entries: Record<string, unknown>[] = []
-  _writeFn = (msg) => {
-    entries.push(JSON.parse(msg))
-  }
+  sink = { write: (record) => entries.push(JSON.parse(stringifyRecord(record))) }
   return entries
 }
 
 /**
- * Reset all cached standalone loggers.
+ * Redirect log output to an in-memory array of serialized JSON lines.
+ *
+ * @internal Test helper, not part of the public API.
+ */
+export function _captureLines(): string[] {
+  const lines: string[] = []
+  sink = { write: (record) => lines.push(stringifyRecord(record)) }
+  return lines
+}
+
+/**
+ * Reset isolate-level state (standalone logger cache, one-time warning). Does not change the sink.
  *
  * Used internally by tests to clear state between runs.
  */
 export function _reset(): void {
   _cache.clear()
+  warnedOutsideContext = false
 }
