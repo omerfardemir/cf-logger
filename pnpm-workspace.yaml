@@ -1,7 +1,4 @@
-onlyBuiltDependencies:
-  - esbuild
-  - sharp
-  - workerd
+minimumReleaseAge: 1440
 allowBuilds:
   esbuild: true
   sharp: true
