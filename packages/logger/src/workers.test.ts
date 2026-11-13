@@ -5,13 +5,29 @@ vi.mock('cloudflare:workers', () => ({
   RpcTarget: class RpcTarget {},
   WorkerEntrypoint: class WorkerEntrypoint {
     env: unknown
-    constructor(_ctx?: unknown, env?: unknown) { this.env = env }
+    constructor(_ctx?: unknown, env?: unknown) {
+      this.env = env
+    }
   },
 }))
 
-import { TracedSession, tracedSession, withTrace, TracedEntrypoint, tracedWorker, loggerOptionsFromEnv } from './workers'
+import {
+  TracedSession,
+  tracedSession,
+  withTrace,
+  TracedEntrypoint,
+  tracedWorker,
+  loggerOptionsFromEnv,
+} from './workers'
 import type { TracedServiceBinding } from './workers'
-import { runWithLogger, getTraceContext, getLogger, _reset, createSimpleLogger, _captureEntries } from './logger'
+import {
+  runWithLogger,
+  getTraceContext,
+  getLogger,
+  _reset,
+  createSimpleLogger,
+  _captureEntries,
+} from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
 
 describe('Session Factory trace propagation', () => {
@@ -40,18 +56,24 @@ describe('Session Factory trace propagation', () => {
 
     await expect(
       binding
-        .session('00-11111111111111111111111111111111-2222222222222222-01', { requestId: 'req-1' }, 'vendor=value')
+        .session(
+          '00-11111111111111111111111111111111-2222222222222222-01',
+          { requestId: 'req-1' },
+          'vendor=value',
+        )
         .add(2, 3),
     ).resolves.toBe(5)
   })
 
   it('loggerOptionsFromEnv maps Cloudflare env conventions', () => {
-    expect(loggerOptionsFromEnv({
-      NAME: 'api',
-      LOG_LEVEL: 'debug',
-      ENVIRONMENT: 'production',
-      VERSION: '1.2.3',
-    })).toEqual({
+    expect(
+      loggerOptionsFromEnv({
+        NAME: 'api',
+        LOG_LEVEL: 'debug',
+        ENVIRONMENT: 'production',
+        VERSION: '1.2.3',
+      }),
+    ).toEqual({
       service: 'api',
       level: 'debug',
       environment: 'production',
@@ -271,7 +293,7 @@ describe('Session Factory trace propagation', () => {
       expect(span.operation).toBe('test.doWork')
       expect(span.status).toBe('OK')
       expect(span.duration).toBeGreaterThanOrEqual(0)
-      expect((span.startTime as number)).toBeLessThanOrEqual(span.endTime as number)
+      expect(span.startTime as number).toBeLessThanOrEqual(span.endTime as number)
       expect(span.error).toBeUndefined()
       // trace IDs are on the log line itself, not duplicated in span
       expect(span.traceId).toBeUndefined()
@@ -286,7 +308,9 @@ describe('Session Factory trace propagation', () => {
 
       class TestSession extends TracedSession {
         doWork() {
-          return this.traced(() => { throw new Error('boom') }, 'test.fail')
+          return this.traced(() => {
+            throw new Error('boom')
+          }, 'test.fail')
         }
       }
 
@@ -310,7 +334,9 @@ describe('Session Factory trace propagation', () => {
 
       class TestSession extends TracedSession {
         doWork() {
-          return this.traced(() => { throw new Error('stack test') }, 'test.stackSync')
+          return this.traced(() => {
+            throw new Error('stack test')
+          }, 'test.stackSync')
         }
       }
 
@@ -457,9 +483,8 @@ describe('Session Factory trace propagation', () => {
       },
     }
 
-    const result = await runWithLogger(
-      { logger: callerLogger, trace: callerTrace },
-      () => withTrace(mockBinding, (s) => s.add(5, 7)),
+    const result = await runWithLogger({ logger: callerLogger, trace: callerTrace }, () =>
+      withTrace(mockBinding, (s) => s.add(5, 7)),
     )
 
     expect(result).toBe(12)
@@ -473,10 +498,7 @@ describe('TracedEntrypoint', () => {
   })
 
   it('loggerOptions reads NAME and LOG_LEVEL from env', () => {
-    const entrypoint = new TracedEntrypoint(
-      {} as any,
-      { NAME: 'my-svc', LOG_LEVEL: 'warn' },
-    )
+    const entrypoint = new TracedEntrypoint({} as any, { NAME: 'my-svc', LOG_LEVEL: 'warn' })
 
     const opts = (entrypoint as any).loggerOptions
     expect(opts.service).toBe('my-svc')
@@ -536,9 +558,8 @@ describe('tracedWorker', () => {
     const callerTrace = resolveTrace()
     const callerLogger = createSimpleLogger({ service: 'caller' })
 
-    const result = await runWithLogger(
-      { logger: callerLogger, trace: callerTrace },
-      () => withTrace(binding, (s) => s.add(3, 4)),
+    const result = await runWithLogger({ logger: callerLogger, trace: callerTrace }, () =>
+      withTrace(binding, (s) => s.add(3, 4)),
     )
 
     expect(result).toBe(7)
@@ -547,7 +568,9 @@ describe('tracedWorker', () => {
   it('session receives env and can access it for multi-hop RPC', () => {
     _captureEntries()
 
-    interface TestEnv { OTHER_SERVICE: { session(tp: string): unknown } }
+    interface TestEnv {
+      OTHER_SERVICE: { session(tp: string): unknown }
+    }
 
     class TestSession extends TracedSession<TestEnv> {
       hasBinding() {

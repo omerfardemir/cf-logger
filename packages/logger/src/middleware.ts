@@ -37,9 +37,7 @@ export function useLogger<T extends LogFields = LogFields>(
   loggerOrFactory: Logger<T> | ((c: Parameters<MiddlewareHandler>[0]) => Logger<T>),
 ): MiddlewareHandler {
   return async (c, next) => {
-    const baseLogger = 'info' in loggerOrFactory
-      ? loggerOrFactory
-      : loggerOrFactory(c)
+    const baseLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
 
     const trace = resolveTrace(c.req.header('traceparent'), c.req.header('tracestate'))
     const requestId = c.req.header('X-Request-Id') || c.var?.requestId || crypto.randomUUID()
@@ -47,36 +45,36 @@ export function useLogger<T extends LogFields = LogFields>(
     const path = new URL(c.req.url).pathname
     const logger = baseLogger.child({ requestId })
 
-    await runWithLogger(
-      { logger, trace },
-      async () => {
-        c.set('logger' as never, logger as never)
-        c.set('requestId' as never, requestId as never)
-        c.set('traceId' as never, trace.traceId as never)
+    await runWithLogger({ logger, trace }, async () => {
+      c.set('logger' as never, logger as never)
+      c.set('requestId' as never, requestId as never)
+      c.set('traceId' as never, trace.traceId as never)
 
-        setLoggerContext({ requestId })
+      setLoggerContext({ requestId })
 
-        logger.info({ method, path }, `request.start ${method} ${path}`)
+      logger.info({ method, path }, `request.start ${method} ${path}`)
 
-        const start = Date.now()
-        await next()
+      const start = Date.now()
+      await next()
 
-        const duration = Date.now() - start
-        const statusCode = c.res.status
+      const duration = Date.now() - start
+      const statusCode = c.res.status
 
-        if (c.error) {
-          logger.error({ err: c.error, method, path, statusCode, duration }, `request.error ${method} ${path}`)
-        }
-        logger.info({ method, path, statusCode, duration }, `request.end ${method} ${path}`)
+      if (c.error) {
+        logger.error(
+          { err: c.error, method, path, statusCode, duration },
+          `request.error ${method} ${path}`,
+        )
+      }
+      logger.info({ method, path, statusCode, duration }, `request.end ${method} ${path}`)
 
-        c.header('X-Request-Id', requestId)
-        c.header('X-Trace-Id', trace.traceId)
-        c.header('traceparent', buildTraceparent(trace))
-        if (trace.tracestate) {
-          c.header('tracestate', trace.tracestate)
-        }
-      },
-    )
+      c.header('X-Request-Id', requestId)
+      c.header('X-Trace-Id', trace.traceId)
+      c.header('traceparent', buildTraceparent(trace))
+      if (trace.tracestate) {
+        c.header('tracestate', trace.tracestate)
+      }
+    })
   }
 }
 
@@ -119,7 +117,7 @@ export const generateId = ({
   headerName,
   generator = () => crypto.randomUUID(),
 }: GenerateIdOptions): MiddlewareHandler => {
-  return async function generateId(c, next) {
+  return async function generateIdMiddleware(c, next) {
     // If `headerName` is empty string, req.header will return the object
     let id = headerName ? c.req.header(headerName) : undefined
     if (!id || /[^\w\-=]/.test(id)) {

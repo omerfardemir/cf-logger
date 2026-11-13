@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { Hono } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { createLogger, _captureEntries, _reset, getLogger } from './logger'
+import { createLogger, _captureEntries, _reset } from './logger'
 import { useLogger } from './middleware'
-import type { LogFields } from './types'
 
 function setup() {
   const entries = _captureEntries()
@@ -72,15 +71,19 @@ describe('useLogger lifecycle logging', () => {
     const res = await app.request('/boom')
     expect(res.status).toBe(418)
     expect(await res.text()).toBe('handled: boom')
-    expect(entries).toContainEqual(expect.objectContaining({
-      message: 'request.end GET /boom',
-      statusCode: 418,
-    }))
-    expect(entries).toContainEqual(expect.objectContaining({
-      message: 'request.error GET /boom',
-      statusCode: 418,
-      err: expect.objectContaining({ message: 'boom' }),
-    }))
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        message: 'request.end GET /boom',
+        statusCode: 418,
+      }),
+    )
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        message: 'request.error GET /boom',
+        statusCode: 418,
+        err: expect.objectContaining({ message: 'boom' }),
+      }),
+    )
   })
 
   it('logs HTTPException status when Hono turns it into a response', async () => {
@@ -100,15 +103,19 @@ describe('useLogger lifecycle logging', () => {
 
     const res = await app.request('/bad-request')
     expect(res.status).toBe(400)
-    expect(entries).toContainEqual(expect.objectContaining({
-      message: 'request.end GET /bad-request',
-      statusCode: 400,
-    }))
-    expect(entries).toContainEqual(expect.objectContaining({
-      message: 'request.error GET /bad-request',
-      statusCode: 400,
-      err: expect.objectContaining({ message: 'bad request' }),
-    }))
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        message: 'request.end GET /bad-request',
+        statusCode: 400,
+      }),
+    )
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        message: 'request.error GET /bad-request',
+        statusCode: 400,
+        err: expect.objectContaining({ message: 'bad request' }),
+      }),
+    )
   })
 
   it('includes correct method and path in lifecycle logs', async () => {
@@ -189,10 +196,7 @@ describe('useLogger lifecycle logging', () => {
       return c.text('ok')
     })
 
-    await Promise.all([
-      app.request('/concurrent'),
-      app.request('/concurrent'),
-    ])
+    await Promise.all([app.request('/concurrent'), app.request('/concurrent')])
 
     expect(loggers).toHaveLength(2)
     expect(loggers[0]).not.toBe(loggers[1])

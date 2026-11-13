@@ -3,7 +3,7 @@
   "type": "module",
   "scripts": {
     "deploy": "wrangler deploy",
-		"start": "wrangler dev",
+    "start": "wrangler dev",
     "cf-typegen": "wrangler types --include-runtime=false"
   },
   "dependencies": {

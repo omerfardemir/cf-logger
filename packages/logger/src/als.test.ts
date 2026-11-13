@@ -1,6 +1,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { LoggerFactory, getLogger, setLoggerContext, _reset, _captureEntries, tracedFetch } from './logger'
-import { generateTraceId, generateSpanId, resolveTrace, buildTraceparent } from './trace'
+import {
+  LoggerFactory,
+  getLogger,
+  setLoggerContext,
+  _reset,
+  _captureEntries,
+  tracedFetch,
+} from './logger'
+import { resolveTrace, buildTraceparent } from './trace'
 
 describe('getLogger outside ALS context', () => {
   beforeEach(() => {
@@ -48,10 +55,9 @@ describe('getLogger outside ALS context', () => {
 
     // ALS logger
     const factory = new LoggerFactory({ service: 'shape-svc' })
-    factory.runInContext(
-      resolveTrace(undefined),
-      () => { getLogger().info({ key: 'val' }, 'als log') },
-    )
+    factory.runInContext(resolveTrace(undefined), () => {
+      getLogger().info({ key: 'val' }, 'als log')
+    })
 
     // Standalone logger
     _reset()
@@ -96,20 +102,17 @@ describe('setLoggerContext', () => {
 
     const factory = new LoggerFactory({ service: 'ctx-svc' })
 
-    factory.runInContext(
-      resolveTrace(undefined),
-      () => {
-        const logger = getLogger()
-        logger.info({}, 'before setLoggerContext')
+    factory.runInContext(resolveTrace(undefined), () => {
+      const logger = getLogger()
+      logger.info({}, 'before setLoggerContext')
 
-        setLoggerContext({ userId: 'user-42' })
-        logger.info({}, 'after setLoggerContext')
+      setLoggerContext({ userId: 'user-42' })
+      logger.info({}, 'after setLoggerContext')
 
-        // Even a child created BEFORE setLoggerContext sees the new field
-        const child = logger.child({ component: 'db' })
-        child.info({}, 'child after setLoggerContext')
-      },
-    )
+      // Even a child created BEFORE setLoggerContext sees the new field
+      const child = logger.child({ component: 'db' })
+      child.info({}, 'child after setLoggerContext')
+    })
 
     expect(entries.length).toBe(3)
     expect(entries[0].userId).toBeUndefined()
@@ -176,18 +179,15 @@ describe('child logger', () => {
 
     const factory = new LoggerFactory({ service: 'child-svc' })
 
-    factory.runInContext(
-      resolveTrace(undefined),
-      () => {
-        const logger = getLogger()
-        const child = logger.child({ component: 'cache' })
+    factory.runInContext(resolveTrace(undefined), () => {
+      const logger = getLogger()
+      const child = logger.child({ component: 'cache' })
 
-        child.info({}, 'child log')
+      child.info({}, 'child log')
 
-        // Parent should NOT have the child's bindings
-        logger.info({}, 'parent log')
-      },
-    )
+      // Parent should NOT have the child's bindings
+      logger.info({}, 'parent log')
+    })
 
     expect(entries.length).toBe(2)
     expect(entries[0].component).toBe('cache')
@@ -230,7 +230,7 @@ describe('tracedFetch', () => {
 
     await factory.runInContext(resolveTrace(undefined), async () => {
       await tracedFetch('https://example.com/api', {
-        headers: { 'Authorization': 'Bearer abc', 'Content-Type': 'application/json' },
+        headers: { Authorization: 'Bearer abc', 'Content-Type': 'application/json' },
       })
     })
 

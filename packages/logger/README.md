@@ -12,11 +12,11 @@ pnpm add hono
 
 ## Entry Points
 
-| Import | Contents |
-|--------|----------|
-| `@cf-logger/logger` | Core: `createLogger`, `createSimpleLogger`, `LoggerFactory`, `loggerOptionsFromEnv`, ALS context, trace utilities, types |
-| `@cf-logger/logger/hono` | `useLogger`, `generateId` — Hono middleware |
-| `@cf-logger/logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession` |
+| Import                      | Contents                                                                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `@cf-logger/logger`         | Core: `createLogger`, `createSimpleLogger`, `LoggerFactory`, `loggerOptionsFromEnv`, ALS context, trace utilities, types |
+| `@cf-logger/logger/hono`    | `useLogger`, `generateId` — Hono middleware                                                                              |
+| `@cf-logger/logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                        |
 
 ---
 
@@ -27,7 +27,7 @@ Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 
 ```jsonc
 {
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_flags": ["nodejs_compat"],
 }
 ```
 
@@ -39,8 +39,8 @@ The package expects these environment variables when using `loggerOptionsFromEnv
     "NAME": "my-worker",
     "LOG_LEVEL": "info",
     "ENVIRONMENT": "production",
-    "VERSION": "1.0.0"
-  }
+    "VERSION": "1.0.0",
+  },
 }
 ```
 
@@ -83,7 +83,7 @@ Get the current request-scoped logger (inside ALS) or a cached standalone logger
 import { getLogger } from '@cf-logger/logger'
 
 // Inside middleware/traced():
-const log = getLogger()       // returns the ALS-scoped logger
+const log = getLogger() // returns the ALS-scoped logger
 log.info('has traceId automatically')
 
 // Outside ALS:
@@ -109,7 +109,7 @@ Run a function within a logging context. Framework-agnostic — works in any run
 import { runWithLogger, createLogger, resolveTrace } from '@cf-logger/logger'
 
 const logger = createLogger({ service: 'queue-handler' })
-const trace = resolveTrace()  // new root trace
+const trace = resolveTrace() // new root trace
 
 runWithLogger({ logger, trace }, () => {
   getLogger().info('Inside ALS context — has traceId')
@@ -142,11 +142,11 @@ const header = buildTraceparent(trace!)
 
 ```ts
 import {
-  generateTraceId,    // → 32 hex chars
-  generateSpanId,     // → 16 hex chars
-  parseTraceparent,   // header string → TraceContext | null
-  buildTraceparent,   // TraceContext → header string
-  resolveTrace,       // parse incoming or start new root trace
+  generateTraceId, // → 32 hex chars
+  generateSpanId, // → 16 hex chars
+  parseTraceparent, // header string → TraceContext | null
+  buildTraceparent, // TraceContext → header string
+  resolveTrace, // parse incoming or start new root trace
 } from '@cf-logger/logger'
 ```
 
@@ -167,6 +167,7 @@ const logger = createLogger(loggerOptionsFromEnv(env))
 ### `useLogger(loggerOrFactory)`
 
 Creates a Hono middleware that:
+
 1. Parses `traceparent` from the incoming request header
 2. Reads `X-Request-Id` from the request or generates a new UUID
 3. Creates an ALS context via `runWithLogger` with the logger and trace
@@ -183,20 +184,24 @@ import { createLogger, setLoggerContext } from '@cf-logger/logger'
 const app = new Hono()
 
 // Option A: per-request logger factory (recommended)
-app.use(useLogger((c) => createLogger({
-  service: c.env.NAME,
-  level: c.env.LOG_LEVEL,
-  environment: c.env.ENVIRONMENT,
-  version: c.env.VERSION,
-  requestId: c.var.requestId,
-})))
+app.use(
+  useLogger((c) =>
+    createLogger({
+      service: c.env.NAME,
+      level: c.env.LOG_LEVEL,
+      environment: c.env.ENVIRONMENT,
+      version: c.env.VERSION,
+      requestId: c.var.requestId,
+    }),
+  ),
+)
 
 // Option B: shared logger instance
 app.use(useLogger(createLogger({ service: 'my-worker' })))
 
 app.get('/', (c) => {
   setLoggerContext({ userId: 'u-42' })
-  c.var.logger.info('Hello world')  // includes traceId, spanId, userId
+  c.var.logger.info('Hello world') // includes traceId, spanId, userId
   return c.text('ok')
 })
 ```
@@ -232,7 +237,7 @@ class MySession extends TracedSession<Env> {
     return this.traced(() => {
       this.logger.info({ a, b }, 'Adding')
       return a + b
-    }, 'my-service.add')  // optional: operation name enables span logging
+    }, 'my-service.add') // optional: operation name enables span logging
   }
 }
 
@@ -241,11 +246,11 @@ export default tracedWorker(MySession)
 
 **Key members:**
 
-| Member | Description |
-|--------|-------------|
+| Member                        | Description                                                                   |
+| ----------------------------- | ----------------------------------------------------------------------------- |
 | `this.traced(fn, operation?)` | Runs `fn` within ALS trace context. Optional `operation` enables span timing. |
-| `this.logger` | Request-scoped logger (must be called inside `traced()`) |
-| `this.env` | Worker env (bindings, vars) — for multi-hop RPC calls |
+| `this.logger`                 | Request-scoped logger (must be called inside `traced()`)                      |
+| `this.env`                    | Worker env (bindings, vars) — for multi-hop RPC calls                         |
 
 ### `tracedWorker(SessionClass)`
 
@@ -257,7 +262,9 @@ export default tracedWorker(MySession)
 
 // Or extend it if you need scheduled(), queue(), etc:
 export default class extends tracedWorker(MySession) {
-  async scheduled(event: ScheduledEvent) { /* ... */ }
+  async scheduled(event: ScheduledEvent) {
+    /* ... */
+  }
 }
 ```
 
@@ -269,10 +276,10 @@ export default class extends tracedWorker(MySession) {
 import { withTrace } from '@cf-logger/logger/workers'
 
 // In a route handler or another traced() method:
-const result = await withTrace(c.env.BIND, s => s.add(5, 7))
+const result = await withTrace(c.env.BIND, (s) => s.add(5, 7))
 
 // With propagated fields — appear on all downstream logs:
-const result = await withTrace(c.env.BIND, s => s.add(5, 7), { requestId: 'abc' })
+const result = await withTrace(c.env.BIND, (s) => s.add(5, 7), { requestId: 'abc' })
 ```
 
 ### `tracedSession(binding, fields?)`
@@ -299,8 +306,8 @@ class BindSession extends TracedSession<Env> {
   async multiHop(value: number): Promise<number> {
     return this.traced(async () => {
       // bind-worker → math-worker (trace propagates automatically)
-      const multiplied = await withTrace(this.env.MATH, s => s.multiply(value, 3))
-      const divided = await withTrace(this.env.MATH, s => s.divide(multiplied, 2))
+      const multiplied = await withTrace(this.env.MATH, (s) => s.multiply(value, 3))
+      const divided = await withTrace(this.env.MATH, (s) => s.divide(multiplied, 2))
       return divided
     }, 'bind.multiHop')
   }
@@ -316,14 +323,18 @@ Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntr
 ```ts
 import { TracedEntrypoint, TracedSession } from '@cf-logger/logger/workers'
 
-class MySession extends TracedSession<Env> { /* ... */ }
+class MySession extends TracedSession<Env> {
+  /* ... */
+}
 
 export default class extends TracedEntrypoint<Env> {
   session(traceparent: string, fields?: Record<string, unknown>, tracestate?: string) {
     return new MySession(traceparent, this.loggerOptions, this.env, fields, tracestate)
   }
 
-  async scheduled(event: ScheduledEvent) { /* ... */ }
+  async scheduled(event: ScheduledEvent) {
+    /* ... */
+  }
 }
 ```
 
@@ -335,8 +346,8 @@ Define shared service method interfaces and use `TracedServiceBinding<T>` for Wo
 import type { TracedServiceBinding } from '@cf-logger/logger/workers'
 
 export interface BindService {
-  add(a: number, b: number): Promise<number>;
-  multiHop(value: number): Promise<number>;
+  add(a: number, b: number): Promise<number>
+  multiHop(value: number): Promise<number>
 }
 ```
 
@@ -344,8 +355,8 @@ Then type your env bindings:
 
 ```ts
 interface Env {
-  BIND: TracedServiceBinding<BindService>;
-  MATH: TracedServiceBinding<MathService>;
+  BIND: TracedServiceBinding<BindService>
+  MATH: TracedServiceBinding<MathService>
 }
 ```
 

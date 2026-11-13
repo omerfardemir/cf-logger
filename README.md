@@ -39,11 +39,11 @@ Hit `http://localhost:8787/` to see structured logs with trace context across wo
 
 Three entry points:
 
-| Import | Use Case |
-|--------|----------|
-| `@cf-logger/logger` | Core: createLogger, getLogger, setLoggerContext, trace utilities |
-| `@cf-logger/logger/hono` | Hono middleware: useLogger |
-| `@cf-logger/logger/workers` | CF Workers RPC: TracedSession, withTrace, tracedWorker |
+| Import                      | Use Case                                                         |
+| --------------------------- | ---------------------------------------------------------------- |
+| `@cf-logger/logger`         | Core: createLogger, getLogger, setLoggerContext, trace utilities |
+| `@cf-logger/logger/hono`    | Hono middleware: useLogger                                       |
+| `@cf-logger/logger/workers` | CF Workers RPC: TracedSession, withTrace, tracedWorker           |
 
 See [packages/logger/README.md](packages/logger/README.md) for full API docs.
 
@@ -70,7 +70,7 @@ Instead of calling RPC methods directly on the binding, you call `binding.sessio
 
 ```ts
 // Caller — one-liner with withTrace():
-const result = await withTrace(c.env.BIND, s => s.add(5, 7))
+const result = await withTrace(c.env.BIND, (s) => s.add(5, 7))
 
 // Receiver — TracedSession handles everything:
 class BindSession extends TracedSession<Env> {
@@ -78,7 +78,7 @@ class BindSession extends TracedSession<Env> {
     return this.traced(() => {
       this.logger.info({ a, b }, 'Adding')
       return a + b
-    }, 'bind.add')  // optional operation name for span logging
+    }, 'bind.add') // optional operation name for span logging
   }
 }
 export default tracedWorker(BindSession)
@@ -97,7 +97,9 @@ Every log line is structured JSON with trace context:
   "service": "bind-test",
   "environment": "development",
   "version": "1.0.0",
-  "a": 5, "b": 7, "result": 12,
+  "a": 5,
+  "b": 7,
+  "result": 12,
   "message": "Added 5 + 7 = 12",
   "traceId": "df8ff57e1b74314da69b381c02680a7f",
   "spanId": "6b470306cc5b904d",
@@ -131,14 +133,14 @@ Each worker needs these env vars for the logger:
 ```jsonc
 {
   "vars": {
-    "NAME": "my-worker",        // service name in logs
-    "LOG_LEVEL": "debug",       // trace | debug | info | warn | error | fatal
+    "NAME": "my-worker", // service name in logs
+    "LOG_LEVEL": "debug", // trace | debug | info | warn | error | fatal
     "ENVIRONMENT": "production",
-    "VERSION": "1.2.3"
+    "VERSION": "1.2.3",
   },
   "observability": {
-    "logs": { "enabled": true, "invocation_logs": false }
-  }
+    "logs": { "enabled": true, "invocation_logs": false },
+  },
 }
 ```
 

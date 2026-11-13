@@ -14,7 +14,7 @@ Wrap the service binding in a JS `Proxy` to intercept method calls and append a 
 
 **Blocked by:** `DataCloneError` — wrapping a `Fetcher`/service binding stub in a `Proxy` throws `ServiceStub serialization requires the 'experimental' compat flag` (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)). The `experimental` flag prevents deployment to production.
 
-> **Note:** The *receiver-side* Proxy (wrapping `this` inside an `RpcTarget`) was fixed in workerd [#3212](https://github.com/cloudflare/workerd/pull/3212) (Dec 2024, `v1.20241213.0`). But the *caller-side* Proxy on `Fetcher` remains broken.
+> **Note:** The _receiver-side_ Proxy (wrapping `this` inside an `RpcTarget`) was fixed in workerd [#3212](https://github.com/cloudflare/workerd/pull/3212) (Dec 2024, `v1.20241213.0`). But the _caller-side_ Proxy on `Fetcher` remains broken.
 
 ### ❌ Approach 2: Cap'n Web (RPC over HTTP)
 
@@ -33,6 +33,7 @@ Pass `traceparent` as an extra argument to every RPC method.
 Use `RpcTarget` private fields to carry trace context. The caller calls `binding.session(traceparent)` which returns an `RpcTarget` instance with the traceparent stored in a `#private` field (never serialized over the wire). RPC methods on the session wrap their logic in `traced()` which sets up ALS with the correct trace context.
 
 **Why it works:**
+
 - `binding.session(traceparent)` is a standard RPC method call — CF supports passing strings
 - Private fields (`#traceparent`) on `RpcTarget` stay server-side — only prototype methods are exposed via JSRPC
 - Each session generates a new `spanId` and links `parentSpanId` to the caller's `spanId`
@@ -88,7 +89,7 @@ class MathSession extends TracedSession<Env> {
       const result = a * b
       this.logger.info({ a, b, result }, 'Multiplied %d × %d = %d', a, b, result)
       return result
-    }, 'math.multiply')  // operation name → span logging
+    }, 'math.multiply') // operation name → span logging
   }
 }
 
@@ -96,12 +97,14 @@ export default tracedWorker(MathSession)
 ```
 
 **`TracedSession`** handles:
+
 - Stores `traceparent` in `#private` field (never sent over wire)
 - `traced(fn, operation?)` sets up ALS with logger + parsed trace context
 - `this.logger` returns the request-scoped logger with traceId/spanId
 - `this.env` provides access to bindings for multi-hop RPC
 
 **`tracedWorker(SessionClass)`** generates the entrypoint:
+
 - Implements `session(traceparent)` → instantiates your session class
 - Reads `LoggerOptions` from env vars (NAME, LOG_LEVEL, ENVIRONMENT, VERSION)
 - Includes a default `fetch()` returning 404
@@ -112,7 +115,7 @@ export default tracedWorker(MathSession)
 import { withTrace } from '@cf-logger/logger/workers'
 
 // One-liner: reads traceparent from ALS, creates session, runs callback
-const result = await withTrace(c.env.BIND, s => s.add(5, 7))
+const result = await withTrace(c.env.BIND, (s) => s.add(5, 7))
 
 // Or for multiple calls on the same session:
 import { tracedSession } from '@cf-logger/logger/workers'
@@ -129,13 +132,13 @@ Define shared service method interfaces and use the package-provided traced bind
 import type { TracedServiceBinding } from '@cf-logger/logger/workers'
 
 export interface BindService {
-  add(a: number, b: number): Promise<number>;
-  multiHop(value: number): Promise<number>;
+  add(a: number, b: number): Promise<number>
+  multiHop(value: number): Promise<number>
 }
 
 export interface MathService {
-  multiply(a: number, b: number): Promise<number>;
-  divide(a: number, b: number): Promise<number>;
+  multiply(a: number, b: number): Promise<number>
+  divide(a: number, b: number): Promise<number>
 }
 ```
 
@@ -143,8 +146,8 @@ Type your env bindings:
 
 ```ts
 interface Env {
-  BIND: TracedServiceBinding<BindService>;
-  MATH: TracedServiceBinding<MathService>;
+  BIND: TracedServiceBinding<BindService>
+  MATH: TracedServiceBinding<MathService>
 }
 ```
 
@@ -153,15 +156,13 @@ interface Env {
 ```jsonc
 // bind-worker/wrangler.jsonc
 {
-  "services": [
-    { "binding": "MATH", "service": "math-test" }
-  ],
+  "services": [{ "binding": "MATH", "service": "math-test" }],
   "vars": {
     "NAME": "bind-test",
     "LOG_LEVEL": "debug",
     "ENVIRONMENT": "development",
-    "VERSION": "1.0.0"
-  }
+    "VERSION": "1.0.0",
+  },
 }
 ```
 
@@ -182,7 +183,9 @@ Emits on completion:
   "level": "INFO",
   "span": { "operation": "math.multiply", "duration": 3, "status": "OK" },
   "message": "span.end math.multiply",
-  "traceId": "abc...", "spanId": "333...", "parentSpanId": "222..."
+  "traceId": "abc...",
+  "spanId": "333...",
+  "parentSpanId": "222..."
 }
 ```
 
@@ -200,11 +203,11 @@ Span logging is **optional**. Omit the operation name and `traced()` has zero sp
 
 ## Key Decisions
 
-| Decision | Rationale |
-|----------|-----------|
-| Session Factory over Proxy | CF platform limitation (workerd #6358) blocks Proxy on Fetcher stubs |
-| Private fields for traceparent | `#field` on RpcTarget stays server-side, never serialized |
-| `withTrace()` one-liner API | Clean DX without changing method signatures |
-| Span data excludes trace IDs | Already on every log line via ALS mixin — no duplicate bytes |
-| Optional span logging | Zero overhead when you don't need timing |
-| Env var convention (NAME, LOG_LEVEL) | Consistent across workers, readable from wrangler config |
+| Decision                             | Rationale                                                            |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| Session Factory over Proxy           | CF platform limitation (workerd #6358) blocks Proxy on Fetcher stubs |
+| Private fields for traceparent       | `#field` on RpcTarget stays server-side, never serialized            |
+| `withTrace()` one-liner API          | Clean DX without changing method signatures                          |
+| Span data excludes trace IDs         | Already on every log line via ALS mixin — no duplicate bytes         |
+| Optional span logging                | Zero overhead when you don't need timing                             |
+| Env var convention (NAME, LOG_LEVEL) | Consistent across workers, readable from wrangler config             |

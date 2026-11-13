@@ -6,7 +6,7 @@
  * const level: LogLevel = 'info'
  * ```
  */
-export type LogLevel = "fatal" | "error" | "warn" | "info" | "debug" | "trace"
+export type LogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace'
 
 /**
  * Allowed types for log field values.
@@ -14,14 +14,14 @@ export type LogLevel = "fatal" | "error" | "warn" | "info" | "debug" | "trace"
  * Supports primitives, `Date`, nested objects, and arrays.
  */
 export type LogValue =
-	| string
-	| number
-	| boolean
-	| Date
-	| null
-	| undefined
-	| { [key: string]: LogValue }
-	| LogValue[]
+  | string
+  | number
+  | boolean
+  | Date
+  | null
+  | undefined
+  | { [key: string]: LogValue }
+  | LogValue[]
 
 /**
  * Key-value map of structured log fields.
@@ -29,7 +29,7 @@ export type LogValue =
  * Passed to `setLoggerContext()` or included as logger bindings.
  */
 export type LogFields = {
-	[key: string]: LogValue
+  [key: string]: LogValue
 }
 
 /**

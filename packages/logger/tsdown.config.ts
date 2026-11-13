@@ -6,9 +6,7 @@ export default defineConfig({
     hono: './src/hono.ts',
     workers: './src/workers.ts',
   },
-  dts: {
-    resolver: 'tsc',
-  },
+  dts: true,
   format: ['esm'],
   platform: 'neutral',
   sourcemap: true,

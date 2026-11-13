@@ -1,13 +1,13 @@
-import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers';
-import type { LogFields, LoggerOptions } from './types';
-import { LoggerFactory, getTraceContext, getLogger } from './logger';
-import { buildTraceparent, resolveTrace } from './trace';
-import { loggerOptionsFromEnv } from './env';
+import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
+import type { LogFields, LoggerOptions } from './types'
+import { LoggerFactory, getTraceContext, getLogger } from './logger'
+import { buildTraceparent, resolveTrace } from './trace'
+import { loggerOptionsFromEnv } from './env'
 
-export { loggerOptionsFromEnv } from './env';
+export { loggerOptionsFromEnv } from './env'
 
 export type TracedServiceBinding<T> = {
-  session(traceparent: string, fields?: LogFields, tracestate?: string): T;
+  session(traceparent: string, fields?: LogFields, tracestate?: string): T
 }
 
 /**
@@ -34,13 +34,13 @@ export type TracedServiceBinding<T> = {
  * ```
  */
 export class TracedSession<E = unknown> extends RpcTarget {
-  #traceparent: string;
-  #tracestate: string | undefined;
-  #loggerOptions: LoggerOptions;
-  #fields: LogFields;
-  #factory: LoggerFactory;
+  #traceparent: string
+  #tracestate: string | undefined
+  #loggerOptions: LoggerOptions
+  #fields: LogFields
+  #factory: LoggerFactory
   /** Worker env instance property, never exposed over RPC. */
-  protected env: E;
+  protected env: E
 
   /**
    * @param {string} traceparent - The W3C `traceparent` header value from the caller.
@@ -49,14 +49,20 @@ export class TracedSession<E = unknown> extends RpcTarget {
    * @param {LogFields} [fields] - Optional initial log fields.
    * @param {string} [tracestate] - Optional W3C `tracestate` header value.
    */
-  constructor(traceparent: string, loggerOptions: LoggerOptions, env: E, fields?: LogFields, tracestate?: string) {
-    super();
-    this.#traceparent = traceparent;
-    this.#tracestate = tracestate;
-    this.#loggerOptions = loggerOptions;
-    this.#fields = fields ?? {};
-    this.#factory = new LoggerFactory(loggerOptions);
-    this.env = env;
+  constructor(
+    traceparent: string,
+    loggerOptions: LoggerOptions,
+    env: E,
+    fields?: LogFields,
+    tracestate?: string,
+  ) {
+    super()
+    this.#traceparent = traceparent
+    this.#tracestate = tracestate
+    this.#loggerOptions = loggerOptions
+    this.#fields = fields ?? {}
+    this.#factory = new LoggerFactory(loggerOptions)
+    this.env = env
   }
 
   /**
@@ -71,18 +77,18 @@ export class TracedSession<E = unknown> extends RpcTarget {
    * @returns {R} The return value of `fn`.
    */
   protected traced<R>(fn: () => R, operation?: string): R {
-    const trace = resolveTrace(this.#traceparent, this.#tracestate);
-    const sampled = (trace.traceFlags & 0x01) === 0x01;
+    const trace = resolveTrace(this.#traceparent, this.#tracestate)
+    const sampled = (trace.traceFlags & 0x01) === 0x01
 
     if (!operation || !sampled) {
-      return this.#factory.runInContext(trace, fn, this.#fields);
+      return this.#factory.runInContext(trace, fn, this.#fields)
     }
 
     return this.#factory.runInContext(trace, () => {
-      const startTime = Date.now();
+      const startTime = Date.now()
 
       const emitSpan = (status: 'OK' | 'ERROR', error?: unknown) => {
-        const endTime = Date.now();
+        const endTime = Date.now()
         const span = {
           operation,
           startTime,
@@ -90,30 +96,40 @@ export class TracedSession<E = unknown> extends RpcTarget {
           duration: endTime - startTime,
           status,
           ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
-        };
-        if (status === 'ERROR') {
-          getLogger(this.#loggerOptions.service).error({ span, err: error }, 'span.end %s', operation);
-        } else {
-          getLogger(this.#loggerOptions.service).info({ span }, 'span.end %s', operation);
         }
-      };
+        if (status === 'ERROR') {
+          getLogger(this.#loggerOptions.service).error(
+            { span, err: error },
+            'span.end %s',
+            operation,
+          )
+        } else {
+          getLogger(this.#loggerOptions.service).info({ span }, 'span.end %s', operation)
+        }
+      }
 
       try {
-        const result = fn();
+        const result = fn()
         // Handle async functions
         if (result instanceof Promise) {
           return result.then(
-            (v) => { emitSpan('OK'); return v; },
-            (err) => { emitSpan('ERROR', err); throw err; },
-          ) as R;
+            (v) => {
+              emitSpan('OK')
+              return v
+            },
+            (err) => {
+              emitSpan('ERROR', err)
+              throw err
+            },
+          ) as R
         }
-        emitSpan('OK');
-        return result;
+        emitSpan('OK')
+        return result
       } catch (err) {
-        emitSpan('ERROR', err);
-        throw err;
+        emitSpan('ERROR', err)
+        throw err
       }
-    });
+    })
   }
 
   /**
@@ -125,7 +141,7 @@ export class TracedSession<E = unknown> extends RpcTarget {
    * @returns {Logger} The request-scoped logger.
    */
   protected get logger() {
-    return getLogger(this.#loggerOptions.service);
+    return getLogger(this.#loggerOptions.service)
   }
 }
 
@@ -153,7 +169,7 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
    * @returns {LoggerOptions} The logger options.
    */
   protected get loggerOptions(): LoggerOptions {
-    return loggerOptionsFromEnv(this.env);
+    return loggerOptionsFromEnv(this.env)
   }
 }
 
@@ -185,12 +201,18 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
  * ```
  */
 export function tracedWorker<S extends TracedSession>(
-  SessionClass: new (traceparent: string, options: LoggerOptions, env: any, fields?: LogFields, tracestate?: string) => S,
+  SessionClass: new (
+    traceparent: string,
+    options: LoggerOptions,
+    env: any,
+    fields?: LogFields,
+    tracestate?: string,
+  ) => S,
 ): {
   new (...args: any[]): {
-    session(traceparent: string, fields?: LogFields, tracestate?: string): S;
-    fetch(): Response | Promise<Response>;
-  };
+    session(traceparent: string, fields?: LogFields, tracestate?: string): S
+    fetch(): Response | Promise<Response>
+  }
 } {
   return class extends WorkerEntrypoint {
     /**
@@ -199,13 +221,19 @@ export function tracedWorker<S extends TracedSession>(
      * @returns {Response | Promise<Response>} A 404 response.
      */
     fetch(): Response | Promise<Response> {
-      return new Response(null, { status: 404 });
+      return new Response(null, { status: 404 })
     }
 
     session(traceparent: string, fields?: LogFields, tracestate?: string): S {
-      return new SessionClass(traceparent, loggerOptionsFromEnv(this.env), this.env, fields, tracestate);
+      return new SessionClass(
+        traceparent,
+        loggerOptionsFromEnv(this.env),
+        this.env,
+        fields,
+        tracestate,
+      )
     }
-  } as any;
+  } as any
 }
 
 /**
@@ -228,13 +256,10 @@ export function tracedWorker<S extends TracedSession>(
  * const result = await session.add(5, 7)
  * ```
  */
-export function tracedSession<T>(
-  binding: TracedServiceBinding<T>,
-  fields?: LogFields,
-): T {
-  const trace = getTraceContext();
-  const traceparent = trace ? buildTraceparent(trace) : '';
-  return binding.session(traceparent, fields, trace?.tracestate);
+export function tracedSession<T>(binding: TracedServiceBinding<T>, fields?: LogFields): T {
+  const trace = getTraceContext()
+  const traceparent = trace ? buildTraceparent(trace) : ''
+  return binding.session(traceparent, fields, trace?.tracestate)
 }
 
 /**
@@ -260,6 +285,6 @@ export async function withTrace<T, R>(
   fn: (session: T) => Promise<R> | R,
   fields?: LogFields,
 ): Promise<R> {
-  const session = tracedSession(binding, fields);
-  return fn(session);
+  const session = tracedSession(binding, fields)
+  return fn(session)
 }

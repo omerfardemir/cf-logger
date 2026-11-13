@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { generateTraceId, generateSpanId, parseTraceparent, buildTraceparent, resolveTrace } from './trace'
+import {
+  generateTraceId,
+  generateSpanId,
+  parseTraceparent,
+  buildTraceparent,
+  resolveTrace,
+} from './trace'
 
 describe('generateTraceId', () => {
   it('returns a 32-character lowercase hex string', () => {
@@ -60,9 +66,7 @@ describe('buildTraceparent', () => {
       spanId: 'b7ad6b7169203331',
       traceFlags: 1,
     }
-    expect(buildTraceparent(ctx)).toBe(
-      '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01',
-    )
+    expect(buildTraceparent(ctx)).toBe('00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01')
   })
 
   it('round-trips through parseTraceparent', () => {

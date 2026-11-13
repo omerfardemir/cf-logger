@@ -27,12 +27,18 @@ function asLogger<T extends LogFields = LogFields>(p: pino.Logger): Logger<T> {
  * Pluggable write function for the Node.js destination.
  * Tests replace this via `_captureEntries()` to receive structured objects.
  */
-let _writeFn: (msg: string) => void = (msg) => { console.log(msg.trimEnd()) }
+let _writeFn: (msg: string) => void = (msg) => {
+  console.log(msg.trimEnd())
+}
 
 /**
  * Node.js destination that delegates to `_writeFn`.
  */
-const consoleDestination = { write(msg: string) { _writeFn(msg) } }
+const consoleDestination = {
+  write(msg: string) {
+    _writeFn(msg)
+  },
+}
 
 /**
  * Build the merged ALS fields (trace context + user fields) for the current request.
@@ -78,8 +84,8 @@ function nodePinoOptions(level: string): pino.LoggerOptions {
 const LEVEL_TO_CONSOLE: Record<string, 'debug' | 'info' | 'warn' | 'error'> = {
   TRACE: 'debug',
   DEBUG: 'debug',
-  INFO:  'info',
-  WARN:  'warn',
+  INFO: 'info',
+  WARN: 'warn',
   ERROR: 'error',
   FATAL: 'error',
 }
@@ -181,7 +187,14 @@ export function createLogger<T extends LogFields = LogFields>(
 ): Logger<T> {
   const { service, level, environment, version } = options
   const p = createPino(level ?? 'debug')
-  return asLogger<T>(p.child({ service, ...(environment ? { environment } : {}), ...(version ? { version } : {}), ...bindings }))
+  return asLogger<T>(
+    p.child({
+      service,
+      ...(environment ? { environment } : {}),
+      ...(version ? { version } : {}),
+      ...bindings,
+    }),
+  )
 }
 
 /**
@@ -222,7 +235,11 @@ export class LoggerFactory<T extends LogFields = LogFields> {
     levelOverride?: string,
   ): R {
     const { service, level: _level, environment, version } = this.options
-    const childOpts: Record<string, unknown> = { service, ...(environment ? { environment } : {}), ...(version ? { version } : {}) }
+    const childOpts: Record<string, unknown> = {
+      service,
+      ...(environment ? { environment } : {}),
+      ...(version ? { version } : {}),
+    }
     if (levelOverride) {
       childOpts.level = levelOverride
     }
@@ -265,9 +282,7 @@ const DEFAULT_KEY = Symbol('default')
  * logger.info({ userId: 42 }, 'user signed in')
  * ```
  */
-export function getLogger<T extends LogFields = LogFields>(
-  service?: string,
-): Logger<T> {
+export function getLogger<T extends LogFields = LogFields>(service?: string): Logger<T> {
   const store = als.getStore()
   if (store) return store.logger as Logger<T>
 
@@ -296,9 +311,7 @@ export function getLogger<T extends LogFields = LogFields>(
  * setLoggerContext({ requestId: 'abc-123', tenantId: 'acme' })
  * ```
  */
-export function setLoggerContext<T extends LogFields = LogFields>(
-  fields: Partial<T>,
-): void {
+export function setLoggerContext<T extends LogFields = LogFields>(fields: Partial<T>): void {
   const store = als.getStore()
   if (store) {
     Object.assign(store.fields, fields)
@@ -368,7 +381,7 @@ export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
  */
 export function getTraceContext(): TraceContext | null {
   const store = als.getStore()
-  return store ? {...store.trace } : null
+  return store ? { ...store.trace } : null
 }
 
 /**
@@ -380,10 +393,7 @@ export function getTraceContext(): TraceContext | null {
  * @param {RequestInit} [init] - Optional fetch init options.
  * @returns {Promise<Response>} The fetch response.
  */
-export function tracedFetch(
-  input: RequestInfo | URL,
-  init?: RequestInit,
-): Promise<Response> {
+export function tracedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const trace = getTraceContext()
   if (!trace) return fetch(input, init)
 
@@ -406,7 +416,9 @@ export function tracedFetch(
  */
 export function _captureEntries(): Record<string, unknown>[] {
   const entries: Record<string, unknown>[] = []
-  _writeFn = (msg) => { entries.push(JSON.parse(msg)) }
+  _writeFn = (msg) => {
+    entries.push(JSON.parse(msg))
+  }
   return entries
 }
 
