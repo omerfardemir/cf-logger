@@ -479,15 +479,4 @@ Releases are cut by hand from the **Publish** workflow (Actions → Publish → 
 
 npm authenticates the workflow through [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC), so there is no npm token or repository secret.
 
-### One-time setup
-
-npm can only add a trusted publisher to a package that already exists, so the very first version is published by hand:
-
-1. On an up-to-date `main` (version `0.0.0`), run `npm login`, then `npm publish --access public`. This creates `cf-logger@0.0.0` on npm. `prepack` builds and tests first.
-2. On npmjs.com, open **cf-logger → Settings → Trusted publishing → GitHub Actions** and enter: user `omerfardemir`, repository `cf-logger`, workflow filename `publish.yml`, no environment. npm doesn't validate this when you save, so a typo only shows up as a failed publish. The first publish through it must happen within 2 days.
-3. Under **Settings → Publishing access**, choose **Require two-factor authentication and disallow tokens**. Trusted Publishing keeps working, and nobody can publish with a token.
-4. Run the Publish workflow with `patch` to release `0.0.1`. Optionally, mark the bootstrap version: `npm deprecate cf-logger@0.0.0 "Bootstrap release, use 0.0.1 or later"`.
-
-### If publishing fails
-
 If npm publish fails after step 3, the version commit and tag are already on `main`. Fix the cause, then publish that tag by hand (`git checkout vX.Y.Z && pnpm install && npm publish --access public`, logged in with 2FA) and create the release with `gh release create vX.Y.Z --verify-tag --generate-notes`. Don't re-run the workflow, because it would bump the version again.
