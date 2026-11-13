@@ -435,6 +435,14 @@ Only the final write differs, detected at startup:
 
 ---
 
+## Agent skill
+
+The package ships an [Agent Skill](https://agentskills.io) at `skills/cf-logger/SKILL.md` for AI coding agents working in your project. It covers which API fits each unit of work (Hono, Worker RPC, queues, cron), the rules the types can't express (one Root Logger per isolate, per-request data in Context Fields, `this.traced` around every RPC method, log call shape) and the Wrangler setup. For signatures it points back to this README.
+
+With pnpm 12.11 or later, run `pnpm approve` after installing and approve `cf-logger`'s skills. pnpm then links the skill into your agents' skill directories (`.claude/skills`, `.cursor/skills`, `.agents/skills`, ...). See [pnpm's agent skills docs](https://pnpm.io/agent-skills).
+
+---
+
 ## Development
 
 ```
@@ -448,6 +456,7 @@ cf-logger/
 │   ├── main-worker/      # Gateway worker (Hono + routes)
 │   ├── bind-worker/      # Mid-tier worker (single + multi-hop RPC)
 │   └── math-worker/      # Leaf worker (multiply, divide)
+├── skills/cf-logger/     # Agent skill shipped in the package
 ├── scripts/e2e-local.mjs # Starts the dev workers, probes trace propagation, checks their logs
 └── docs/                 # Design deep-dives
 ```
@@ -459,6 +468,7 @@ The dev workers import `cf-logger` by package name, which resolves to this packa
 | `pnpm build`                       | Build `dist/` with tsdown                                                    |
 | `pnpm test`                        | Run unit tests (Vitest)                                                      |
 | `pnpm typecheck` / `typecheck:dev` | Typecheck the package / the dev workers (needs a build)                      |
+| `pnpm check:skill`                 | Typecheck the ts snippets in `skills/**/SKILL.md` (needs a build)            |
 | `pnpm lint` / `lint:fix`           | Lint with oxlint                                                             |
 | `pnpm format` / `format:check`     | Format with oxfmt                                                            |
 | `pnpm dev`                         | Run all three dev workers on `http://localhost:8787`                         |

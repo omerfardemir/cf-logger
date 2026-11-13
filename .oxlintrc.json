@@ -9,7 +9,12 @@
     "builtin": true,
     "es2024": true
   },
-  "ignorePatterns": ["**/worker-configuration.d.ts", "**/dist/**", "**/.wrangler/**"],
+  "ignorePatterns": [
+    "**/worker-configuration.d.ts",
+    "**/dist/**",
+    "**/.wrangler/**",
+    "**/.skill-check/**"
+  ],
   "rules": {
     "no-underscore-dangle": "off"
   },

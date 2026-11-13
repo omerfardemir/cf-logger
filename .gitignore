@@ -32,3 +32,6 @@ lerna-debug.log*
 
 # misc
 .DS_Store
+
+# skill snippet type-check (scripts/check-skill-snippets.mjs)
+.skill-check/

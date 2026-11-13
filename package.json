@@ -4,6 +4,7 @@
   "description": "Structured logging and trace propagation for Cloudflare Workers and Node.js.",
   "files": [
     "dist",
+    "skills",
     "README.md",
     "package.json"
   ],
@@ -28,6 +29,7 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "typecheck:dev": "tsc --noEmit -p dev/main-worker && tsc --noEmit -p dev/bind-worker && tsc --noEmit -p dev/math-worker",
+    "check:skill": "node scripts/check-skill-snippets.mjs",
     "test": "vitest run",
     "lint": "oxlint --deny-warnings",
     "lint:fix": "oxlint --fix",
@@ -39,7 +41,7 @@
     "e2e:local": "node scripts/e2e-local.mjs",
     "prepack": "pnpm run build && pnpm run typecheck && pnpm run test",
     "pack:dry": "npm pack --dry-run",
-    "release:check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm typecheck:dev && pnpm test && pnpm pack:dry && pnpm e2e:local"
+    "release:check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm typecheck:dev && pnpm check:skill && pnpm test && pnpm pack:dry && pnpm e2e:local"
   },
   "dependencies": {
     "pino": "^10.4.0"
