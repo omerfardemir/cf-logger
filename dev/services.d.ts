@@ -1,6 +1,6 @@
 /** Shared RPC service interfaces */
 
-import type { TracedServiceBinding } from 'cf-logger'
+import type { TracedServiceBinding } from 'loggercf'
 
 export type ServiceSession<T> = TracedServiceBinding<T>
 

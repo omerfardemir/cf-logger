@@ -1,5 +1,5 @@
-import { TracedSession, tracedWorker } from 'cf-logger/workers'
-import type { LogLevel } from 'cf-logger'
+import { TracedSession, tracedWorker } from 'loggercf/workers'
+import type { LogLevel } from 'loggercf'
 import type { MathService } from '../../services'
 
 interface Env {

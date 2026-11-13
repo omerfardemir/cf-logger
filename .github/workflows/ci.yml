@@ -45,12 +45,12 @@ jobs:
 
       - run: pnpm e2e:local
         env:
-          CF_LOGGER_E2E_LOG_DIR: ${{ runner.temp }}
+          LOGGERCF_E2E_LOG_DIR: ${{ runner.temp }}
 
       - name: Upload wrangler logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: e2e-wrangler-logs
-          path: ${{ runner.temp }}/cf-logger-e2e.*.log
+          path: ${{ runner.temp }}/loggercf-e2e.*.log
           if-no-files-found: ignore

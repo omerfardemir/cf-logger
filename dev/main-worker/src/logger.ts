@@ -1,5 +1,5 @@
-import { createLogger, type LogLevel } from 'cf-logger'
-export { useLogger } from 'cf-logger/hono'
+import { createLogger, type LogLevel } from 'loggercf'
+export { useLogger } from 'loggercf/hono'
 
 export const logger = createLogger({
   service: process.env.NAME ?? 'pino-log-test',

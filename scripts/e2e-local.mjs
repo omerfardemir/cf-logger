@@ -9,9 +9,9 @@
 // Runs on Linux, macOS and Windows.
 //
 // Env:
-//   CF_LOGGER_E2E_LOG_DIR       where wrangler stdout/stderr logs go (default: OS temp dir)
-//   CF_LOGGER_E2E_READY_MS      how long to wait for wrangler to be ready (default: 120000)
-//   CF_LOGGER_E2E_SKIP_CLEANUP  set to 1 to leave the dev server running
+//   LOGGERCF_E2E_LOG_DIR       where wrangler stdout/stderr logs go (default: OS temp dir)
+//   LOGGERCF_E2E_READY_MS      how long to wait for wrangler to be ready (default: 120000)
+//   LOGGERCF_E2E_SKIP_CLEANUP  set to 1 to leave the dev server running
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createWriteStream, readFileSync } from 'node:fs'
@@ -23,10 +23,10 @@ import { stripVTControlCharacters } from 'node:util'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const isWindows = process.platform === 'win32'
-const logDir = process.env.CF_LOGGER_E2E_LOG_DIR || tmpdir()
-const outLog = join(logDir, 'cf-logger-e2e.out.log')
-const errLog = join(logDir, 'cf-logger-e2e.err.log')
-const readyTimeoutMs = Number(process.env.CF_LOGGER_E2E_READY_MS || 120_000)
+const logDir = process.env.LOGGERCF_E2E_LOG_DIR || tmpdir()
+const outLog = join(logDir, 'loggercf-e2e.out.log')
+const errLog = join(logDir, 'loggercf-e2e.err.log')
+const readyTimeoutMs = Number(process.env.LOGGERCF_E2E_READY_MS || 120_000)
 
 const PORT = 8787
 // wrangler prints `127.0.0.1` on Windows and `localhost` on Linux.
@@ -286,7 +286,7 @@ async function main() {
     console.log(JSON.stringify(results, null, 2))
     console.log('E2E passed.')
   } finally {
-    if (process.env.CF_LOGGER_E2E_SKIP_CLEANUP !== '1') stopProcessTree(server.child)
+    if (process.env.LOGGERCF_E2E_SKIP_CLEANUP !== '1') stopProcessTree(server.child)
   }
 }
 

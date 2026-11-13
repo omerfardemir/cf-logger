@@ -4,7 +4,7 @@
 //
 // Each ```ts (or ```typescript) block becomes its own module in .skill-check/ (gitignored),
 // compiled with the same options as the dev workers (dev/main-worker/tsconfig.json).
-// `import ... from 'cf-logger'` resolves to this package's dist/ through package self-reference,
+// `import ... from 'loggercf'` resolves to this package's dist/ through package self-reference,
 // so blocks are checked against the API that actually ships.
 //
 // Opt-out marker: put `wrong` after the language on the opening fence line to skip a block:

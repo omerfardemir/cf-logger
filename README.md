@@ -1,22 +1,22 @@
-# cf-logger
+# loggercf
 
 Structured logging for Cloudflare Workers and Node.js. Built on [Pino](https://getpino.io/) with per-request context via `AsyncLocalStorage`, W3C trace propagation, and a Session Factory pattern for RPC trace propagation across service bindings.
 
 ## Install
 
 ```bash
-pnpm add cf-logger
+pnpm add loggercf
 # Hono is an optional peer dependency
 pnpm add hono
 ```
 
 ## Entry Points
 
-| Import              | Contents                                                                                                                           |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `cf-logger`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
-| `cf-logger/hono`    | `useLogger`, `generateId` — Hono middleware                                                                                        |
-| `cf-logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                                  |
+| Import             | Contents                                                                                                                           |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
+| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware                                                                                        |
+| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                                  |
 
 ## How Trace Propagation Works
 
@@ -35,7 +35,7 @@ Search your log backend for `traceId = "abc"` to see the entire request across a
 
 ## Cloudflare Worker Requirements
 
-`cf-logger` uses `AsyncLocalStorage` through `node:async_hooks`.
+`loggercf` uses `AsyncLocalStorage` through `node:async_hooks`.
 Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 
 ```jsonc
@@ -57,14 +57,14 @@ The package expects these environment variables when using `loggerOptionsFromEnv
 }
 ```
 
-## Core API (`cf-logger`)
+## Core API (`loggercf`)
 
 ### `createLogger(options)`
 
 Create a **Root Logger**: build it once per process or isolate and share it. Works the same on Node.js and CF Workers (see [Log Output](#log-output)).
 
 ```ts
-import { createLogger } from 'cf-logger'
+import { createLogger } from 'loggercf'
 
 const logger = createLogger({
   service: 'my-worker',
@@ -84,7 +84,7 @@ logger.info({ userId: 'u-42' }, 'Request started')
 Get the current Logging Context's logger. Outside any Logging Context, it returns a standalone logger cached per `service` (default `'unknown'`), useful for code that doesn't know whether it runs inside a context. Where you do know, prefer your Root Logger or `runWithLogger`.
 
 ```ts
-import { getLogger } from 'cf-logger'
+import { getLogger } from 'loggercf'
 
 // Inside useLogger / traced() / runWithLogger:
 const log = getLogger() // the Logging Context's logger
@@ -99,7 +99,7 @@ const log = getLogger('cron') // cached standalone logger
 Add fields to the current Logging Context. All subsequent log lines in that context include them. Fields set inside a `withSpan()` stay inside that span.
 
 ```ts
-import { setLoggerContext } from 'cf-logger'
+import { setLoggerContext } from 'loggercf'
 
 setLoggerContext({ userId: 'u-42', feature: 'checkout' })
 // All logs from this point include userId and feature
@@ -112,7 +112,7 @@ Outside a Logging Context the fields are **ignored**, and one `WARN` line naming
 Open a **Logging Context**: the single way to scope logging to one unit of work (HTTP request, RPC call, queue message, cron run). `useLogger` and `TracedSession` use it under the hood.
 
 ```ts
-import { runWithLogger, createLogger, getLogger } from 'cf-logger'
+import { runWithLogger, createLogger, getLogger } from 'loggercf'
 
 const logger = createLogger({ service: 'queue-handler' }) // Root Logger, created once
 
@@ -142,7 +142,7 @@ Without a valid `traceparent` a new root trace starts. Either way the context ge
 Time a sub-operation as a **Span** nested in the current Logging Context: new `spanId`, `parentSpanId` = the current span, same `traceId`. Works sync or async; errors are logged and rethrown. Logs `span.end` only when the trace is sampled. Outside a Logging Context it just runs `fn`.
 
 ```ts
-import { withSpan } from 'cf-logger'
+import { withSpan } from 'loggercf'
 
 app.get('/users/:id', async (c) => {
   const user = await withSpan('db.getUser', () => db.getUser(c.req.param('id')))
@@ -155,7 +155,7 @@ app.get('/users/:id', async (c) => {
 Read the current Trace Context (IDs and flags). Returns `null` outside a Logging Context.
 
 ```ts
-import { getTraceContext } from 'cf-logger'
+import { getTraceContext } from 'loggercf'
 
 const trace = getTraceContext()
 // { traceId: '...', spanId: '...', parentSpanId: '...', traceFlags: 1 }
@@ -166,7 +166,7 @@ const trace = getTraceContext()
 Get the current **Trace Carrier**, `{ traceparent, tracestate? }`, to pass the trace on over any transport. Returns `{}` outside a Logging Context. Its keys match `runWithLogger`'s options, so the receiving side just spreads it in.
 
 ```ts
-import { getTraceCarrier, runWithLogger } from 'cf-logger'
+import { getTraceCarrier, runWithLogger } from 'loggercf'
 
 // Producer: put the carrier in the message
 await env.QUEUE.send({ ...payload, trace: getTraceCarrier() })
@@ -184,14 +184,14 @@ await runWithLogger({ logger, ...msg.body.trace }, async () => {
 Map the conventional Worker environment variables into `LoggerOptions`.
 
 ```ts
-import { createLogger, loggerOptionsFromEnv } from 'cf-logger'
+import { createLogger, loggerOptionsFromEnv } from 'loggercf'
 
 const logger = createLogger(loggerOptionsFromEnv(env))
 ```
 
 ---
 
-## Hono Middleware (`cf-logger/hono`)
+## Hono Middleware (`loggercf/hono`)
 
 ### `useLogger(loggerOrFactory)`
 
@@ -206,8 +206,8 @@ Creates a Hono middleware that:
 
 ```ts
 import { Hono } from 'hono'
-import { useLogger } from 'cf-logger/hono'
-import { createLogger, loggerOptionsFromEnv, setLoggerContext, type Logger } from 'cf-logger'
+import { useLogger } from 'loggercf/hono'
+import { createLogger, loggerOptionsFromEnv, setLoggerContext, type Logger } from 'loggercf'
 
 const app = new Hono()
 
@@ -229,7 +229,7 @@ app.get('/', (c) => {
 
 ---
 
-## CF Workers RPC (`cf-logger/workers`)
+## CF Workers RPC (`loggercf/workers`)
 
 Propagate trace context across Cloudflare Worker service bindings using the **Session Factory pattern**.
 
@@ -242,7 +242,7 @@ CF Workers RPC has no header/metadata channel. You can't attach a `traceparent` 
 Base class for RPC sessions. Extends `RpcTarget`. Your RPC methods go here.
 
 ```ts
-import { TracedSession, tracedWorker } from 'cf-logger/workers'
+import { TracedSession, tracedWorker } from 'loggercf/workers'
 
 interface Env {
   NAME: string
@@ -292,7 +292,7 @@ export default class extends tracedWorker(MySession) {
 **Caller-side** one-liner. Calls `binding.session({ ...getTraceCarrier(), fields })` and passes the session to your callback.
 
 ```ts
-import { withTrace } from 'cf-logger/workers'
+import { withTrace } from 'loggercf/workers'
 
 // In a route handler or another traced() method:
 const result = await withTrace(c.env.BIND, (s) => s.add(5, 7))
@@ -306,7 +306,7 @@ const result = await withTrace(c.env.BIND, (s) => s.add(5, 7), { requestId: 'abc
 Lower-level alternative to `withTrace` — returns the session for multiple calls:
 
 ```ts
-import { tracedSession } from 'cf-logger/workers'
+import { tracedSession } from 'loggercf/workers'
 
 const session = tracedSession(c.env.BIND)
 const a = await session.add(1, 2)
@@ -340,7 +340,7 @@ All workers in the chain share the same `traceId`.
 Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Override `loggerOptions` to customize.
 
 ```ts
-import { TracedEntrypoint, TracedSession, type SessionInit } from 'cf-logger/workers'
+import { TracedEntrypoint, TracedSession, type SessionInit } from 'loggercf/workers'
 
 class MySession extends TracedSession<Env> {
   /* ... */
@@ -362,7 +362,7 @@ export default class extends TracedEntrypoint<Env> {
 Define shared service method interfaces and use `TracedServiceBinding<T>` for Worker bindings:
 
 ```ts
-import type { TracedServiceBinding } from 'cf-logger/workers'
+import type { TracedServiceBinding } from 'loggercf/workers'
 
 export interface BindService {
   add(a: number, b: number): Promise<number>
@@ -437,31 +437,31 @@ Only the final write differs, detected at startup:
 
 ## Agent skill
 
-The package ships an [Agent Skill](https://agentskills.io) at `skills/cf-logger/SKILL.md` for AI coding agents working in your project. It covers which API fits each unit of work (Hono, Worker RPC, queues, cron), the rules the types can't express (one Root Logger per isolate, per-request data in Context Fields, `this.traced` around every RPC method, log call shape) and the Wrangler setup. For signatures it points back to this README.
+The package ships an [Agent Skill](https://agentskills.io) at `skills/loggercf/SKILL.md` for AI coding agents working in your project. It covers which API fits each unit of work (Hono, Worker RPC, queues, cron), the rules the types can't express (one Root Logger per isolate, per-request data in Context Fields, `this.traced` around every RPC method, log call shape) and the Wrangler setup. For signatures it points back to this README.
 
-With pnpm 12.11 or later, run `pnpm approve` after installing and approve `cf-logger`'s skills. pnpm then links the skill into your agents' skill directories (`.claude/skills`, `.cursor/skills`, `.agents/skills`, ...). See [pnpm's agent skills docs](https://pnpm.io/agent-skills).
+With pnpm 12.11 or later, run `pnpm approve` after installing and approve `loggercf`'s skills. pnpm then links the skill into your agents' skill directories (`.claude/skills`, `.cursor/skills`, `.agents/skills`, ...). See [pnpm's agent skills docs](https://pnpm.io/agent-skills).
 
 ---
 
 ## Development
 
 ```
-cf-logger/
-├── src/                  # cf-logger source and colocated *.test.ts
+loggercf/
+├── src/                  # loggercf source and colocated *.test.ts
 │   ├── index.ts          # Core entry: logger, Logging Context, Trace Carrier, types
-│   ├── hono.ts           # cf-logger/hono entry
-│   └── workers.ts        # cf-logger/workers entry
+│   ├── hono.ts           # loggercf/hono entry
+│   └── workers.ts        # loggercf/workers entry
 ├── dev/                  # Local Worker fixtures for e2e verification (not published)
 │   ├── services.d.ts     # Shared RPC service interfaces
 │   ├── main-worker/      # Gateway worker (Hono + routes)
 │   ├── bind-worker/      # Mid-tier worker (single + multi-hop RPC)
 │   └── math-worker/      # Leaf worker (multiply, divide)
-├── skills/cf-logger/     # Agent skill shipped in the package
+├── skills/loggercf/     # Agent skill shipped in the package
 ├── scripts/e2e-local.mjs # Starts the dev workers, probes trace propagation, checks their logs
 └── docs/                 # Design deep-dives
 ```
 
-The dev workers import `cf-logger` by package name, which resolves to this package's built `dist/` — run `pnpm build` before `pnpm dev`.
+The dev workers import `loggercf` by package name, which resolves to this package's built `dist/` — run `pnpm build` before `pnpm dev`.
 
 | Script                             | Purpose                                                                      |
 | ---------------------------------- | ---------------------------------------------------------------------------- |
@@ -490,3 +490,7 @@ Releases are cut by hand from the **Publish** workflow (Actions → Publish → 
 npm authenticates the workflow through [Trusted Publishing](https://docs.npmjs.com/trusted-publishers) (OIDC), so there is no npm token or repository secret.
 
 If npm publish fails after step 3, the version commit and tag are already on `main`. Fix the cause, then publish that tag by hand (`git checkout vX.Y.Z && pnpm install && npm publish --access public`, logged in with 2FA) and create the release with `gh release create vX.Y.Z --verify-tag --generate-notes`. Don't re-run the workflow, because it would bump the version again.
+
+## License
+
+[MIT](LICENSE)
