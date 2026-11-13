@@ -111,7 +111,7 @@ export interface ALSStore<T extends LogFields = LogFields> {
 export interface LoggerOptions {
   /** Service name included on every log line. */
   service: string
-  /** Minimum log level. Defaults to `'debug'`. */
+  /** Minimum log level. Defaults to `'info'`. */
   level?: LogLevel
   /** Deployment environment (e.g. `'production'`, `'development'`). */
   environment?: string

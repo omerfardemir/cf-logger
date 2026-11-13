@@ -83,38 +83,16 @@ function createPino(level: string): pino.Logger {
 }
 
 /**
- * Create a simple logger without ALS or factory overhead.
+ * Create a Root Logger.
  *
- * Use this when you need a logger outside of request context
- * (e.g. startup, CLI scripts, background jobs).
- *
- * @template T - The type of user-defined log fields.
- * @param {LoggerOptions} options - Logger configuration.
- * @returns {Logger<T>} A standalone logger instance.
- *
- * @example
- * ```ts
- * const logger = createSimpleLogger({ service: 'cli', level: 'debug' })
- * logger.info('ready')
- * ```
- */
-export function createSimpleLogger<T extends LogFields = LogFields>(
-  options: LoggerOptions,
-): Logger<T> {
-  const p = createPino(options.level ?? 'debug')
-  return wrap<T>(p.child({ service: options.service }))
-}
-
-/**
- * Create a standalone root logger with context fields baked in.
- *
- * `options` configures the logger; `bindings` become persistent fields
- * on every log line.
+ * Build it once per process or isolate and share it. `service`, `environment`
+ * and `version` appear on every line; `bindings` add more fixed fields. Keep
+ * both to per-process data: per-unit-of-work data belongs in Context Fields.
  *
  * @template T - The type of user-defined log fields.
- * @param {LoggerOptions} options - Logger configuration.
- * @param {Partial<T>} [bindings] - Extra key-value pairs included on every log line.
- * @returns {Logger<T>} A logger with the extra fields attached.
+ * @param {LoggerOptions} options - Logger Options. `level` defaults to `'info'`.
+ * @param {Partial<T>} [bindings] - Extra per-process fields included on every log line.
+ * @returns {Logger<T>} The Root Logger.
  *
  * @example
  * ```ts
@@ -129,7 +107,7 @@ export function createLogger<T extends LogFields = LogFields>(
   bindings?: Partial<T>,
 ): Logger<T> {
   const { service, level, environment, version } = options
-  const p = createPino(level ?? 'debug')
+  const p = createPino(level ?? 'info')
   return wrap<T>(
     p.child({
       service,
@@ -141,9 +119,15 @@ export function createLogger<T extends LogFields = LogFields>(
 }
 
 /**
- * Cached standalone loggers keyed by service name.
+ * Cached standalone loggers keyed by service name, shared by the whole isolate.
+ * Safe only because nothing mutates them after creation.
  */
 const _cache = new Map<string | symbol, Logger>()
+
+/** Whether the outside-a-Logging-Context warning has been written in this isolate. */
+let warnedOutsideContext = false
+
+const OUTSIDE_CONTEXT_WARNING = 'setLoggerContext called outside a Logging Context; fields ignored'
 
 /**
  * Default key when no service name is provided.
@@ -155,8 +139,8 @@ const DEFAULT_KEY = Symbol('default')
  *
  * - **Inside a Logging Context** (`runWithLogger`, `useLogger`, Traced Sessions):
  *   returns the context's logger. `service` is ignored.
- * - **Outside a Logging Context**: returns a cached standalone logger, optionally tagged with
- *   a service name.
+ * - **Outside a Logging Context**: returns a cached standalone logger (built with
+ *   `createLogger`) tagged with `service`, or `'unknown'` when omitted.
  *
  * @template T - The type of user-defined log fields.
  * @param {string} [service] - Service name used for the standalone fallback logger.
@@ -175,7 +159,7 @@ export function getLogger<T extends LogFields = LogFields>(service?: string): Lo
   const key = service ?? DEFAULT_KEY
   let logger = _cache.get(key)
   if (!logger) {
-    logger = createSimpleLogger({ service: service ?? 'unknown' })
+    logger = createLogger({ service: service ?? 'unknown' })
     _cache.set(key, logger)
   }
   return logger as Logger<T>
@@ -186,8 +170,9 @@ export function getLogger<T extends LogFields = LogFields>(service?: string): Lo
  *
  * - **Inside a Logging Context**: fields appear on all subsequent log lines in
  *   this context and in Spans opened after this call (not in the outer context).
- * - **Outside a Logging Context**: replaces every cached logger with a child that includes these
- *   fields, so subsequent `getLogger(service)` calls include them.
+ * - **Outside a Logging Context**: the fields are ignored, and a single `WARN` line
+ *   (naming the ignored keys, not their values) is written once per isolate.
+ *   An isolate serves many requests at once, so there is nowhere safe to keep them.
  *
  * @template T - The type of user-defined log fields.
  * @param {Partial<T>} fields - Key-value pairs to merge into the logging context.
@@ -204,9 +189,9 @@ export function setLoggerContext<T extends LogFields = LogFields>(fields: Partia
     return
   }
 
-  // Outside ALS upgrade every cached logger with a child that has these bindings
-  for (const [key, logger] of _cache) {
-    _cache.set(key, logger.child(fields))
+  if (!warnedOutsideContext) {
+    warnedOutsideContext = true
+    getLogger().warn({ ignoredFields: Object.keys(fields) }, OUTSIDE_CONTEXT_WARNING)
   }
 }
 
@@ -419,10 +404,11 @@ export function _captureLines(): string[] {
 }
 
 /**
- * Reset all cached standalone loggers. Does not change the sink.
+ * Reset isolate-level state (standalone logger cache, one-time warning). Does not change the sink.
  *
  * Used internally by tests to clear state between runs.
  */
 export function _reset(): void {
   _cache.clear()
+  warnedOutsideContext = false
 }

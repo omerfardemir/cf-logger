@@ -12,11 +12,11 @@ pnpm add hono
 
 ## Entry Points
 
-| Import              | Contents                                                                                                                |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `cf-logger`         | Core: `createLogger`, `createSimpleLogger`, `runWithLogger`, `withSpan`, `loggerOptionsFromEnv`, trace utilities, types |
-| `cf-logger/hono`    | `useLogger`, `generateId` — Hono middleware                                                                             |
-| `cf-logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                       |
+| Import              | Contents                                                                                                                           |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `cf-logger`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
+| `cf-logger/hono`    | `useLogger`, `generateId` — Hono middleware                                                                                        |
+| `cf-logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                                  |
 
 ## How Trace Propagation Works
 
@@ -77,19 +77,11 @@ logger.info({ userId: 'u-42' }, 'Request started')
 // → {"time":"...","level":"INFO","service":"my-worker","environment":"production","version":"1.2.3","userId":"u-42","message":"Request started"}
 ```
 
-`service`, `environment` and `version` are on every line. An optional second argument adds more fixed fields. Keep these to per-process data: an isolate serves many requests at once, so per-request data (`requestId`, `userId`, ...) belongs in a Logging Context's fields (see `runWithLogger`).
-
-### `createSimpleLogger(options)`
-
-Minimal logger with just `service` — no extra bindings. Useful for standalone scripts, cron handlers, queue consumers.
-
-```ts
-const logger = createSimpleLogger({ service: 'cron-handler', level: 'info' })
-```
+`level` defaults to `'info'`. `service`, `environment` and `version` are on every line. An optional second argument adds more fixed fields. Keep these to per-process data: an isolate serves many requests at once, so per-request data (`requestId`, `userId`, ...) belongs in a Logging Context's fields (see `runWithLogger`).
 
 ### `getLogger(service?)`
 
-Get the current Logging Context's logger, or a cached standalone logger outside any Logging Context.
+Get the current Logging Context's logger. Outside any Logging Context, it returns a standalone logger cached per `service` (default `'unknown'`), useful for code that doesn't know whether it runs inside a context. Where you do know, prefer your Root Logger or `runWithLogger`.
 
 ```ts
 import { getLogger } from 'cf-logger'
@@ -112,6 +104,8 @@ import { setLoggerContext } from 'cf-logger'
 setLoggerContext({ userId: 'u-42', feature: 'checkout' })
 // All logs from this point include userId and feature
 ```
+
+Outside a Logging Context the fields are **ignored**, and one `WARN` line naming the ignored keys is written per isolate. An isolate serves many requests at once, so fields stored outside a context would leak into unrelated requests.
 
 ### `runWithLogger(options, fn)`
 

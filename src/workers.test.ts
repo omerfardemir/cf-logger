@@ -25,7 +25,6 @@ import {
   getTraceContext,
   getLogger,
   _reset,
-  createSimpleLogger,
   createLogger,
   _captureEntries,
 } from './logger'
@@ -116,7 +115,7 @@ describe('Session Factory trace propagation', () => {
     _captureEntries()
 
     const callerTrace = resolveTrace()
-    const callerLogger = createSimpleLogger({ service: 'caller' })
+    const callerLogger = createLogger({ service: 'caller' })
 
     let receivedTraceparent: string | undefined
     const mockBinding = {
@@ -153,7 +152,7 @@ describe('Session Factory trace propagation', () => {
     _captureEntries()
 
     const callerTrace = resolveTrace()
-    const callerLogger = createSimpleLogger({ service: 'caller' })
+    const callerLogger = createLogger({ service: 'caller' })
 
     class TestSession extends TracedSession {
       getTrace() {
@@ -201,7 +200,7 @@ describe('Session Factory trace propagation', () => {
       },
     }
 
-    const callerLogger = createSimpleLogger({ service: 'caller' })
+    const callerLogger = createLogger({ service: 'caller' })
 
     const [resultA, resultB] = await Promise.all([
       new Promise<ReturnType<typeof getTraceContext>>((resolve) => {
@@ -471,7 +470,7 @@ describe('Session Factory trace propagation', () => {
     _captureEntries()
 
     const callerTrace = resolveTrace()
-    const callerLogger = createSimpleLogger({ service: 'caller' })
+    const callerLogger = createLogger({ service: 'caller' })
 
     class TestSession extends TracedSession {
       async add(a: number, b: number) {
@@ -591,7 +590,7 @@ describe('tracedWorker', () => {
     const binding = new Worker(undefined, { NAME: 'test-svc', LOG_LEVEL: 'debug' })
 
     const callerTrace = resolveTrace()
-    const callerLogger = createSimpleLogger({ service: 'caller' })
+    const callerLogger = createLogger({ service: 'caller' })
 
     const result = await runWithLogger(
       { logger: callerLogger, traceparent: buildTraceparent(callerTrace) },

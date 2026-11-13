@@ -2,7 +2,6 @@ export type { LogFields, TraceContext, SpanContext, LoggerOptions, Logger, LogLe
 
 export {
   createLogger,
-  createSimpleLogger,
   withSpan,
   getLogger,
   setLoggerContext,

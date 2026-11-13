@@ -76,22 +76,39 @@ describe('getLogger outside ALS context', () => {
   })
 })
 
-describe('setLoggerContext outside ALS', () => {
+const WARNING = 'setLoggerContext called outside a Logging Context; fields ignored'
+
+describe('setLoggerContext outside a Logging Context', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
     _reset()
   })
 
-  it('stores fields as child bindings on the cached logger', () => {
+  it('ignores the fields, so they never reach later work in the isolate', () => {
+    const entries = _captureEntries()
+    getLogger('ctx-svc') // cached before the call, as in a long-lived isolate
+
+    setLoggerContext({ userId: 'user-42' })
+    getLogger('ctx-svc').info({}, 'standalone after')
+    runWithLogger({ logger: createLogger({ service: 'ctx-svc' }) }, () => {
+      getLogger().info({}, 'next request')
+    })
+
+    const later = entries.filter((e) => e.message !== WARNING)
+    expect(later).toHaveLength(2)
+    for (const entry of later) expect(entry.userId).toBeUndefined()
+  })
+
+  it('warns once per isolate, naming the ignored keys but not their values', () => {
     const entries = _captureEntries()
 
-    getLogger('ctx-svc').info({}, 'before')
-    setLoggerContext({ userId: 'user-42' })
-    getLogger('ctx-svc').info({}, 'after')
+    setLoggerContext({ userId: 'user-42', tenant: 'acme' })
+    setLoggerContext({ other: 'x' })
 
-    expect(entries.length).toBe(2)
-    expect(entries[0].userId).toBeUndefined()
-    expect(entries[1].userId).toBe('user-42')
+    const warnings = entries.filter((e) => e.message === WARNING)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toMatchObject({ level: 'WARN', ignoredFields: ['userId', 'tenant'] })
+    expect(JSON.stringify(warnings[0])).not.toContain('user-42')
   })
 })
 
