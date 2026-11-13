@@ -1,6 +1,5 @@
 # prod
 dist/
-packages/logger/dist/
 *.tgz
 
 # dev

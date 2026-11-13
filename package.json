@@ -1,26 +1,68 @@
 {
-  "name": "cf-logger",
+  "name": "@cf-logger/logger",
+  "version": "0.0.1",
+  "description": "Structured logging and trace propagation for Cloudflare Workers and Node.js.",
+  "files": [
+    "dist",
+    "README.md",
+    "package.json"
+  ],
   "type": "module",
+  "sideEffects": false,
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./hono": {
+      "types": "./dist/hono.d.ts",
+      "import": "./dist/hono.js"
+    },
+    "./workers": {
+      "types": "./dist/workers.d.ts",
+      "import": "./dist/workers.js"
+    }
+  },
   "scripts": {
-    "dev": "wrangler dev -c workers/main-worker/wrangler.jsonc -c workers/bind-worker/wrangler.jsonc -c workers/math-worker/wrangler.jsonc",
-    "deploy": "wrangler deploy -c workers/main-worker/wrangler.jsonc && wrangler deploy -c workers/bind-worker/wrangler.jsonc && wrangler deploy -c workers/math-worker/wrangler.jsonc",
-    "cf-typegen": "wrangler types --include-runtime=false",
+    "build": "tsdown",
+    "typecheck": "tsc --noEmit",
+    "typecheck:dev": "tsc --noEmit -p dev/main-worker && tsc --noEmit -p dev/bind-worker && tsc --noEmit -p dev/math-worker",
+    "test": "vitest run",
     "lint": "oxlint --deny-warnings",
     "lint:fix": "oxlint --fix",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
-    "logger:build": "pnpm --filter @cf-logger/logger build",
-    "logger:typecheck": "pnpm --filter @cf-logger/logger typecheck",
-    "logger:test": "pnpm --filter @cf-logger/logger test",
-    "logger:pack": "pnpm --filter @cf-logger/logger pack:dry",
+    "dev": "wrangler dev -c dev/main-worker/wrangler.jsonc -c dev/bind-worker/wrangler.jsonc -c dev/math-worker/wrangler.jsonc",
+    "dev:deploy": "wrangler deploy -c dev/main-worker/wrangler.jsonc && wrangler deploy -c dev/bind-worker/wrangler.jsonc && wrangler deploy -c dev/math-worker/wrangler.jsonc",
+    "cf-typegen": "wrangler types -c dev/main-worker/wrangler.jsonc dev/main-worker/worker-configuration.d.ts --include-runtime=false && wrangler types -c dev/bind-worker/wrangler.jsonc dev/bind-worker/worker-configuration.d.ts --include-runtime=false && wrangler types -c dev/math-worker/wrangler.jsonc dev/math-worker/worker-configuration.d.ts --include-runtime=false",
     "e2e:local": "powershell -ExecutionPolicy Bypass -File scripts/e2e-local.ps1",
-    "release:check": "pnpm format:check && pnpm lint && pnpm logger:build && pnpm logger:typecheck && pnpm logger:test && pnpm logger:pack && pnpm e2e:local"
+    "prepack": "pnpm run build && pnpm run typecheck && pnpm run test",
+    "pack:dry": "npm pack --dry-run",
+    "release:check": "pnpm format:check && pnpm lint && pnpm build && pnpm typecheck && pnpm typecheck:dev && pnpm test && pnpm pack:dry && pnpm e2e:local"
+  },
+  "dependencies": {
+    "pino": "^10.3.1"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "catalog:",
-    "oxfmt": "catalog:",
-    "oxlint": "catalog:",
-    "wrangler": "catalog:"
+    "@cloudflare/workers-types": "^4.20260422.1",
+    "@types/node": "^25.6.0",
+    "hono": "^4.12.14",
+    "oxfmt": "^0.78.0",
+    "oxlint": "^1.93.0",
+    "publint": "^0.3.21",
+    "tsdown": "^0.23.7",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.5",
+    "wrangler": "^4.84.1"
+  },
+  "peerDependencies": {
+    "hono": "^4.12.14"
+  },
+  "peerDependenciesMeta": {
+    "hono": {
+      "optional": true
+    }
   },
   "packageManager": "pnpm@10.11.0"
 }

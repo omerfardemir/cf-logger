@@ -25,7 +25,7 @@ if (-not $pnpm) {
 
 Push-Location $repo
 try {
-  & $pnpm --filter '@cf-logger/logger' build
+  & $pnpm build
   if ($LASTEXITCODE -ne 0) {
     throw 'Logger package build failed before e2e startup.'
   }
