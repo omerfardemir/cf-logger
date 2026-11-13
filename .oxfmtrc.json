@@ -8,6 +8,7 @@
     "pnpm-lock.yaml",
     "**/worker-configuration.d.ts",
     "**/dist/**",
-    "**/.wrangler/**"
+    "**/.wrangler/**",
+    "**/.skill-check/**"
   ]
 }

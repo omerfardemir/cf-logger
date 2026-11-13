@@ -31,7 +31,7 @@ jobs:
       - run: pnpm build
       # The dev Workers and the agent skill snippets import the built package.
       - run: pnpm typecheck:dev
-      - run: pnpm run --if-present check:skill
+      - run: pnpm check:skill
       - run: pnpm pack:dry
 
   e2e:
