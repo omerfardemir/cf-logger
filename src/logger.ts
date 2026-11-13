@@ -1,7 +1,15 @@
-import pino from 'pino'
+import pino from 'pino/browser.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type { LogFields, LoggerOptions, Logger, TraceContext, ALSStore, SpanContext } from './types'
 import { resolveTrace, buildTraceparent, generateSpanId } from './trace'
+import {
+  buildRecord,
+  nodeSink,
+  stringifyRecord,
+  workersSink,
+  type LogRecord,
+  type Sink,
+} from './output'
 
 const als = new AsyncLocalStorage<ALSStore>()
 
@@ -13,130 +21,65 @@ const als = new AsyncLocalStorage<ALSStore>()
 const IS_WORKERS = typeof navigator !== 'undefined' && navigator.userAgent === 'Cloudflare-Workers'
 
 /**
- * Cast a pino instance to the public Logger interface.
+ * Where finished records go. Chosen by runtime; tests swap it via `_setSink()`.
+ * Only the final write differs between runtimes: records are built identically.
+ */
+let sink: Sink = IS_WORKERS ? workersSink : nodeSink
+
+const LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'] as const
+
+/**
+ * Wrap a pino instance in the public `Logger` interface.
+ *
+ * Normalizes a bare `Error` first argument (`logger.error(err, msg?)`) into
+ * `{ err }` with `msg` defaulting to `err.message`, because pino's object mode
+ * would otherwise drop the error entirely.
  *
  * @template T - The type of user-defined log fields.
- * @param {pino.Logger} p - The pino logger instance to cast.
- * @returns {Logger<T>} The typed Logger wrapper.
+ * @param {pino.Logger} p - The pino instance to wrap.
+ * @returns {Logger<T>} The Logger.
  */
-function asLogger<T extends LogFields = LogFields>(p: pino.Logger): Logger<T> {
-  return p as unknown as Logger<T>
-}
-
-/**
- * Pluggable write function for the Node.js destination.
- * Tests replace this via `_captureEntries()` to receive structured objects.
- */
-let _writeFn: (msg: string) => void = (msg) => {
-  console.log(msg.trimEnd())
-}
-
-/**
- * Node.js destination that delegates to `_writeFn`.
- */
-const consoleDestination = {
-  write(msg: string) {
-    _writeFn(msg)
-  },
-}
-
-/**
- * Build the merged ALS fields (trace context + user fields) for the current request.
- *
- * @returns {Record<string, unknown>} The combined fields from ALS store.
- */
-function getALSFields(): Record<string, unknown> {
-  const store = als.getStore()
-  if (!store) return {}
-  const { trace, fields: context } = store
-  return {
-    traceId: trace.traceId,
-    spanId: trace.spanId,
-    ...(trace.parentSpanId ? { parentSpanId: trace.parentSpanId } : {}),
-    ...context,
+function wrap<T extends LogFields = LogFields>(p: pino.Logger): Logger<T> {
+  const logger = {
+    child: (bindings: Record<string, unknown>) => wrap<T>(p.child(bindings)),
+  } as Logger<T>
+  for (const level of LEVELS) {
+    logger[level] = (...args: unknown[]) => {
+      const [first, msg, ...rest] = args
+      if (first instanceof Error) {
+        ;(p[level] as (...a: unknown[]) => void)({ err: first }, msg ?? first.message, ...rest)
+        return
+      }
+      ;(p[level] as (...a: unknown[]) => void)(...args)
+    }
   }
+  return logger
 }
 
 /**
- * Pino options for Node.js, uses `mixin` for ALS fields and a stream destination.
- *
- * @param {string} level - The minimum log level.
- * @returns {pino.LoggerOptions} Pino configuration for Node.js.
- */
-function nodePinoOptions(level: string): pino.LoggerOptions {
-  return {
-    level,
-    messageKey: 'message',
-    formatters: {
-      level(label) {
-        return { level: label.toUpperCase() }
-      },
-    },
-    serializers: { err: pino.stdSerializers.err },
-    timestamp: pino.stdTimeFunctions.isoTime,
-    mixin: getALSFields,
-  }
-}
-
-/**
- * Map pino level labels to `console` methods for correct OTLP severity.
- */
-const LEVEL_TO_CONSOLE: Record<string, 'debug' | 'info' | 'warn' | 'error'> = {
-  TRACE: 'debug',
-  DEBUG: 'debug',
-  INFO: 'info',
-  WARN: 'warn',
-  ERROR: 'error',
-  FATAL: 'error',
-}
-
-/**
- * Pino options for Cloudflare Workers, uses `browser.write` to inject ALS fields.
- *
- * @param {string} level - The minimum log level.
- * @returns {pino.LoggerOptions} Pino configuration for Workers.
- */
-function workersPinoOptions(level: string): pino.LoggerOptions {
-  return {
-    level,
-    messageKey: 'message',
-    browser: {
-      asObject: true,
-      formatters: {
-        level(label) {
-          return { level: label.toUpperCase() }
-        },
-      },
-      write: (o: object) => {
-        const raw = o as Record<string, unknown>
-        const obj = { ...raw, ...getALSFields() }
-        // Serialize err field if present (browser path doesn't use Pino serializers)
-        if (obj.err instanceof Error) {
-          const e = obj.err
-          obj.err = { type: e.constructor.name, message: e.message, stack: e.stack }
-        }
-        const msg = JSON.stringify(obj)
-        const method = LEVEL_TO_CONSOLE[obj.level as string] ?? 'info'
-        console[method](msg)
-      },
-    },
-    timestamp: pino.stdTimeFunctions.isoTime,
-  }
-}
-
-/**
- * Create a pino instance with platform-appropriate configuration.
- *
- * Detects Cloudflare Workers vs Node.js and applies the matching options.
+ * Create a pino instance. The same configuration on every runtime: pino's
+ * object mode hands each entry to `buildRecord()`, then to the current sink.
  *
  * @param {string} level - The minimum log level.
  * @returns {pino.Logger} A configured pino instance.
  */
 function createPino(level: string): pino.Logger {
-  if (IS_WORKERS) {
-    return pino(workersPinoOptions(level))
-  }
-  return pino(nodePinoOptions(level), consoleDestination)
+  return pino({
+    level,
+    messageKey: 'message',
+    timestamp: pino.stdTimeFunctions.isoTime,
+    browser: {
+      asObject: true,
+      formatters: {
+        level(label: string) {
+          return { level: label.toUpperCase() }
+        },
+      },
+      write: (entry: object) => {
+        sink.write(buildRecord(entry as LogRecord, als.getStore()))
+      },
+    },
+  })
 }
 
 /**
@@ -159,7 +102,7 @@ export function createSimpleLogger<T extends LogFields = LogFields>(
   options: LoggerOptions,
 ): Logger<T> {
   const p = createPino(options.level ?? 'debug')
-  return asLogger<T>(p.child({ service: options.service }))
+  return wrap<T>(p.child({ service: options.service }))
 }
 
 /**
@@ -187,7 +130,7 @@ export function createLogger<T extends LogFields = LogFields>(
 ): Logger<T> {
   const { service, level, environment, version } = options
   const p = createPino(level ?? 'debug')
-  return asLogger<T>(
+  return wrap<T>(
     p.child({
       service,
       ...(environment ? { environment } : {}),
@@ -442,38 +385,41 @@ export function tracedFetch(input: RequestInfo | URL, init?: RequestInit): Promi
 }
 
 /**
- * Redirect log output to an in-memory array of parsed objects.
+ * Replace the sink that receives finished records. Returns the previous sink.
  *
- * Returns the array; entries are pushed as logging occurs.
- * Call `_reset()` to restore normal console output.
+ * @internal Test seam, not exported from the package entry points.
+ */
+export function _setSink(next: Sink): Sink {
+  const previous = sink
+  sink = next
+  return previous
+}
+
+/**
+ * Redirect log output to an in-memory array of records, exactly as a runtime
+ * sink would serialize them (round-tripped through JSON).
  *
  * @internal Test helper, not part of the public API.
  */
 export function _captureEntries(): Record<string, unknown>[] {
   const entries: Record<string, unknown>[] = []
-  _writeFn = (msg) => {
-    entries.push(JSON.parse(msg))
-  }
+  sink = { write: (record) => entries.push(JSON.parse(stringifyRecord(record))) }
   return entries
 }
 
 /**
- * Redirect log output to an in-memory array of raw JSON lines.
- *
- * Unlike `_captureEntries()`, lines are not parsed, so duplicate keys stay visible.
+ * Redirect log output to an in-memory array of serialized JSON lines.
  *
  * @internal Test helper, not part of the public API.
  */
 export function _captureLines(): string[] {
   const lines: string[] = []
-  _writeFn = (msg) => {
-    lines.push(msg.trimEnd())
-  }
+  sink = { write: (record) => lines.push(stringifyRecord(record)) }
   return lines
 }
 
 /**
- * Reset all cached standalone loggers.
+ * Reset all cached standalone loggers. Does not change the sink.
  *
  * Used internally by tests to clear state between runs.
  */

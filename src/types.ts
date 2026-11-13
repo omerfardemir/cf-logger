@@ -63,7 +63,7 @@ export interface TraceContext {
  * Structured span data logged on `span.end` by `withSpan()` and `TracedSession.traced()`.
  *
  * Trace IDs (`traceId`, `spanId`, `parentSpanId`) are already on every log line
- * via the ALS mixin they are not duplicated inside the span object.
+ * from the Logging Context, so they are not duplicated inside the span object.
  */
 export interface SpanContext {
   /** Human-readable operation name (e.g. `'bind.add'`). */

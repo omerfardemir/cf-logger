@@ -61,7 +61,7 @@ The package expects these environment variables when using `loggerOptionsFromEnv
 
 ### `createLogger(options)`
 
-Create a **Root Logger**: build it once per process or isolate and share it. Platform-aware: uses Pino `mixin` + stream on Node.js, `browser.write` on CF Workers.
+Create a **Root Logger**: build it once per process or isolate and share it. Works the same on Node.js and CF Workers (see [Log Output](#log-output)).
 
 ```ts
 import { createLogger } from 'cf-logger'
@@ -422,14 +422,19 @@ Span logging is **optional**. Without an operation name, `traced()` only opens t
 
 ---
 
-## Platform Detection
+## Log Output
 
-The logger automatically detects the runtime:
+Every runtime builds the same JSON line, one per log call (covered by a test that compares the two):
 
-- **CF Workers**: `navigator.userAgent === 'Cloudflare-Workers'` → uses `browser.write` (no streams)
-- **Node.js**: uses Pino `mixin` + stream to `console.log`
+- Starts with `time` (ISO 8601) and `level` (`TRACE` … `FATAL`); no `pid` or `hostname`.
+- When keys collide, strongest first: trace IDs (`traceId`, `spanId`, `parentSpanId`, which can't be overridden) → fields passed to the log call → logger fields (`createLogger` / `.child()`) → Context Fields.
+- Errors become `{ type, message, stack, ...own fields (e.g. code), cause }`, with `cause` nested the same way. `logger.error(err)` and `logger.error(err, 'msg')` both keep the error under `err`.
+- Circular references are written as `"[Circular]"` and `BigInt` as a string; logging never throws.
 
-Both produce identical JSON output with uppercase level strings.
+Only the final write differs, detected at startup:
+
+- **CF Workers** (`navigator.userAgent === 'Cloudflare-Workers'`): `console.debug` / `info` / `warn` / `error` by level, so Cloudflare assigns the right severity.
+- **Node.js**: `console.log` for every level (stdout).
 
 ---
 

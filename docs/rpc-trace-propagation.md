@@ -208,6 +208,6 @@ Span logging is **optional**. Omit the operation name and `traced()` has zero sp
 | Session Factory over Proxy           | CF platform limitation (workerd #6358) blocks Proxy on Fetcher stubs |
 | Private fields for traceparent       | `#field` on RpcTarget stays server-side, never serialized            |
 | `withTrace()` one-liner API          | Clean DX without changing method signatures                          |
-| Span data excludes trace IDs         | Already on every log line via ALS mixin — no duplicate bytes         |
+| Span data excludes trace IDs         | Already on every log line — no duplicate bytes                       |
 | Optional span logging                | Zero overhead when you don't need timing                             |
 | Env var convention (NAME, LOG_LEVEL) | Consistent across workers, readable from wrangler config             |
