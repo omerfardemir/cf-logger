@@ -1,22 +1,22 @@
-# @cf-logger/logger
+# cf-logger
 
 Structured logging for Cloudflare Workers and Node.js. Built on [Pino](https://getpino.io/) with per-request context via `AsyncLocalStorage`, W3C trace propagation, and a Session Factory pattern for RPC trace propagation across service bindings.
 
 ## Install
 
 ```bash
-pnpm add @cf-logger/logger
+pnpm add cf-logger
 # Hono is an optional peer dependency
 pnpm add hono
 ```
 
 ## Entry Points
 
-| Import                      | Contents                                                                                                                 |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `@cf-logger/logger`         | Core: `createLogger`, `createSimpleLogger`, `LoggerFactory`, `loggerOptionsFromEnv`, ALS context, trace utilities, types |
-| `@cf-logger/logger/hono`    | `useLogger`, `generateId` — Hono middleware                                                                              |
-| `@cf-logger/logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                        |
+| Import              | Contents                                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `cf-logger`         | Core: `createLogger`, `createSimpleLogger`, `LoggerFactory`, `loggerOptionsFromEnv`, ALS context, trace utilities, types |
+| `cf-logger/hono`    | `useLogger`, `generateId` — Hono middleware                                                                              |
+| `cf-logger/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                        |
 
 ## How Trace Propagation Works
 
@@ -35,7 +35,7 @@ Search your log backend for `traceId = "abc"` to see the entire request across a
 
 ## Cloudflare Worker Requirements
 
-`@cf-logger/logger` uses `AsyncLocalStorage` through `node:async_hooks`.
+`cf-logger` uses `AsyncLocalStorage` through `node:async_hooks`.
 Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 
 ```jsonc
@@ -57,14 +57,14 @@ The package expects these environment variables when using `loggerOptionsFromEnv
 }
 ```
 
-## Core API (`@cf-logger/logger`)
+## Core API (`cf-logger`)
 
 ### `createLogger(options)`
 
 Create a logger with service name and additional fields baked in. Platform-aware: uses Pino `mixin` + stream on Node.js, `browser.write` on CF Workers.
 
 ```ts
-import { createLogger } from '@cf-logger/logger'
+import { createLogger } from 'cf-logger'
 
 const logger = createLogger({
   service: 'my-worker',
@@ -93,7 +93,7 @@ const logger = createSimpleLogger({ service: 'cron-handler', level: 'info' })
 Get the current request-scoped logger (inside ALS) or a cached standalone logger (outside ALS).
 
 ```ts
-import { getLogger } from '@cf-logger/logger'
+import { getLogger } from 'cf-logger'
 
 // Inside middleware/traced():
 const log = getLogger() // returns the ALS-scoped logger
@@ -108,7 +108,7 @@ const log = getLogger('cron') // cached standalone logger
 Add fields to the current request's logging context. All subsequent log lines in the same request include these fields.
 
 ```ts
-import { setLoggerContext } from '@cf-logger/logger'
+import { setLoggerContext } from 'cf-logger'
 
 setLoggerContext({ userId: 'u-42', feature: 'checkout' })
 // All logs from this point include userId and feature
@@ -119,7 +119,7 @@ setLoggerContext({ userId: 'u-42', feature: 'checkout' })
 Run a function within a logging context. Framework-agnostic — works in any runtime.
 
 ```ts
-import { runWithLogger, createLogger, resolveTrace } from '@cf-logger/logger'
+import { runWithLogger, createLogger, resolveTrace } from 'cf-logger'
 
 const logger = createLogger({ service: 'queue-handler' })
 const trace = resolveTrace() // new root trace
@@ -142,7 +142,7 @@ runWithLogger({ logger, traceparent: incomingTraceparent }, () => {
 Read the current W3C trace context from ALS. Returns `null` outside a logging context.
 
 ```ts
-import { getTraceContext, buildTraceparent } from '@cf-logger/logger'
+import { getTraceContext, buildTraceparent } from 'cf-logger'
 
 const trace = getTraceContext()
 // { traceId: '...', spanId: '...', parentSpanId: '...', traceFlags: 0 }
@@ -160,7 +160,7 @@ import {
   parseTraceparent, // header string → TraceContext | null
   buildTraceparent, // TraceContext → header string
   resolveTrace, // parse incoming or start new root trace
-} from '@cf-logger/logger'
+} from 'cf-logger'
 ```
 
 ### `loggerOptionsFromEnv(env)`
@@ -168,14 +168,14 @@ import {
 Map the conventional Worker environment variables into `LoggerOptions`.
 
 ```ts
-import { createLogger, loggerOptionsFromEnv } from '@cf-logger/logger'
+import { createLogger, loggerOptionsFromEnv } from 'cf-logger'
 
 const logger = createLogger(loggerOptionsFromEnv(env))
 ```
 
 ---
 
-## Hono Middleware (`@cf-logger/logger/hono`)
+## Hono Middleware (`cf-logger/hono`)
 
 ### `useLogger(loggerOrFactory)`
 
@@ -191,8 +191,8 @@ Creates a Hono middleware that:
 
 ```ts
 import { Hono } from 'hono'
-import { useLogger } from '@cf-logger/logger/hono'
-import { createLogger, setLoggerContext } from '@cf-logger/logger'
+import { useLogger } from 'cf-logger/hono'
+import { createLogger, setLoggerContext } from 'cf-logger'
 
 const app = new Hono()
 
@@ -223,7 +223,7 @@ app.get('/', (c) => {
 
 ---
 
-## CF Workers RPC (`@cf-logger/logger/workers`)
+## CF Workers RPC (`cf-logger/workers`)
 
 Propagate trace context across Cloudflare Worker service bindings using the **Session Factory pattern**.
 
@@ -236,7 +236,7 @@ CF Workers RPC has no header/metadata channel. You can't attach a `traceparent` 
 Base class for RPC sessions. Extends `RpcTarget`. Your RPC methods go here.
 
 ```ts
-import { TracedSession, tracedWorker } from '@cf-logger/logger/workers'
+import { TracedSession, tracedWorker } from 'cf-logger/workers'
 
 interface Env {
   NAME: string
@@ -286,7 +286,7 @@ export default class extends tracedWorker(MySession) {
 **Caller-side** one-liner. Reads `traceparent` from current ALS, calls `binding.session(traceparent, fields)`, passes the session to your callback.
 
 ```ts
-import { withTrace } from '@cf-logger/logger/workers'
+import { withTrace } from 'cf-logger/workers'
 
 // In a route handler or another traced() method:
 const result = await withTrace(c.env.BIND, (s) => s.add(5, 7))
@@ -300,7 +300,7 @@ const result = await withTrace(c.env.BIND, (s) => s.add(5, 7), { requestId: 'abc
 Lower-level alternative to `withTrace` — returns the session for multiple calls:
 
 ```ts
-import { tracedSession } from '@cf-logger/logger/workers'
+import { tracedSession } from 'cf-logger/workers'
 
 const session = tracedSession(c.env.BIND)
 const a = await session.add(1, 2)
@@ -334,7 +334,7 @@ All workers in the chain share the same `traceId`.
 Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`).
 
 ```ts
-import { TracedEntrypoint, TracedSession } from '@cf-logger/logger/workers'
+import { TracedEntrypoint, TracedSession } from 'cf-logger/workers'
 
 class MySession extends TracedSession<Env> {
   /* ... */
@@ -356,7 +356,7 @@ export default class extends TracedEntrypoint<Env> {
 Define shared service method interfaces and use `TracedServiceBinding<T>` for Worker bindings:
 
 ```ts
-import type { TracedServiceBinding } from '@cf-logger/logger/workers'
+import type { TracedServiceBinding } from 'cf-logger/workers'
 
 export interface BindService {
   add(a: number, b: number): Promise<number>
@@ -428,10 +428,10 @@ Both produce identical JSON output with uppercase level strings.
 
 ```
 cf-logger/
-├── src/                  # @cf-logger/logger source and colocated *.test.ts
+├── src/                  # cf-logger source and colocated *.test.ts
 │   ├── index.ts          # Core entry: logger, ALS context, trace utilities, types
-│   ├── hono.ts           # @cf-logger/logger/hono entry
-│   └── workers.ts        # @cf-logger/logger/workers entry
+│   ├── hono.ts           # cf-logger/hono entry
+│   └── workers.ts        # cf-logger/workers entry
 ├── dev/                  # Local Worker fixtures for e2e verification (not published)
 │   ├── services.d.ts     # Shared RPC service interfaces
 │   ├── main-worker/      # Gateway worker (Hono + routes)
@@ -441,7 +441,7 @@ cf-logger/
 └── docs/                 # Design deep-dives
 ```
 
-The dev workers import `@cf-logger/logger` by package name, which resolves to this package's built `dist/` — run `pnpm build` before `pnpm dev`.
+The dev workers import `cf-logger` by package name, which resolves to this package's built `dist/` — run `pnpm build` before `pnpm dev`.
 
 | Script                             | Purpose                                                    |
 | ---------------------------------- | ---------------------------------------------------------- |

@@ -81,7 +81,7 @@ All four invocations share `traceId: abc`. Search Grafana for that ID and you se
 ### Receiver Side
 
 ```ts
-import { TracedSession, tracedWorker } from '@cf-logger/logger/workers'
+import { TracedSession, tracedWorker } from 'cf-logger/workers'
 
 class MathSession extends TracedSession<Env> {
   async multiply(a: number, b: number): Promise<number> {
@@ -112,13 +112,13 @@ export default tracedWorker(MathSession)
 ### Caller Side
 
 ```ts
-import { withTrace } from '@cf-logger/logger/workers'
+import { withTrace } from 'cf-logger/workers'
 
 // One-liner: reads traceparent from ALS, creates session, runs callback
 const result = await withTrace(c.env.BIND, (s) => s.add(5, 7))
 
 // Or for multiple calls on the same session:
-import { tracedSession } from '@cf-logger/logger/workers'
+import { tracedSession } from 'cf-logger/workers'
 const session = tracedSession(c.env.BIND)
 const a = await session.add(1, 2)
 const b = await session.multiply(3, 4)
@@ -129,7 +129,7 @@ const b = await session.multiply(3, 4)
 Define shared service method interfaces and use the package-provided traced binding type:
 
 ```ts
-import type { TracedServiceBinding } from '@cf-logger/logger/workers'
+import type { TracedServiceBinding } from 'cf-logger/workers'
 
 export interface BindService {
   add(a: number, b: number): Promise<number>

@@ -23,8 +23,8 @@ import { runWithLogger, setLoggerContext } from './logger'
  * @example
  * ```ts
  * import { Hono } from 'hono'
- * import { useLogger } from '@cf-logger/logger/hono'
- * import { createLogger } from '@cf-logger/logger'
+ * import { useLogger } from 'cf-logger/hono'
+ * import { createLogger } from 'cf-logger'
  *
  * const app = new Hono()
  * const logger = createLogger({ service: 'api', level: 'info' })

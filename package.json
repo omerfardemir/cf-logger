@@ -1,5 +1,5 @@
 {
-  "name": "@cf-logger/logger",
+  "name": "cf-logger",
   "version": "0.0.1",
   "description": "Structured logging and trace propagation for Cloudflare Workers and Node.js.",
   "files": [

@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { logger, useLogger } from './logger'
-import { setLoggerContext, getTraceContext, buildTraceparent, type Logger } from '@cf-logger/logger'
-import { withTrace } from '@cf-logger/logger/workers'
+import { setLoggerContext, getTraceContext, buildTraceparent, type Logger } from 'cf-logger'
+import { withTrace } from 'cf-logger/workers'
 import { getClientDetails } from './network'
 import type { BindService, ServiceSession } from './types'
 
