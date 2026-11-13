@@ -1,7 +1,15 @@
 {
   "name": "cf-logger",
-  "version": "0.1.0",
+  "version": "0.0.0",
   "description": "Structured logging and trace propagation for Cloudflare Workers and Node.js.",
+  "homepage": "https://github.com/omerfardemir/cf-logger#readme",
+  "bugs": {
+    "url": "https://github.com/omerfardemir/cf-logger/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/omerfardemir/cf-logger.git"
+  },
   "files": [
     "dist",
     "README.md",
