@@ -13,6 +13,8 @@
 //   - Logs: the Workers' own output continues the trace across every RPC hop,
 //     with the span chain intact and no duplicate keys on any line, and each
 //     Worker's `version` read through its Env Mapping.
+//   - withLogging(): a plain WorkerEntrypoint gets a Logging Context per call, a new
+//     root trace without a carrier, the caller's trace through session(), and Spans.
 //   - Request lines: one request.end per request (no request.error), INFO for 200 and ERROR
 //     for 500, with the matched route and the main Worker's include / endFields options.
 //
@@ -205,6 +207,11 @@ function checkResponses(results, failures) {
   expectBody('/trace', 'traceId', TRACE_ID)
   expectBody('/trace', 'parentSpanId', PARENT_SPAN_ID)
   expectBody('/error', 'error', 'Division by zero')
+  expectBody('/logged', 'direct', 9)
+  expectBody('/logged', 'traced', 16)
+  expectBody('/logged', 'pong', 'pong')
+  expectBody('/logged', 'error', 'LoggedMath failure')
+  expectBody('/logged', 'traceId', TRACE_ID)
   expectBody('/fetcher', 'traceId', TRACE_ID)
 
   // bind-worker's useLogger, reached through tracedFetcher(env.BIND), continued the trace.
@@ -435,6 +442,71 @@ function checkDefaultLogger(failures) {
   }
 }
 
+/** A log record for a failure message. */
+const show = (record) => JSON.stringify(record) ?? 'none'
+
+/**
+ * withLogging(): math-worker's LoggedMath is a plain WorkerEntrypoint that main's
+ * /logged route calls directly, through session(), with fetch, and with a throw.
+ */
+function checkWithLogging(results, failures) {
+  const callerSpanId = results.find((r) => r.path === '/logged')?.body?.spanId
+  const lines = readLogRecords()
+    .map(({ record }) => record)
+    .filter((r) => r.entrypoint === 'LoggedMath')
+  const line = (message) => lines.find((r) => r.message === message)
+
+  // Caller not migrated: a plain RPC call, so a new root trace.
+  const direct = line('Squared 3 = 9')
+  if (
+    direct?.service !== 'math-test' ||
+    direct?.rpcMethod !== 'square' ||
+    !/^[0-9a-f]{32}$/.test(direct?.traceId ?? '') ||
+    direct.traceId === TRACE_ID ||
+    !/^[0-9a-f]{16}$/.test(direct.spanId ?? '') ||
+    'parentSpanId' in direct
+  ) {
+    failures.push(`logs: plain RPC square(3) is not in a new root trace: ${show(direct)}`)
+  }
+  // Env Mapping: LoggedMath reads version from version_metadata, as MathSession does.
+  if (typeof direct?.version !== 'string' || direct.version === '') {
+    failures.push('logs: LoggedMath has no version from its version_metadata binding')
+  }
+
+  // Migrated caller (withTrace) and fetch with a traceparent header: both continue main's span.
+  for (const [message, rpcMethod] of [
+    ['Squared 4 = 16', 'square'],
+    ['LoggedMath fetch', 'fetch'],
+  ]) {
+    const record = line(message)
+    if (
+      record?.rpcMethod !== rpcMethod ||
+      record.traceId !== TRACE_ID ||
+      typeof callerSpanId !== 'string' ||
+      record.parentSpanId !== callerSpanId
+    ) {
+      failures.push(
+        `logs: ${message} does not continue main's span ${callerSpanId}: ${show(record)}`,
+      )
+    }
+  }
+
+  const spanEnds = (operation) => lines.filter((r) => r.message === `span.end ${operation}`)
+  const squares = spanEnds('LoggedMath.square')
+  if (squares.length !== 2 || squares.some((r) => r.span?.status !== 'OK')) {
+    failures.push(`logs: ${squares.length} OK span.end LoggedMath.square lines, expected 2`)
+  }
+  const failed = spanEnds('LoggedMath.fail')
+  if (
+    failed.length !== 1 ||
+    failed[0].level !== 'ERROR' ||
+    failed[0].span?.status !== 'ERROR' ||
+    failed[0].err?.message !== 'LoggedMath failure'
+  ) {
+    failures.push(`logs: span.end LoggedMath.fail is not one ERROR line with err: ${show(failed)}`)
+  }
+}
+
 function checkLogs(failures, results) {
   checkDefaultLogger(failures)
   const lines = readLogRecords().filter(({ record }) => record.traceId === TRACE_ID)
@@ -541,6 +613,7 @@ async function main() {
       ['/trace', 200],
       ['/error', 500],
       ['/fetcher', 200],
+      ['/logged', 200],
     ]) {
       results.push(await probe(base, path, status))
     }
@@ -555,6 +628,7 @@ async function main() {
 
     checkResponses(results, failures)
     checkLogs(failures, results)
+    checkWithLogging(results, failures)
     checkForwards(forwards, base, failures)
 
     if (failures.length > 0) {

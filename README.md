@@ -16,7 +16,7 @@ pnpm add hono
 | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setDefaultLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, `tracedFetch`, `tracedFetcher`, trace utilities, types |
 | `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware; `UseLoggerOptions`, `RequestIdOptions`, `RequestIdSource` types                                                                           |
-| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`, `defaultLoggerFromEnv`                                                                              |
+| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withLogging`, `withTrace`, `tracedSession`, `defaultLoggerFromEnv`                                                               |
 
 ## How Trace Propagation Works
 
@@ -44,7 +44,7 @@ Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 }
 ```
 
-`loggerOptionsFromEnv()`, `tracedWorker()` and `TracedEntrypoint` read these environment variables by default:
+`loggerOptionsFromEnv()`, `tracedWorker()`, `withLogging()` and `TracedEntrypoint` read these environment variables by default:
 
 ```jsonc
 {
@@ -156,7 +156,7 @@ getLogger().info('starting') // service, environment and version from env
 - The logger you register or pass to `useLogger`, and a `TracedEntrypoint`'s `rootLogger` / `envMapping` / `loggerOptions` overrides, must not depend on the request or on `ctx.props`: the first one registered stays the default for the isolate.
 - A Worker that exports several entrypoints with different services should register its default explicitly at module scope (`defaultLoggerFromEnv()` or `setDefaultLogger()`). Otherwise whichever entrypoint class is constructed first in an isolate wins.
 
-`useLogger(rootLogger)`, `TracedEntrypoint`, `tracedWorker` and `defaultLoggerFromEnv` register their Root Logger the first time they see one, unless a default is already set: first seen wins. On Workers, [`defaultLoggerFromEnv()`](#defaultloggerfromenvmapping) builds and registers one from `env` with no setup.
+`useLogger(rootLogger)`, `TracedEntrypoint`, `tracedWorker`, `withLogging` and `defaultLoggerFromEnv` register their Root Logger the first time they see one, unless a default is already set: first seen wins. On Workers, [`defaultLoggerFromEnv()`](#defaultloggerfromenvmapping) builds and registers one from `env` with no setup.
 
 ### `setLoggerContext(fields)`
 
@@ -661,7 +661,75 @@ app.use(useLogger(logger))
 getLogger().info('module scope') // service, environment and version from env
 ```
 
-The Root Logger is created once per Logger Options and is the same instance `TracedEntrypoint` and `tracedWorker` use for the same env. `mapping` takes the same [Env Mapping](#loggeroptionsfromenvenv-mapping) as `loggerOptionsFromEnv`; its env type defaults to `Cloudflare.Env` (from `wrangler types`). A `setDefaultLogger` call made before it keeps its logger as the default; one made after it replaces it.
+The Root Logger is created once per Logger Options and is the same instance `TracedEntrypoint`, `tracedWorker` and `withLogging` use for the same env. `mapping` takes the same [Env Mapping](#loggeroptionsfromenvenv-mapping) as `loggerOptionsFromEnv`; its env type defaults to `Cloudflare.Env` (from `wrangler types`). A `setDefaultLogger` call made before it keeps its logger as the default; one made after it replaces it.
+
+### `withLogging(Class, options?)`
+
+Opens a Logging Context around every public method of an existing `WorkerEntrypoint`, without changing its callers. Use it for RPC Workers that have not moved to Traced Sessions yet: without it, their methods run outside every Logging Context, so their lines have no `traceId`, no Context Fields, and `setLoggerContext` is ignored.
+
+```ts
+import { WorkerEntrypoint } from 'cloudflare:workers'
+import { getLogger } from 'loggercf'
+import { withLogging } from 'loggercf/workers'
+
+class SearchWorker extends WorkerEntrypoint<Env> {
+  async search(q: string): Promise<string[]> {
+    getLogger().info({ q }, 'searching') // service, traceId, spanId, rpcMethod, entrypoint
+    return []
+  }
+}
+
+export default withLogging(SearchWorker, { spans: true })
+```
+
+- Each RPC method call, and `fetch`, gets its own Logging Context from the isolate's Root Logger, built with `loggerOptionsFromEnv(this.env, options.env)` and shared with `TracedEntrypoint` and `tracedWorker`. Every line in it carries the Context Fields `rpcMethod` (the method name) and `entrypoint` (the class name).
+- A plain RPC call carries no Trace Carrier, so each call starts a new root trace. `fetch` continues an incoming `traceparent` header.
+- If `fetch` hands the request to a Hono app that uses `useLogger` (`fetch(req) { return app.fetch(req, this.env, this.ctx) }`), pass `fetch: false`. `useLogger` opens its own Logging Context and continues `traceparent` itself; with `fetch` wrapped as well, one request is split into two root traces. With `fetch: false`, `fetch` is inherited unchanged and the RPC methods are still wrapped.
+- A method called while any Logging Context is active joins that context, as a child Span when `spans` is on, and adds no `rpcMethod` or `entrypoint` of its own. That covers a public method called from another one (`this.normalize(q)`) and a call inside your own `runWithLogger` (in `scheduled`, say). Inside another method's context, its lines keep the caller's `rpcMethod`: when `nested()` calls `this.search()`, the child Span is `X.search`, but every line in it says `rpcMethod: 'nested'`.
+- The class is wrapped, not changed: arguments, return values (sync or async, an `RpcTarget` or a stub included) and thrown errors pass through as they are. The returned class has exactly the RPC methods `Class` has. `scheduled`, `queue`, `tail` and the other handlers are inherited unchanged; they log through the [Default Logger](#setdefaultloggerlogger), which the constructor registers unless one is already set (first seen wins).
+- `entrypoint` is the class's `name`. A build that minifies class names changes it. An anonymous class (`withLogging(class extends WorkerEntrypoint { ... })`) gets no `entrypoint` field, and its Spans are named by the method alone.
+- Only the methods the class has when it is wrapped are wrapped. Put every RPC method on the class before wrapping it. A method added or overridden in a subclass of the wrapped class (`class Ext extends withLogging(A) { extra() {} }`) runs outside every Logging Context, so extend the wrapped class only to add handlers.
+- The class must extend `WorkerEntrypoint`. Wrapping anything else throws, a Durable Object class included: its `alarm` and `webSocket*` handlers would be wrapped as RPC methods.
+- A `TracedEntrypoint` subclass keeps its own `rootLogger`, so its `envMapping` / `loggerOptions` overrides apply. Passing `env` as well throws; override `envMapping` instead.
+- Wrapping a class that `withLogging` returned gives back the same class when the options are the same (`spans`, `session`, `fetch` and `env`), and throws when they differ. Wrapping a subclass of one throws too. This keeps each call to one `span.end`.
+- With `session: true`, a field the caller passes named `rpcMethod` or `entrypoint` is replaced by the receiver's.
+- Only method calls are wrapped. A method named like a handler (`trace`, `test`, `email`, `connect`, `queue`, `tail` or `tailStream`) is never wrapped. These run outside the Logging Context: a getter read over RPC, and the body of an `async *` method, which runs on each `.next()`, after the call has returned. A sync method that returns an un-awaited `RpcPromise` gets a span that ends when the method returns, not when the promise settles (`spans` treats only a real `Promise` as async). Make the method `async` and `await` the call to time it.
+
+| Option    | Default | Description                                                                                                                                                                                              |
+| --------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spans`   | `false` | Record each call as a [Span](#span-logging) named `<Class>.<method>`: one `span.end` with duration and status, at `ERROR` with `err` when the method throws or rejects. The error is rethrown unchanged. |
+| `session` | `false` | Add `session(init)`, which returns a Traced Session over the same methods (see below). Throws if the class already has a `session` method or getter, own or inherited.                                   |
+| `fetch`   | `true`  | Wrap `fetch` in its own Logging Context. Pass `false` when `fetch` hands the request to a Hono app that uses `useLogger`, which opens one itself.                                                        |
+| `env`     | `{}`    | [Env Mapping](#loggeroptionsfromenvenv-mapping) for the Root Logger.                                                                                                                                     |
+
+#### Migrating to Traced Sessions one caller at a time
+
+Traced Sessions change both sides of a call at once. In an app with many RPC Workers and call sites, migrate in three steps instead:
+
+1. **Wrap the receiver** with `withLogging(SearchWorker, { spans: true })`. Every call now logs with `service`, a `traceId` and `rpcMethod`, and no caller changes. Each call is still a new root trace.
+2. **Add `session()` on the receiver** with `withLogging(SearchWorker, { spans: true, session: true })`. The entrypoint gains a `session(init)` method; callers that call `env.SEARCH.search(q)` directly keep working.
+3. **Move callers to `tracedSession` one at a time.** Change `env.SEARCH.search(q)` to `withTrace(env.SEARCH, (s) => s.search(q))`, or `tracedSession(env.SEARCH)` for several calls. That caller's calls now continue its trace: the receiver's lines carry the caller's `traceId`, `parentSpanId` is the caller's span, and Context Fields passed to `withTrace` arrive too.
+
+```ts
+import { withTrace, type TracedServiceBinding } from 'loggercf/workers'
+
+interface SearchService {
+  search(q: string): Promise<string[]>
+}
+
+interface Env {
+  // Both call styles work during the migration.
+  SEARCH: SearchService & TracedServiceBinding<SearchService>
+}
+
+async function lookup(env: Env) {
+  const before = await env.SEARCH.search('cats') // not migrated: a new root trace in SEARCH
+  const after = await withTrace(env.SEARCH, (s) => s.search('cats')) // continues this trace
+  return [before, after]
+}
+```
+
+Once every caller uses a Traced Session, you can stay on `withLogging`, or move the methods into a `TracedSession` subclass with `tracedWorker()` to name each Span yourself with `this.traced(fn, 'op')`. Callers do not change again.
 
 ### Service Type Convention
 

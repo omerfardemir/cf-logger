@@ -43,6 +43,10 @@ Use `RpcTarget` private fields to carry trace context. The caller calls `binding
 - Each session generates a new `spanId` and links `parentSpanId` to the caller's `spanId`
 - The caller reads traceparent from ALS automatically via `withTrace()`
 
+### ✅ Gradual migration: `withLogging()` on a plain `WorkerEntrypoint`
+
+Traced Sessions change the receiver and every caller at once. `withLogging(C, { spans: true, session: true })` wraps an existing `WorkerEntrypoint` so each direct RPC call (`env.SVC.method()`) gets its own Logging Context (a new root trace, because a direct call has no carrier), and adds `session(init)` so callers can move to `withTrace()` one at a time and continue their trace. See README, "Migrating to Traced Sessions one caller at a time".
+
 ## The Solution: How It Works
 
 ### Architecture
@@ -212,6 +216,7 @@ Span logging is **optional**. Omit the operation name and `traced()` has zero sp
 | Session Factory over Proxy           | A Proxy over the stub works, but cannot be passed as an RPC argument (workerd #6358) |
 | Private fields for traceparent       | `#field` on RpcTarget stays server-side, never serialized                            |
 | `withTrace()` one-liner API          | Clean DX without changing method signatures                                          |
+| `withLogging()` gradual migration    | Plain RPC logs in a context now; callers adopt `withTrace()` later                   |
 | Span data excludes trace IDs         | Already on every log line — no duplicate bytes                                       |
 | Optional span logging                | Zero overhead when you don't need timing                                             |
 | Env var convention (NAME, LOG_LEVEL) | Consistent across workers, readable from wrangler config                             |

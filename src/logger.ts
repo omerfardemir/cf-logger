@@ -462,7 +462,9 @@ export function recordSpan<R>(operation: string, fn: () => R): R {
       endTime,
       duration: endTime - startTime,
       status,
-      ...(error ? { error: error instanceof Error ? error.message : String(error) } : {}),
+      ...(status === 'ERROR'
+        ? { error: error instanceof Error ? error.message : String(error) }
+        : {}),
     }
     if (status === 'ERROR') {
       logger.error({ span, err: error }, 'span.end %s', operation)
