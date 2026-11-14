@@ -7,6 +7,7 @@ import {
   getTraceContext,
   _captureEntries,
   _reset,
+  _setSink,
 } from './logger'
 import type { Logger } from './types'
 
@@ -203,6 +204,25 @@ describe('routeArgs', () => {
     })
   })
 
+  it('an own __proto__ key (from JSON.parse) moves to args and cannot hide err', () => {
+    const err = new Error('real')
+    const parsed = JSON.parse('{"__proto__": {"err": "inherited"}, "a": 1}') as object
+    const routed = routeArgs(['m', parsed, err])
+    expect(Object.getPrototypeOf(routed.fields)).toBeNull()
+    expect(routed.fields.err).toBe(err)
+    expect(routed.fields.a).toBe(1)
+    expect(routed.errors).toBeUndefined()
+    expect(routed.args).toHaveLength(1)
+    expect(Object.hasOwn(routed.args?.[0] as object, '__proto__')).toBe(true)
+  })
+
+  it('a function-valued toJSON moves to args as text; other toJSON values are fields', () => {
+    const routed = routeArgs(['m', { a: 1, toJSON: () => 'replaced' }])
+    expect(routed.fields).toEqual({ a: 1 })
+    expect(routed.args).toEqual([{ toJSON: '[Function: toJSON]' }])
+    expect(routeArgs([{ toJSON: 'plain' }]).fields).toEqual({ toJSON: 'plain' })
+  })
+
   it('never mutates its input', () => {
     const lead = { a: 1 }
     const trail = { b: 2, level: 'x' }
@@ -333,9 +353,90 @@ describe('log call examples (issue #21), in both call styles', () => {
     expect(r.args).toMatchObject([{ err: { message: 'inner' } }, [{ message: 'listed' }]])
   })
 
+  it('a __proto__ key from JSON.parse: the real Error stays err, the value lands in args', () => {
+    const parsed = JSON.parse('{"__proto__": {"err": "x"}, "userId": "u-1"}') as object
+    const r = record((l) => l.error('failed', parsed, new Error('real')))
+    expect(r).toMatchObject({ userId: 'u-1', err: { message: 'real' } })
+    expect(r.errors).toBeUndefined()
+    expect(JSON.stringify(r.args)).toBe('[{"__proto__":{"err":"x"}}]')
+  })
+
+  it('a trailing object with a toJSON method cannot replace the line', () => {
+    const r = record((l) => l.info('m', { a: 1, toJSON: () => 'replaced' }))
+    expect(r).toMatchObject({ level: 'INFO', message: 'm', a: 1 })
+    expect(r.args).toEqual([{ toJSON: '[Function: toJSON]' }])
+  })
+
   it('keeps functions and symbols in args', () => {
     const r = record((l) => l.info('m', function handler() {}, Symbol('tag')))
     expect(r.args).toEqual(['[Function: handler]', 'Symbol(tag)'])
+  })
+})
+
+/** An object whose `boom` getter throws. */
+const throwingGetter = () =>
+  Object.defineProperty({}, 'boom', {
+    enumerable: true,
+    get() {
+      throw new Error('getter failed')
+    },
+  })
+
+/** An object whose nested `toJSON` throws. */
+const throwingToJSON = () => ({
+  nested: {
+    toJSON() {
+      throw new TypeError('toJSON failed')
+    },
+  },
+})
+
+describe('a log call never throws', () => {
+  beforeEach(() => _reset())
+
+  it.each([
+    ['a getter that throws, console style', (l: Logger) => l.info('m %s', 'x', throwingGetter())],
+    ['a getter that throws, structured', (l: Logger) => l.info(throwingGetter(), 'm %s', 'x')],
+    ['a toJSON that throws', (l: Logger) => l.info('m %s', 'x', throwingToJSON())],
+  ])('%s: writes a minimal line with logError', (_name, log) => {
+    const r = record(log)
+    expect(r).toMatchObject({
+      level: 'INFO',
+      service: 'svc',
+      message: 'm %s',
+      traceId: '0af7651916cd43dd8448eb211c80319c',
+    })
+    expect(r.logError).toMatch(/^log call failed: (Error: getter|TypeError: toJSON) failed$/)
+    expect(typeof r.time).toBe('string')
+  })
+
+  it('drops bindings when they cannot be serialized either', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' }).child(throwingToJSON())
+    expect(() => logger.warn('m')).not.toThrow()
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ level: 'WARN', message: 'm' })
+    expect(entries[0].service).toBeUndefined()
+    expect(entries[0].logError).toMatch(/toJSON failed/)
+  })
+
+  it('writes nothing, and does not throw, when the sink itself always fails', () => {
+    const previous = _setSink({
+      write() {
+        throw new Error('sink down')
+      },
+    })
+    try {
+      expect(() => createLogger({ service: 'svc' }).error('m')).not.toThrow()
+    } finally {
+      _setSink(previous)
+    }
+  })
+
+  it('never reads a disabled level’s arguments', () => {
+    const entries = _captureEntries()
+    createLogger({ service: 'svc', level: 'warn' }).info('m', throwingGetter())
+    expect(entries).toHaveLength(0)
   })
 })
 
@@ -366,6 +467,11 @@ type Kind =
   | 'instance'
   | 'function'
   | 'symbol'
+  | 'undefined'
+  | 'sharedKey'
+  | 'percent'
+  | 'protoObject'
+  | 'toJSONObject'
 const KINDS: Kind[] = [
   'string',
   'number',
@@ -379,16 +485,24 @@ const KINDS: Kind[] = [
   'instance',
   'function',
   'symbol',
+  'undefined',
+  'sharedKey',
+  'percent',
+  'protoObject',
+  'toJSONObject',
 ]
 const RESERVED = [...RESERVED_KEYS]
 
 /**
  * One generated argument, with the unique token that must appear in the
- * serialized record. Booleans and `null` carry no token; they are counted.
+ * serialized record. Booleans, `null` and `undefined` carry no token; they are
+ * counted. `shared` objects all use the key `shared`: later objects win, so
+ * only the last one's token must appear.
  */
 interface Generated {
   value: unknown
   token?: string
+  shared?: boolean
 }
 
 function generator(seed: number) {
@@ -426,13 +540,46 @@ function generator(seed: number) {
         return { value: Object.defineProperty(() => {}, 'name', { value: t }), token: t }
       case 'symbol':
         return { value: Symbol(t), token: t }
+      case 'undefined':
+        return { value: undefined }
+      case 'sharedKey':
+        return { value: { shared: t }, token: t, shared: true }
+      case 'percent':
+        // `%%` collapses; `%c` and `% ` take an argument without printing it.
+        return { value: `${t} 100%% %c 50% off`, token: t }
+      case 'protoObject':
+        return { value: JSON.parse(`{"__proto__":{"err":"${t}"},"key_${t}":1}`), token: t }
+      case 'toJSONObject':
+        return {
+          value: {
+            [`key_${t}`]: 1,
+            toJSON: Object.defineProperty(() => 'x', 'name', { value: t }),
+          },
+          token: t,
+        }
     }
   }
 
   return () => {
     const count = Math.floor(random() * 7) // 0..6 arguments
-    return Array.from({ length: count }, () => make(pick(KINDS)))
+    const generated = Array.from({ length: count }, () => make(pick(KINDS)))
+    // Later objects win for the same key: only the last `shared` value is kept.
+    const last = generated.reduce((found, g, i) => (g.shared ? i : found), -1)
+    return generated.map((g, i) => (g.shared && i !== last ? { ...g, token: undefined } : g))
   }
+}
+
+/**
+ * Whether the second argument is "no message": an `undefined` after a leading
+ * value that is not a string or a printable primitive.
+ */
+function skipsUndefined(values: readonly unknown[]): boolean {
+  const first = values[0]
+  const leadsWithValue =
+    typeof first === 'symbol' ||
+    typeof first === 'function' ||
+    (typeof first === 'object' && first !== null)
+  return values.length > 1 && values[1] === undefined && leadsWithValue
 }
 
 describe('routing property', () => {
@@ -455,17 +602,25 @@ describe('routing property', () => {
         expect(line, `seed ${seed}: ${token}`).toContain(token)
       }
 
-      // Tokenless values (true, false, null) are words in the message or items in args.
+      // Tokenless values (true, false, null, undefined) are words in the
+      // message or items in args (where JSON writes `undefined` as `null`).
       const r = entries[entries.length - 1]
       const words = typeof r.message === 'string' ? r.message.split(' ') : []
       const overflow = Array.isArray(r.args) ? r.args : []
-      for (const literal of [true, false, null]) {
-        const passed = values.filter((v) => v === literal).length
-        const found =
-          words.filter((w) => w === String(literal)).length +
-          overflow.filter((v) => v === literal).length
-        expect(found, `seed ${seed}: ${String(literal)}`).toBeGreaterThanOrEqual(passed)
+      const count = (literal: unknown) => values.filter((v) => v === literal).length
+      const wordCount = (word: string) => words.filter((w) => w === word).length
+      for (const literal of [true, false]) {
+        const found = wordCount(String(literal)) + overflow.filter((v) => v === literal).length
+        expect(found, `seed ${seed}: ${String(literal)}`).toBeGreaterThanOrEqual(count(literal))
       }
+      const nullish = count(null) + count(undefined) - (skipsUndefined(values) ? 1 : 0)
+      const foundNullish =
+        wordCount('null') + wordCount('undefined') + overflow.filter((v) => v === null).length
+      expect(foundNullish, `seed ${seed}: null/undefined`).toBeGreaterThanOrEqual(nullish)
+
+      const lastShared = generated.filter((g) => g.shared).at(-1)
+      expect(r.shared, `seed ${seed}: shared`).toBe(lastShared?.token)
+      expect(r.logError, `seed ${seed}: logError`).toBeUndefined()
       expect(r).toMatchObject({ level: 'INFO', service: 'svc', component: 'c' })
     }
     expect(entries).toHaveLength(runs)

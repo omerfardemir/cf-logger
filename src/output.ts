@@ -1,4 +1,4 @@
-import { isPlainObject } from './route'
+import { functionText, isPlainObject } from './route'
 import type { LogFields, TraceContext } from './types'
 
 /**
@@ -66,7 +66,7 @@ const serializeIfError = (value: unknown) =>
 function serializeOverflowItem(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(serializeIfError)
   if (isPlainObject(value)) {
-    const out: LogRecord = {}
+    const out: LogRecord = Object.create(null) // `value` may have an own `__proto__` key
     for (const [key, v] of Object.entries(value)) out[key] = serializeIfError(v)
     return out
   }
@@ -91,9 +91,7 @@ export function buildRecord(entry: LogRecord, context?: RecordContext): LogRecor
   const { time, level, ...rest } = entry
   const record: LogRecord = { time, level, ...context?.fields, ...rest }
 
-  for (const [key, value] of Object.entries(record)) {
-    if (value instanceof Error) record[key] = serializeError(value)
-  }
+  for (const [key, value] of Object.entries(record)) record[key] = serializeIfError(value)
   if (Array.isArray(record.errors)) record.errors = record.errors.map(serializeIfError)
   if (Array.isArray(record.args)) record.args = record.args.map(serializeOverflowItem)
 
@@ -119,7 +117,7 @@ export function stringifyRecord(record: LogRecord): string {
   const seen = new WeakSet<object>()
   return JSON.stringify(record, (_key, value: unknown) => {
     if (typeof value === 'bigint') return value.toString()
-    if (typeof value === 'function') return `[Function: ${value.name || 'anonymous'}]`
+    if (typeof value === 'function') return functionText(value)
     if (typeof value === 'symbol') return value.toString()
     if (typeof value === 'object' && value !== null) {
       if (seen.has(value)) return '[Circular]'

@@ -58,7 +58,17 @@ function isPrimitive(
   )
 }
 
-/** `JSON.stringify` for `%j`/`%o`/`%O`, never throwing (as pino's formatter did). */
+/**
+ * How a function appears in a log line: `[Function: name]`.
+ *
+ * @param {{ name: string }} fn - The function.
+ * @returns {string} Its text.
+ */
+export function functionText(fn: { name: string }): string {
+  return `[Function: ${fn.name || 'anonymous'}]`
+}
+
+/** `JSON.stringify` for `%j`/`%o`/`%O`, never throwing. */
 function tryStringify(value: unknown): string {
   try {
     return String(JSON.stringify(value))
@@ -70,15 +80,20 @@ function tryStringify(value: unknown): string {
 /** Sentinel: the placeholder could not render its argument. */
 const UNRENDERED = Symbol('unrendered')
 
-/** Render one argument for placeholder `code`, matching pino 10's `printf`. */
+/**
+ * Render one argument for placeholder `code`, or `UNRENDERED` when the
+ * placeholder would not print it. `%s %d %i %f` never render an object or an
+ * array (`[object Object]`, `NaN` would hide its fields), so it is routed like
+ * a trailing argument instead.
+ */
 function render(code: string, value: unknown): string | typeof UNRENDERED {
   switch (code) {
     case 'd':
     case 'f':
-      if (value == null || typeof value === 'symbol') return UNRENDERED
+      if (value == null || typeof value === 'symbol' || typeof value === 'object') return UNRENDERED
       return String(Number(value))
     case 'i':
-      if (value == null || typeof value === 'symbol') return UNRENDERED
+      if (value == null || typeof value === 'symbol' || typeof value === 'object') return UNRENDERED
       return String(Math.floor(Number(value)))
     case 'j':
     case 'o':
@@ -88,10 +103,11 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
       if (typeof value === 'function') return value.name || '<anonymous>'
       return tryStringify(value)
     case 's':
+      if (typeof value === 'object' && value !== null) return UNRENDERED
       try {
         return String(value)
       } catch {
-        return UNRENDERED // e.g. Object.create(null) has no toString
+        return UNRENDERED // e.g. a function whose toString throws
       }
     default:
       return UNRENDERED // not a placeholder (`50% off`, `%c`)
@@ -99,14 +115,13 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
 }
 
 /**
- * Format `template` with `printf` placeholders (`%s %d %i %f %j %o %O %%`),
- * rendering exactly as pino 10 did.
+ * Format `template` with `printf` placeholders (`%s %d %i %f %j %o %O %%`).
  *
- * Each `%` sequence takes the next argument in order, as in pino. Where pino
- * then dropped that argument without printing it (`%d` with `null`, `%j` with
- * `undefined`, an unknown sequence such as `% ` or `%c`), the sequence stays
- * in the text and the argument is returned in `unprinted` instead. `%%` becomes `%`
- * only when there are arguments, like `console.log`.
+ * Each `%` sequence takes the next argument in order. When it cannot print
+ * that argument (`%d` with `null`, `%j` with `undefined`, `%s %d %i %f` with
+ * an object or array, an unknown sequence such as `% ` or `%c`), the sequence
+ * stays in the text and the argument is returned in `unprinted` instead.
+ * `%%` becomes `%` only when there are arguments, like `console.log`.
  *
  * @param {string} template - The message template.
  * @param {readonly unknown[]} args - The arguments after the template.
@@ -166,8 +181,10 @@ export function formatMessage(
  *
  * Merging a plain object, leading or not: its keys go to the top level, later
  * objects winning. `err` is set only when still unset. The other
- * `RESERVED_KEYS`, and an `err` that is already set, move to `args` as one
- * object per argument, so a call can never overwrite loggercf's own fields.
+ * `RESERVED_KEYS`, an `err` that is already set, an own `__proto__` key (from
+ * `JSON.parse`) and a function-valued `toJSON` (as text, so it cannot replace
+ * the line) move to `args` as one object per argument, so a call can never
+ * overwrite loggercf's own fields.
  * The exception is `message`: when the call gives no other message, the first
  * object's string `message` becomes the message (`logger.info({ message })`).
  *
@@ -175,7 +192,8 @@ export function formatMessage(
  * @returns {RoutedArgs} Where each argument goes.
  */
 export function routeArgs(input: readonly unknown[]): RoutedArgs {
-  const fields: LogRecord = {}
+  // No prototype: an `err` or `__proto__` key can only ever be an own key.
+  const fields: LogRecord = Object.create(null)
   const errors: Error[] = []
   const overflow: unknown[] = []
   const words: string[] = []
@@ -195,19 +213,19 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
     return true
   }
   const merge = (object: Record<string, unknown>) => {
-    let reserved: Record<string, unknown> | undefined
+    let moved: Record<string, unknown> | undefined
     for (const [key, value] of Object.entries(object)) {
       if (key === 'err' && setErr(value)) continue
-      if (!RESERVED_KEYS.has(key)) {
+      const isToJSON = key === 'toJSON' && typeof value === 'function'
+      if (!RESERVED_KEYS.has(key) && key !== '__proto__' && !isToJSON) {
         fields[key] = value
         continue
       }
-      reserved ??= {}
-      reserved[key] = value
-      if (key === 'message' && typeof value === 'string')
-        objectMessage ??= { value, holder: reserved }
+      moved ??= Object.create(null) as Record<string, unknown>
+      moved[key] = isToJSON ? functionText(value) : value
+      if (key === 'message' && typeof value === 'string') objectMessage ??= { value, holder: moved }
     }
-    if (reserved) overflow.push(reserved)
+    if (moved) overflow.push(moved)
   }
   const takeTemplate = () => {
     if (typeof remaining[0] === 'string') template = remaining.shift() as string

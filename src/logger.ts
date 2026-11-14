@@ -50,7 +50,7 @@ const LEVELS = Object.keys(LEVEL_VALUES) as LogLevel[]
 
 /**
  * The numeric minimum for a level name. `'silent'` (not a `LogLevel`, but
- * accepted by pino) still writes nothing, so existing configs keep working.
+ * accepted by earlier loggercf versions) writes nothing, so existing configs keep working.
  *
  * @param {string} level - A level name.
  * @returns {number} Its severity.
@@ -84,6 +84,59 @@ function write(label: string, bindings: LogRecord, input: unknown[]): void {
 }
 
 /**
+ * Describe a thrown value for `logError`, never throwing itself.
+ *
+ * @param {unknown} thrown - What the write path threw.
+ * @returns {string} e.g. `TypeError: toJSON failed`.
+ */
+function describeFailure(thrown: unknown): string {
+  try {
+    if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`
+    return String(thrown)
+  } catch {
+    return 'unknown error'
+  }
+}
+
+/**
+ * `write()`, but a log call never throws. When routing, building or
+ * serializing the line fails (a getter that throws, a `toJSON` that throws...),
+ * a minimal line is written instead: `time`, `level`, the trace IDs,
+ * bindings, the message template as given, and `logError` describing the
+ * failure. If even that fails, the line is written without bindings, then
+ * dropped.
+ *
+ * @param {string} label - The upper-case level written as `level`.
+ * @param {LogRecord} bindings - The logger's bindings (`createLogger` / `.child()`).
+ * @param {unknown[]} input - The arguments the log method received.
+ */
+function safeWrite(label: string, bindings: LogRecord, input: unknown[]): void {
+  try {
+    write(label, bindings, input)
+  } catch (thrown) {
+    const template = [input[0], input[1]].find((value) => typeof value === 'string')
+    const trace = als.getStore()?.trace
+    const minimal: LogRecord = { time: new Date().toISOString(), level: label }
+    if (trace) {
+      minimal.traceId = trace.traceId
+      minimal.spanId = trace.spanId
+      if (trace.parentSpanId) minimal.parentSpanId = trace.parentSpanId
+    }
+    const tail: LogRecord = { logError: `log call failed: ${describeFailure(thrown)}` }
+    if (template !== undefined) tail.message = template
+    try {
+      sink.write({ ...minimal, ...bindings, ...tail })
+    } catch {
+      try {
+        sink.write({ ...minimal, ...tail })
+      } catch {
+        // Nowhere left to write: a log call must not throw.
+      }
+    }
+  }
+}
+
+/**
  * Build a `Logger` that writes levels at or above `minimum`, with `bindings`
  * on every line. Immutable: `child()` returns a new logger with merged bindings.
  *
@@ -102,7 +155,9 @@ function makeLogger<T extends LogFields = LogFields>(
   for (const level of LEVELS) {
     const label = level.toUpperCase()
     logger[level] =
-      LEVEL_VALUES[level] < minimum ? noop : (...args: unknown[]) => write(label, bindings, args)
+      LEVEL_VALUES[level] < minimum
+        ? noop
+        : (...args: unknown[]) => safeWrite(label, bindings, args)
   }
   return logger
 }
