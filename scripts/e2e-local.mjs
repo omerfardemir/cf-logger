@@ -5,8 +5,9 @@
 //   - HTTP: status, X-Request-Id / X-Trace-Id / traceparent / tracestate response headers, bodies.
 //   - Request ID: an invalid incoming X-Request-Id is replaced by a generated UUID.
 //   - Logs: the Workers' own output continues the trace across every RPC hop,
-//     with the span chain intact and no duplicate keys on any line, and each
-//     Worker's `version` read through its Env Mapping.
+//     with the span chain intact and no duplicate keys on any line, each
+//     Worker's `version` read through its Env Mapping, and a console-style
+//     call keeping its trailing object as fields.
 //
 // Runs on Linux, macOS and Windows.
 //
@@ -265,6 +266,13 @@ function checkLogs(failures) {
   if (multiply && (typeof multiply.version !== 'string' || multiply.version === '')) {
     failures.push('logs: math.multiply has no version from its version_metadata binding')
   }
+  const consoleStyle = lines.find(
+    ({ record }) => record.message === 'Console-style log with a placeholder',
+  )?.record
+  if (consoleStyle?.style !== 'console') {
+    failures.push('logs: the console-style line is missing, or lost its { style } argument')
+  }
+
   const divideByZero = spans.get('bind.divideByZero')
   if (divideByZero?.span?.status !== 'ERROR' || divideByZero?.err?.message !== 'Division by zero') {
     failures.push('logs: span.end bind.divideByZero is missing its ERROR status or err')
