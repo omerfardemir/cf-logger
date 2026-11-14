@@ -432,12 +432,198 @@ describe('useLogger request ID', () => {
     expect(await requestIdOf(requestIdApp(options), { 'cf-ray': CF_RAY })).toMatch(UUID_RE)
   })
 
-  it('trustIncoming: false still uses a valid c.var.requestId from an earlier middleware', async () => {
+  it('trustIncoming: false ignores c.var.requestId from an earlier middleware too', async () => {
     const options: UseLoggerOptions = { requestId: { trustIncoming: false } }
     const id = await requestIdOf(requestIdApp(options, setRequestIdVar('from-app')), {
       'X-Request-Id': 'from-client',
     })
-    expect(id).toBe('from-app')
+    expect(id).toMatch(UUID_RE)
+  })
+
+  it('trustIncoming: false still rejects an invalid header name in from at setup', () => {
+    expect(() =>
+      useLogger(createLogger({ service: 'test-mw' }), {
+        requestId: { trustIncoming: false, from: ['x request id'] },
+      }),
+    ).toThrow(TypeError)
+  })
+
+  it('marks every line with requestIdRejected when an incoming ID is rejected', async () => {
+    const ctx = requestIdApp()
+    const id = await requestIdOf(ctx, { 'X-Request-Id': 'bad id' })
+    expect(id).toMatch(UUID_RE)
+    expect(ctx.entries.length).toBeGreaterThan(0)
+    for (const entry of ctx.entries) {
+      expect(entry.requestIdRejected).toBe(true)
+      expect(JSON.stringify(entry)).not.toContain('bad id')
+    }
+  })
+
+  it('marks requestIdRejected when an earlier source fails but a later one is used', async () => {
+    const ctx = requestIdApp({ requestId: { from: ['cf-ray', 'x-request-id'] } })
+    expect(await requestIdOf(ctx, { 'cf-ray': 'not valid!', 'X-Request-Id': 'r-2' })).toBe('r-2')
+    expect(ctx.entries.find(messageStartsWith('request.end'))!.requestIdRejected).toBe(true)
+  })
+
+  it('does not mark requestIdRejected when no incoming ID was sent or it was accepted', async () => {
+    const cases: Record<string, string>[] = [{}, { 'X-Request-Id': 'r-ok' }]
+    for (const headers of cases) {
+      const ctx = requestIdApp()
+      await requestIdOf(ctx, headers)
+      for (const entry of ctx.entries) expect(entry).not.toHaveProperty('requestIdRejected')
+    }
+  })
+
+  it('rejects a value a custom validate accepts when it is not a safe header value', async () => {
+    for (const unsafe of ['a\r\nSet-Cookie: x=1', ' padded ', 'ümlaut']) {
+      const ctx = requestIdApp({ requestId: { from: [() => unsafe], validate: () => true } })
+      const res = await ctx.app.request('/')
+      expect(res.status).toBe(200)
+      const end = ctx.entries.find(messageStartsWith('request.end'))!
+      expect(end.requestId).toMatch(UUID_RE)
+      expect(end.requestIdRejected).toBe(true)
+      expect(res.headers.get('X-Request-Id')).toBe(end.requestId)
+    }
+  })
+
+  it('replaces a generated ID that is not a safe header value, with one WARN per useLogger()', async () => {
+    for (const bad of ['', 'line\nbreak']) {
+      const ctx = requestIdApp({ requestId: { generate: () => bad } })
+      expect(await requestIdOf(ctx)).toMatch(UUID_RE)
+      await ctx.app.request('/')
+      expect(ctx.entries.filter((e) => e.level === 'WARN')).toHaveLength(1)
+    }
+  })
+
+  it('a first useLogger whose level hides the WARN does not use up the WARN of another', async () => {
+    const entries = _captureEntries()
+    const quiet = new Hono()
+    quiet.use(
+      useLogger(createLogger({ service: 'quiet', level: 'error' }), {
+        requestId: { generate: () => 'x\ny' },
+      }),
+    )
+    quiet.get('/', (c) => c.text('ok'))
+    await quiet.request('/')
+    const loud = new Hono()
+    loud.use(
+      useLogger(createLogger({ service: 'loud' }), { requestId: { generate: () => 'x\ny' } }),
+    )
+    loud.get('/', (c) => c.text('ok'))
+    await loud.request('/')
+    expect(entries.filter((e) => e.level === 'WARN').map((e) => e.service)).toEqual(['loud'])
+  })
+
+  it("writes the unsafe generated ID WARN the first time, through the app's Root Logger", async () => {
+    const ctx = requestIdApp({ requestId: { generate: () => 'x\ny' } })
+    await requestIdOf(ctx)
+    const warns = ctx.entries.filter((e) => e.level === 'WARN')
+    expect(warns).toHaveLength(1)
+    expect(String(warns[0]!.message)).toContain('requestId.generate')
+    expect(warns[0]!.service).toBe('test-mw')
+  })
+
+  it('falls back to a UUID with a WARN when generate throws, and still logs the request', async () => {
+    const ctx = requestIdApp({
+      requestId: {
+        generate: () => {
+          throw new Error('boom')
+        },
+      },
+    })
+    expect(await requestIdOf(ctx)).toMatch(UUID_RE)
+    expect(ctx.entries.filter((e) => e.level === 'WARN')).toHaveLength(1)
+    expect(ctx.entries.some(messageStartsWith('request.start'))).toBe(true)
+  })
+
+  it('rejects a value when validate returns a truthy non-boolean such as a Promise', async () => {
+    const ctx = requestIdApp({
+      requestId: { validate: (() => Promise.resolve(false)) as unknown as () => boolean },
+    })
+    expect(await requestIdOf(ctx, { 'X-Request-Id': 'r-1' })).toMatch(UUID_RE)
+    expect(ctx.entries.find(messageStartsWith('request.end'))!.requestIdRejected).toBe(true)
+  })
+
+  it('writes one WARN when a from source throws, without the error message', async () => {
+    const ctx = requestIdApp({
+      requestId: {
+        from: [
+          () => {
+            throw new Error('secret-id-in-message')
+          },
+        ],
+      },
+    })
+    await requestIdOf(ctx)
+    await ctx.app.request('/')
+    const warns = ctx.entries.filter((e) => e.level === 'WARN')
+    expect(warns).toHaveLength(1)
+    expect(JSON.stringify(warns[0])).not.toContain('secret-id-in-message')
+  })
+
+  it('does not log a cf-ray rejected as the request ID as cfRay', async () => {
+    const ray = '8f1c2a3b4d5e6f70-AMS'
+    const ctx = requestIdApp({ requestId: { from: ['cf-ray'], validate: /^r-/ } })
+    expect(await requestIdOf(ctx, { 'cf-ray': ray })).toMatch(UUID_RE)
+    for (const entry of ctx.entries) {
+      expect(entry).not.toHaveProperty('cfRay')
+      expect(JSON.stringify(entry)).not.toContain(ray)
+    }
+  })
+
+  it('treats a validate that throws as a rejection, with one WARN without the message', async () => {
+    const ctx = requestIdApp({
+      requestId: {
+        validate: () => {
+          throw new Error('secret-id')
+        },
+      },
+    })
+    expect(await requestIdOf(ctx, { 'X-Request-Id': 'r-1' })).toMatch(UUID_RE)
+    await ctx.app.request('/', { headers: { 'X-Request-Id': 'r-2' } })
+    expect(ctx.entries.find(messageStartsWith('request.end'))!.requestIdRejected).toBe(true)
+    const warns = ctx.entries.filter((e) => e.level === 'WARN')
+    expect(warns).toHaveLength(1)
+    expect(JSON.stringify(warns[0])).not.toContain('secret-id')
+  })
+
+  it('keeps a genuine cfRay when a client sends the same value in X-Request-Id and it is rejected', async () => {
+    const ray = '8f1c2a3b4d5e6f70-AMS'
+    const ctx = requestIdApp({ requestId: { validate: /^req_/ } })
+    expect(await requestIdOf(ctx, { 'cf-ray': ray, 'X-Request-Id': ray })).toMatch(UUID_RE)
+    const end = ctx.entries.find(messageStartsWith('request.end'))!
+    expect(end.requestIdRejected).toBe(true)
+    expect(end.cfRay).toBe(ray)
+  })
+
+  it('treats a from function that throws or returns a non-string as no value, not a rejection', async () => {
+    const sources = [
+      () => {
+        throw new Error('boom')
+      },
+      () => 42 as unknown as string,
+    ]
+    const ctx = requestIdApp({ requestId: { from: sources } })
+    expect(await requestIdOf(ctx)).toMatch(UUID_RE)
+    for (const entry of ctx.entries) expect(entry).not.toHaveProperty('requestIdRejected')
+  })
+
+  it('does not mark an empty X-Request-Id as rejected', async () => {
+    const ctx = requestIdApp()
+    expect(await requestIdOf(ctx, { 'X-Request-Id': '' })).toMatch(UUID_RE)
+    for (const entry of ctx.entries) expect(entry).not.toHaveProperty('requestIdRejected')
+  })
+
+  it('marks an app-set c.var.requestId that fails validation as rejected', async () => {
+    const ctx = requestIdApp(undefined, setRequestIdVar('bad id'))
+    expect(await requestIdOf(ctx)).toMatch(UUID_RE)
+    expect(ctx.entries.find(messageStartsWith('request.end'))!.requestIdRejected).toBe(true)
+  })
+
+  it('trustIncoming: false never marks requestIdRejected, even for a bad header', async () => {
+    const ctx = requestIdApp({ requestId: { trustIncoming: false } })
+    expect(await requestIdOf(ctx, { 'X-Request-Id': 'bad id' })).toMatch(UUID_RE)
+    for (const entry of ctx.entries) expect(entry).not.toHaveProperty('requestIdRejected')
   })
 
   it('uses a custom generate function, called once with the Hono context', async () => {
@@ -534,12 +720,13 @@ describe('useLogger cfRay', () => {
     for (const line of lines) expect(line.match(/"cfRay":/g)).toHaveLength(1)
   })
 
-  it('records cfRay with trustIncoming: false, without using it as the request ID', async () => {
+  it('does not record cfRay with trustIncoming: false', async () => {
     const { entries, app } = cfRayApp({ requestId: { trustIncoming: false } })
-    await app.request('/', { headers: { 'cf-ray': CF_RAY } })
+    const res = await app.request('/', { headers: { 'cf-ray': CF_RAY } })
     const end = entries().find(messageStartsWith('request.end'))!
-    expect(end.cfRay).toBe(CF_RAY)
-    expect(end.requestId).not.toBe(CF_RAY)
+    expect(end.requestId).toMatch(UUID_RE)
+    expect(res.headers.get('X-Request-Id')).toBe(end.requestId)
+    for (const entry of entries()) expect(entry).not.toHaveProperty('cfRay')
   })
 
   it('omits cfRay when the header is absent', async () => {
