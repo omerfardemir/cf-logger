@@ -13,6 +13,8 @@ vi.mock('cloudflare:workers', () => ({
       this.env = env
     }
   },
+  DurableObject: class DurableObject {},
+  WorkflowEntrypoint: class WorkflowEntrypoint {},
 }))
 
 import {

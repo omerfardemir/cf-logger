@@ -496,6 +496,20 @@ export function recordSpan<R>(operation: string, fn: () => R): R {
 }
 
 /**
+ * Capture the current Logging Context, to re-enter it from a callback the runtime
+ * calls outside it. A Workflows `step.do` callback, for one, arrives back over RPC
+ * in no Logging Context.
+ *
+ * @internal Not exported from the package entry points.
+ * @returns A function that runs `fn` in the captured Logging Context, or `undefined`
+ *   outside a Logging Context.
+ */
+export function captureLoggingContext(): (<R>(fn: () => R) => R) | undefined {
+  const store = als.getStore()
+  return store && ((fn) => als.run(store, fn))
+}
+
+/**
  * Read the current Trace Context (IDs and flags).
  *
  * @returns {TraceContext | null} A copy of the current Trace Context, or `null` outside a Logging Context.

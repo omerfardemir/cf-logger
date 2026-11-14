@@ -1,22 +1,28 @@
-import { RpcTarget, WorkerEntrypoint, env as workersEnv } from 'cloudflare:workers'
+import { DurableObject, RpcTarget, WorkerEntrypoint, env as workersEnv } from 'cloudflare:workers'
 import type { LogFields, Logger, LoggerOptions, TraceCarrier } from './types'
 import {
-  createLogger,
   getLogger,
   getTraceCarrier,
   getTraceContext,
-  hasDefaultLogger,
-  recordSpan,
   registerDefaultLogger,
-  runWithLogger,
   setLoggerContext,
   withSpan,
 } from './logger'
 import { loggerOptionsFromEnv, type EnvMapping } from './env'
 import { extractCarrier } from './trace'
+import {
+  defineMethod,
+  registerRootLogger,
+  rootLoggerFor,
+  runLogged,
+  sameEnvMapping,
+  type Method,
+} from './workers-shared'
 
 export { loggerOptionsFromEnv } from './env'
 export type { EnvMapping, EnvSource } from './env'
+export { withScheduled, withQueueMessage, withWorkflow, tracedStep } from './handlers'
+export type { HandlerOptions } from './handlers'
 
 /**
  * What a caller hands a Traced Session: its Trace Carrier plus any Context
@@ -35,59 +41,6 @@ export interface SessionInit extends TraceCarrier {
  */
 export type TracedServiceBinding<T> = {
   session(init: SessionInit): T
-}
-
-/**
- * Root Loggers keyed by their Logger Options, one per isolate.
- *
- * Safe to share across concurrent requests because a Root Logger carries only
- * per-process data; per-request data lives in each Logging Context.
- */
-const rootLoggers = new Map<string, Logger>()
-
-/**
- * Get the isolate's Root Logger for these Logger Options, creating it once.
- *
- * @param {LoggerOptions} options - Logger Options (usually from `loggerOptionsFromEnv`).
- * @returns {Logger} The cached Root Logger.
- */
-function rootLoggerFor(options: LoggerOptions): Logger {
-  const key = JSON.stringify([options.service, options.level, options.environment, options.version])
-  let logger = rootLoggers.get(key)
-  if (!logger) {
-    logger = createLogger(options)
-    rootLoggers.set(key, logger)
-  }
-  return logger
-}
-
-/**
- * Register the isolate's Root Logger as the Default Logger unless one is already set
- * (first seen wins). Shared by `TracedEntrypoint` and `withLogging()` entrypoints.
- *
- * @param {() => Logger} rootLogger - Resolves the Root Logger; called only while no default is set.
- */
-function registerRootLogger(rootLogger: () => Logger): void {
-  // Once a default is set, skip working out the Logger Options on every request or RPC call.
-  if (!hasDefaultLogger()) registerDefaultLogger(rootLogger())
-}
-
-/**
- * Run `fn` in a new Logging Context, as a Span covering that context when
- * `operation` is given. Shared by `TracedSession.traced()` and `withLogging()`.
- *
- * @template R - The return type of `fn`.
- * @param {Parameters<typeof runWithLogger>[0]} context - The Logging Context to open.
- * @param {() => R} fn - The function to run in it.
- * @param {string} [operation] - Span operation name; no Span without it.
- * @returns {R} The return value of `fn`, unchanged.
- */
-function runLogged<R>(
-  context: Parameters<typeof runWithLogger>[0],
-  fn: () => R,
-  operation?: string,
-): R {
-  return runWithLogger(context, operation ? () => recordSpan(operation, fn) : fn)
 }
 
 /**
@@ -434,6 +387,9 @@ export interface WithLoggingOptions<E = unknown> {
 /** A `WorkerEntrypoint` subclass, as `withLogging()` accepts it. */
 type EntrypointClass = new (ctx: ExecutionContext<any>, env: any) => WorkerEntrypoint<any, any>
 
+/** A `DurableObject` subclass, as `withLogging()` accepts it. */
+type DurableObjectSubclass = new (ctx: DurableObjectState<any>, env: any) => DurableObject<any, any>
+
 /**
  * The env type of an entrypoint class, read from its constructor.
  *
@@ -457,12 +413,33 @@ const HANDLERS = [
 type HandlerName = (typeof HANDLERS)[number]
 
 /**
- * Whether a prototype member is an event handler rather than an RPC method.
- *
- * @param {string} name - The member name.
- * @returns {boolean} `true` for a name in `HANDLERS`.
+ * A Durable Object's event handlers, which JSRPC never calls by name. All but
+ * `connect` are wrapped: each is one unit of work on the object.
  */
-const isHandler = (name: string): boolean => (HANDLERS as readonly string[]).includes(name)
+const DURABLE_OBJECT_HANDLERS = [
+  'fetch',
+  'connect',
+  'alarm',
+  'webSocketMessage',
+  'webSocketClose',
+  'webSocketError',
+] as const
+
+/** The Durable Object handlers `withLogging()` wraps besides `fetch`, which has its own option. */
+const DURABLE_OBJECT_WRAPPED = ['alarm', 'webSocketMessage', 'webSocketClose', 'webSocketError']
+
+/**
+ * The Context Fields naming one Durable Object: `objectName` when its ID has a name
+ * (`idFromName` / `getByName`), otherwise `objectId`.
+ *
+ * @param {DurableObjectState | undefined} state - The object's `ctx`.
+ * @returns {LogFields} The fields, empty when the state has no ID.
+ */
+function objectFieldsOf(state: DurableObjectState | undefined): LogFields {
+  const id = state?.id
+  if (!id) return {}
+  return id.name ? { objectName: id.name } : { objectId: id.toString() }
+}
 
 /**
  * The RPC methods of an entrypoint instance: its public methods minus the event handlers.
@@ -475,40 +452,22 @@ type RpcMethodsOf<T> = {
   ]: T[K]
 }
 
-/** Any method, as stored on a prototype. */
-type Method = (...args: any[]) => unknown
-
 /**
- * Define a method the way a class body does: non-enumerable, writable, configurable.
+ * The methods JSRPC can see on an entrypoint or Durable Object class: functions on
+ * its prototype chain below `base` (`WorkerEntrypoint.prototype` or
+ * `DurableObject.prototype`), nearest definition first, without `constructor`,
+ * accessors, or a method an accessor shadows.
  *
- * @param {object} target - The prototype.
- * @param {string} name - The method name; also the function's `name`.
- * @param {Method} fn - The method.
- */
-function defineMethod(target: object, name: string, fn: Method): void {
-  Object.defineProperty(fn, 'name', { value: name, configurable: true })
-  Object.defineProperty(target, name, {
-    value: fn,
-    writable: true,
-    enumerable: false,
-    configurable: true,
-  })
-}
-
-/**
- * The methods JSRPC can see on an entrypoint class: functions on its prototype
- * chain below `WorkerEntrypoint.prototype`, nearest definition first, without
- * `constructor`, accessors, or a method an accessor shadows.
- *
- * @param {EntrypointClass} Class - The entrypoint class.
+ * @param {Function} Class - The class.
+ * @param {object} base - The runtime base class's prototype, where the walk stops.
  * @returns {Map<string, Method>} Method name to the class's implementation.
  */
-function prototypeMethods(Class: EntrypointClass): Map<string, Method> {
+function prototypeMethods(Class: Function, base: object): Map<string, Method> {
   const methods = new Map<string, Method>()
   const seen = new Set<string>(['constructor'])
   for (
     let proto: object | null = Class.prototype;
-    proto && proto !== WorkerEntrypoint.prototype && proto !== Object.prototype;
+    proto && proto !== base && proto !== Object.prototype;
     proto = Object.getPrototypeOf(proto)
   ) {
     for (const name of Object.getOwnPropertyNames(proto)) {
@@ -537,20 +496,17 @@ const loggedClasses = new WeakMap<object, WithLoggingOptions<any>>()
  * @returns {boolean} `true` when they are the same.
  */
 function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): boolean {
-  const envA = (a.env ?? {}) as Record<string, unknown>
-  const envB = (b.env ?? {}) as Record<string, unknown>
-  const keys = new Set([...Object.keys(envA), ...Object.keys(envB)])
   return (
     !!a.spans === !!b.spans &&
     !!a.session === !!b.session &&
     (a.fetch ?? true) === (b.fetch ?? true) &&
-    [...keys].every((key) => envA[key] === envB[key])
+    sameEnvMapping(a.env, b.env)
   )
 }
 
 /**
- * Open a Logging Context around every public method of a plain `WorkerEntrypoint`,
- * with no caller changes.
+ * Open a Logging Context around every public method of a plain `WorkerEntrypoint`
+ * or a `DurableObject`, with no caller changes.
  *
  * Each RPC method call, and `fetch`, runs in its own Logging Context from the
  * isolate's Root Logger, built with `loggerOptionsFromEnv(this.env, options.env)` and
@@ -587,11 +543,20 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
  *
  * Wrapping a class `withLogging()` returned gives back that class when the options
  * are the same, and throws when they differ. Wrapping a subclass of one throws, and
- * so does wrapping a class that does not extend `WorkerEntrypoint` (a Durable Object,
- * whose `alarm` and `webSocket*` handlers would be wrapped as RPC methods).
+ * so does wrapping a class that extends neither `WorkerEntrypoint` nor `DurableObject`.
  *
- * @template C - The entrypoint class.
- * @param {C} Class - A `WorkerEntrypoint` subclass.
+ * **Durable Objects.** For a `DurableObject` subclass, `fetch`, every RPC method,
+ * `alarm`, `webSocketMessage`, `webSocketClose` and `webSocketError` each run in their
+ * own Logging Context (`fetch` continuing a `traceparent` header, the rest starting
+ * a new root trace), with the Context Fields `rpcMethod` (the method or handler
+ * name), `durableObject` (the class name; left off for an anonymous class) and either
+ * `objectName` (`ctx.id.name`, for an object reached by name) or `objectId`
+ * (`ctx.id.toString()`). `connect` is inherited unchanged. `session` is not
+ * available: the object gets no extra RPC method. `spans`, `fetch` and `env` work as
+ * for an entrypoint.
+ *
+ * @template C - The entrypoint or Durable Object class.
+ * @param {C} Class - A `WorkerEntrypoint` or `DurableObject` subclass.
  * @param {WithLoggingOptions} [options] - `spans`, `session`, `fetch`, and the `env` mapping.
  * @returns A subclass of `Class` whose public methods run in a Logging Context.
  *
@@ -604,6 +569,14 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
  * }
  *
  * export default withLogging(SearchWorker, { spans: true, session: true })
+ *
+ * class RoomObject extends DurableObject<Env> {
+ *   async join(user: string) {
+ *     getLogger().info({ user }, 'joined') // ..., rpcMethod, durableObject, objectName
+ *   }
+ * }
+ *
+ * export const Room = withLogging(RoomObject)
  * ```
  */
 export function withLogging<C extends EntrypointClass>(
@@ -617,7 +590,11 @@ export function withLogging<C extends EntrypointClass>(
   Class: C,
   options?: WithLoggingOptions<EntrypointEnv<C>>,
 ): C
-export function withLogging<C extends EntrypointClass>(
+export function withLogging<C extends DurableObjectSubclass>(
+  Class: C,
+  options?: Omit<WithLoggingOptions<EntrypointEnv<C>>, 'session'>,
+): C
+export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
   Class: C,
   options: WithLoggingOptions<EntrypointEnv<C>> = {},
 ): C {
@@ -625,8 +602,16 @@ export function withLogging<C extends EntrypointClass>(
   const entrypoint = Class.name
   const where = `withLogging(${entrypoint})`
 
-  if (!(Class.prototype instanceof WorkerEntrypoint)) {
-    throw new TypeError(`${where}: ${entrypoint || 'the class'} does not extend WorkerEntrypoint`)
+  const isDurableObject = Class.prototype instanceof DurableObject
+  if (!isDurableObject && !(Class.prototype instanceof WorkerEntrypoint)) {
+    throw new TypeError(
+      `${where}: ${entrypoint || 'the class'} does not extend WorkerEntrypoint or DurableObject`,
+    )
+  }
+  if (isDurableObject && session) {
+    throw new TypeError(
+      `${where}: ${entrypoint} is a Durable Object; session() is only for WorkerEntrypoint classes`,
+    )
   }
 
   const previous = loggedClasses.get(Class)
@@ -663,15 +648,26 @@ export function withLogging<C extends EntrypointClass>(
       ? (target as unknown as { rootLogger: Logger }).rootLogger
       : rootLoggerFor(loggerOptionsFromEnv((target as { env: unknown }).env, mapping as EnvMapping))
 
+  /** Each Durable Object instance's `objectName` / `objectId`, read in its constructor. */
+  const objectFields = new WeakMap<object, LogFields>()
+
   /**
    * The Context Fields of one call: `rpcMethod`, and `entrypoint` unless the class
-   * is anonymous.
+   * is anonymous. For a Durable Object, `durableObject` in place of `entrypoint`, and
+   * `objectName` or `objectId`.
    *
    * @param {string} name - The method name.
+   * @param {object} [target] - The instance the method is called on.
    * @returns {LogFields} The Context Fields.
    */
-  const fieldsOf = (name: string): LogFields =>
-    entrypoint ? { rpcMethod: name, entrypoint } : { rpcMethod: name }
+  const fieldsOf = (name: string, target?: object): LogFields => {
+    if (!isDurableObject) return entrypoint ? { rpcMethod: name, entrypoint } : { rpcMethod: name }
+    return {
+      rpcMethod: name,
+      ...(entrypoint ? { durableObject: entrypoint } : {}),
+      ...(target ? objectFields.get(target) : {}),
+    }
+  }
 
   /**
    * The Span operation name of one call, `<Class>.<method>` (the bare method name for
@@ -686,6 +682,9 @@ export function withLogging<C extends EntrypointClass>(
   const Logged = class extends (Class as EntrypointClass) {
     constructor(ctx: ExecutionContext, env: unknown) {
       super(ctx, env)
+      if (isDurableObject) {
+        objectFields.set(this, objectFieldsOf(ctx as unknown as DurableObjectState))
+      }
       registerRootLogger(() => rootLoggerOf(this))
     }
   }
@@ -705,16 +704,27 @@ export function withLogging<C extends EntrypointClass>(
       const operation = operationOf(name)
       if (getTraceContext()) return operation ? withSpan(operation, run) : run()
       return runLogged(
-        { logger: rootLoggerOf(this), ...carrierOf?.(args), fields: fieldsOf(name) },
+        { logger: rootLoggerOf(this), ...carrierOf?.(args), fields: fieldsOf(name, this) },
         run,
         operation,
       )
     }
 
-  const methods = prototypeMethods(Class)
-  const rpcMethods = [...methods].filter(([name]) => !isHandler(name))
+  const methods = prototypeMethods(
+    Class,
+    isDurableObject ? DurableObject.prototype : WorkerEntrypoint.prototype,
+  )
+  const handlers: readonly string[] = isDurableObject ? DURABLE_OBJECT_HANDLERS : HANDLERS
+  const rpcMethods = [...methods].filter(([name]) => !handlers.includes(name))
   for (const [name, method] of rpcMethods) defineMethod(Logged.prototype, name, wrap(name, method))
-  // `fetch` is the one handler wrapped, because its request is a Trace Carrier.
+  // A Durable Object's alarm and WebSocket handlers are each a unit of work on the object.
+  if (isDurableObject) {
+    for (const name of DURABLE_OBJECT_WRAPPED) {
+      const handler = methods.get(name)
+      if (handler) defineMethod(Logged.prototype, name, wrap(name, handler))
+    }
+  }
+  // `fetch` is wrapped with its request as a Trace Carrier.
   const fetch = wrapFetch ? methods.get('fetch') : undefined
   if (fetch) {
     defineMethod(

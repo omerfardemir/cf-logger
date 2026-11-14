@@ -26,4 +26,5 @@ export type {
   SessionInit,
   TracedWorkerOptions,
   WithLoggingOptions,
+  HandlerOptions,
 } from './workers'
