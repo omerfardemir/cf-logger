@@ -2,11 +2,12 @@ import { Hono } from 'hono'
 import { logger, useLogger } from './logger'
 import { setLoggerContext, getTraceContext, getTraceCarrier, type Logger } from 'loggercf'
 import { withTrace } from 'loggercf/workers'
-import type { BindService, ServiceSession } from './types'
+import type { BindService, LoggedMathService, ServiceSession } from './types'
 
 type Context = {
   Bindings: {
     BIND: ServiceSession<BindService>
+    LOGGED: LoggedMathService & ServiceSession<LoggedMathService> & Pick<Fetcher, 'fetch'>
     NAME: string
     LOG_LEVEL: string
     ENVIRONMENT: string
@@ -101,6 +102,31 @@ app.get('/error', async (c) => {
       500,
     )
   }
+})
+
+/** GET /logged withLogging(): a plain WorkerEntrypoint, called before and after migrating */
+app.get('/logged', async (c) => {
+  // Caller not migrated yet: a plain RPC call. The receiver starts a new root trace.
+  const direct = await c.env.LOGGED.square(3)
+  // Migrated caller: session() continues this request's trace.
+  const traced = await withTrace(c.env.LOGGED, (s) => s.square(4))
+  // fetch on the entrypoint continues a traceparent header.
+  const { traceparent } = getTraceCarrier()
+  const response = await c.env.LOGGED.fetch('https://logged/ping', {
+    headers: traceparent ? { traceparent } : {},
+  })
+  const pong = await response.text()
+
+  let error: string | undefined
+  try {
+    await c.env.LOGGED.fail()
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err)
+  }
+
+  c.var.logger.info({ direct, traced, pong, error }, 'withLogging demo complete')
+  const trace = getTraceContext()
+  return c.json({ direct, traced, pong, error, traceId: trace?.traceId, spanId: trace?.spanId })
 })
 
 /** GET /trace Shows current trace context */

@@ -23,7 +23,9 @@ import {
   tracedWorker,
   loggerOptionsFromEnv,
   defaultLoggerFromEnv,
+  withLogging,
 } from './workers'
+import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
 import type { EnvMapping, SessionInit, TracedServiceBinding } from './workers'
 import {
   runWithLogger,
@@ -36,6 +38,8 @@ import {
   _getDefaultLogger,
 } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
+import { useLogger } from './middleware'
+import { Hono } from 'hono'
 
 describe('Session Factory trace propagation', () => {
   beforeEach(() => {
@@ -1015,5 +1019,627 @@ describe('Default Logger from the Workers helpers', () => {
     expect((again as any).rootLogger).toBe(first)
 
     expect(_getDefaultLogger()).toBe(explicit)
+  })
+})
+
+const ownNames = (o: object) => new Set(Object.getOwnPropertyNames(o))
+const spanEnds = (entries: Record<string, unknown>[]) =>
+  entries.filter((e) => String(e.message).startsWith('span.end '))
+
+describe('withLogging', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+  })
+
+  const ENV = { NAME: 'search', ENVIRONMENT: 'staging', VERSION: '1.2.3' }
+  const CALLER_TRACEPARENT = '00-11111111111111111111111111111111-2222222222222222-01'
+  const RPC_METHODS = new Set([
+    'constructor',
+    'search',
+    'searchAsync',
+    'fail',
+    'failAsync',
+    'nested',
+    'target',
+    'stub',
+  ])
+  const failure = new Error('search failed')
+  const returnedTarget = new (class Counter extends RpcTarget {})()
+  // An RPC stub answers every property, `then` included, so nothing may inspect it.
+  const returnedStub = new Proxy(() => {}, { get: () => () => {} })
+
+  class SearchWorker extends WorkerEntrypoint<typeof ENV> {
+    search(q: string) {
+      getLogger().info({ q }, 'searching')
+      return { q, trace: getTraceContext() }
+    }
+
+    async searchAsync(q: string) {
+      await Promise.resolve()
+      getLogger().info({ q }, 'searching async')
+      return getTraceContext()
+    }
+
+    fail(): never {
+      throw failure
+    }
+
+    async failAsync(): Promise<never> {
+      await Promise.resolve()
+      throw failure
+    }
+
+    nested() {
+      const outer = getTraceContext()
+      const inner = this.search('inner').trace
+      return { outer, inner, after: getTraceContext() }
+    }
+
+    target() {
+      return returnedTarget
+    }
+
+    stub() {
+      return returnedStub
+    }
+
+    scheduled() {
+      getLogger().info('scheduled')
+    }
+
+    queue() {}
+
+    tail() {}
+
+    get computed() {
+      return 'getter'
+    }
+  }
+
+  it('opens a Logging Context per call: service, traceId, spanId, rpcMethod, entrypoint', () => {
+    const entries = _captureEntries()
+    const worker = new (withLogging(SearchWorker))({} as any, ENV)
+
+    const first = worker.search('cats').trace!
+    const second = worker.search('dogs').trace!
+
+    const lines = entries.filter((e) => e.message === 'searching')
+    expect(lines).toHaveLength(2)
+    expect(lines[0]).toMatchObject({
+      service: 'search',
+      environment: 'staging',
+      version: '1.2.3',
+      traceId: first.traceId,
+      spanId: first.spanId,
+      rpcMethod: 'search',
+      entrypoint: 'SearchWorker',
+      q: 'cats',
+    })
+    expect(lines[0]!.traceId).toMatch(/^[0-9a-f]{32}$/)
+    expect(lines[0]!.spanId).toMatch(/^[0-9a-f]{16}$/)
+    // No carrier: each call is a new root trace.
+    expect(second.traceId).not.toBe(first.traceId)
+    expect(first.parentSpanId).toBeUndefined()
+    expect(lines[1]).not.toHaveProperty('parentSpanId')
+  })
+
+  it('keeps the Logging Context across awaits in an async method', async () => {
+    const entries = _captureEntries()
+    const worker = new (withLogging(SearchWorker))({} as any, ENV)
+
+    const trace = await worker.searchAsync('cats')
+
+    expect(entries.find((e) => e.message === 'searching async')).toMatchObject({
+      traceId: trace!.traceId,
+      rpcMethod: 'searchAsync',
+    })
+  })
+
+  it('passes arguments, return values and thrown values through unchanged; sync stays sync', async () => {
+    _captureEntries()
+    const worker = new (withLogging(SearchWorker, { spans: true }))({} as any, ENV)
+
+    const result = worker.search('cats')
+    expect(result).not.toBeInstanceOf(Promise)
+    expect(result.q).toBe('cats')
+    expect(worker.target()).toBe(returnedTarget)
+    expect(worker.stub()).toBe(returnedStub)
+
+    let thrown: unknown
+    try {
+      worker.fail()
+    } catch (err) {
+      thrown = err
+    }
+    expect(thrown).toBe(failure)
+    await expect(worker.failAsync()).rejects.toBe(failure)
+  })
+
+  it('spans: true writes one span.end per call, at ERROR on throw', async () => {
+    const entries = _captureEntries()
+    const worker = new (withLogging(SearchWorker, { spans: true }))({} as any, ENV)
+
+    const trace = worker.search('cats').trace!
+    expect(() => worker.fail()).toThrow(failure)
+    await expect(worker.failAsync()).rejects.toBe(failure)
+
+    const spans = spanEnds(entries)
+    expect(spans).toHaveLength(3)
+    expect(spans[0]).toMatchObject({
+      level: 'INFO',
+      message: 'span.end SearchWorker.search',
+      traceId: trace.traceId,
+      spanId: trace.spanId,
+      rpcMethod: 'search',
+      span: { operation: 'SearchWorker.search', status: 'OK' },
+    })
+    expect((spans[0]!.span as { duration: number }).duration).toBeGreaterThanOrEqual(0)
+    for (const [i, method] of [
+      [1, 'fail'],
+      [2, 'failAsync'],
+    ] as const) {
+      expect(spans[i]).toMatchObject({
+        level: 'ERROR',
+        message: `span.end SearchWorker.${method}`,
+        rpcMethod: method,
+        span: { status: 'ERROR', error: 'search failed' },
+        err: { message: 'search failed' },
+      })
+    }
+  })
+
+  it('writes no span.end without spans: true', () => {
+    const entries = _captureEntries()
+    const worker = new (withLogging(SearchWorker))({} as any, ENV)
+
+    worker.search('cats')
+    expect(() => worker.fail()).toThrow(failure)
+
+    expect(spanEnds(entries)).toHaveLength(0)
+  })
+
+  it('a public method called from another one stays in the same trace', () => {
+    const entries = _captureEntries()
+    const worker = new (withLogging(SearchWorker, { spans: true }))({} as any, ENV)
+
+    const { outer, inner, after } = worker.nested()
+
+    expect(inner!.traceId).toBe(outer!.traceId)
+    expect(inner!.parentSpanId).toBe(outer!.spanId)
+    expect(after).toEqual(outer)
+    expect(spanEnds(entries).map((e) => e.message)).toEqual([
+      'span.end SearchWorker.search',
+      'span.end SearchWorker.nested',
+    ])
+  })
+
+  it('reads the Root Logger from env through the Env Mapping and shares the cached instance', () => {
+    const entries = _captureEntries()
+    interface Env {
+      SERVICE: string
+      CF_VERSION_METADATA: { id: string }
+    }
+    class Mapped extends WorkerEntrypoint<Env> {
+      hello() {
+        getLogger().info('hello')
+      }
+    }
+    const Worker = withLogging(Mapped, {
+      env: { service: 'SERVICE', version: (e) => e.CF_VERSION_METADATA.id },
+    })
+
+    new Worker({} as any, { SERVICE: 'mapped', CF_VERSION_METADATA: { id: 'v-1' } }).hello()
+
+    expect(entries[0]).toMatchObject({ service: 'mapped', version: 'v-1', message: 'hello' })
+    const sameOptions = new TracedEntrypoint({} as any, { NAME: 'mapped', VERSION: 'v-1' })
+    expect(_getDefaultLogger()).toBe((sameOptions as any).rootLogger)
+  })
+
+  it('registers the Root Logger as the Default Logger, first seen wins', () => {
+    const entries = _captureEntries()
+    const worker = new (withLogging(SearchWorker))({} as any, ENV)
+    const second = new (withLogging(SearchWorker))({} as any, { ...ENV, NAME: 'second' })
+
+    worker.scheduled()
+    second.scheduled()
+
+    expect(entries).toHaveLength(2)
+    for (const entry of entries) {
+      expect(entry).toMatchObject({ service: 'search', message: 'scheduled' })
+      expect(entry).not.toHaveProperty('traceId')
+    }
+
+    const explicit = createLogger({ service: 'explicit' })
+    setDefaultLogger(explicit)
+    new (withLogging(SearchWorker))({} as any, ENV).scheduled()
+    expect(_getDefaultLogger()).toBe(explicit)
+    expect(entries.at(-1)).toMatchObject({ service: 'explicit' })
+  })
+
+  it('adds no RPC methods: the prototype has the same method names, handlers untouched', () => {
+    const Worker = withLogging(SearchWorker, { spans: true })
+
+    expect(Object.getPrototypeOf(Worker)).toBe(SearchWorker)
+    expect(Worker.name).toBe('SearchWorker')
+    expect(ownNames(Worker.prototype)).toEqual(RPC_METHODS)
+    for (const name of Object.getOwnPropertyNames(Worker.prototype)) {
+      const descriptor = Object.getOwnPropertyDescriptor(Worker.prototype, name)!
+      expect(descriptor.enumerable).toBe(false)
+      expect(typeof descriptor.value).toBe('function')
+    }
+    expect(Worker.prototype.search.name).toBe('search')
+    // Handlers and accessors are inherited unchanged, not wrapped.
+    expect(Worker.prototype.scheduled).toBe(SearchWorker.prototype.scheduled)
+    expect(Worker.prototype.queue).toBe(SearchWorker.prototype.queue)
+    expect(Worker.prototype.tail).toBe(SearchWorker.prototype.tail)
+    const worker = new Worker({} as any, ENV)
+    expect(worker.computed).toBe('getter')
+    // Only the fields WorkerEntrypoint itself sets; no instance methods.
+    expect(Object.getOwnPropertyNames(worker)).toEqual(['env'])
+    expect('session' in Worker.prototype).toBe(false)
+  })
+
+  it('wraps public methods inherited from a base class, keeping this.env', () => {
+    const entries = _captureEntries()
+    class Base extends WorkerEntrypoint<typeof ENV> {
+      whoami() {
+        getLogger().info('base')
+        return this.env.NAME
+      }
+    }
+    class Derived extends Base {}
+    const Worker = withLogging(Derived)
+
+    expect(new Worker({} as any, ENV).whoami()).toBe('search')
+    expect(ownNames(Worker.prototype)).toEqual(new Set(['constructor', 'whoami']))
+    expect(entries[0]).toMatchObject({ rpcMethod: 'whoami', entrypoint: 'Derived' })
+    expect(entries[0]).toHaveProperty('traceId')
+  })
+
+  it('session: true adds session(init), which continues the caller trace', async () => {
+    const entries = _captureEntries()
+    const Worker = withLogging(SearchWorker, { spans: true, session: true })
+    const binding = new Worker({} as any, ENV)
+
+    let callerSpanId: string | undefined
+    const trace = await runWithLogger(
+      { logger: createLogger({ service: 'caller' }), traceparent: CALLER_TRACEPARENT },
+      () => {
+        callerSpanId = getTraceContext()!.spanId
+        return withTrace(binding, (s) => s.search('cats').trace, { requestId: 'req-1' })
+      },
+    )
+
+    expect(trace).toMatchObject({
+      traceId: '11111111111111111111111111111111',
+      parentSpanId: callerSpanId,
+    })
+    expect(entries.find((e) => e.message === 'searching')).toMatchObject({
+      service: 'search',
+      traceId: '11111111111111111111111111111111',
+      spanId: trace!.spanId,
+      parentSpanId: callerSpanId,
+      requestId: 'req-1',
+      rpcMethod: 'search',
+      entrypoint: 'SearchWorker',
+    })
+    expect(spanEnds(entries)).toHaveLength(1)
+    expect(spanEnds(entries)[0]).toMatchObject({
+      message: 'span.end SearchWorker.search',
+      parentSpanId: callerSpanId,
+      rpcMethod: 'search',
+    })
+  })
+
+  it('a session() Traced Session rethrows unchanged and has only the RPC methods', async () => {
+    const entries = _captureEntries()
+    const Worker = withLogging(SearchWorker, { spans: true, session: true })
+    const session = tracedSession(new Worker({} as any, ENV))
+
+    expect(session).toBeInstanceOf(TracedSession)
+    expect(() => session.fail()).toThrow(failure)
+    await expect(session.failAsync()).rejects.toBe(failure)
+    expect(session.target()).toBe(returnedTarget)
+    expect(spanEnds(entries).map((e) => e.level)).toEqual(['ERROR', 'ERROR', 'INFO'])
+
+    expect(ownNames(Object.getPrototypeOf(session))).toEqual(RPC_METHODS)
+    expect(ownNames(Worker.prototype)).toEqual(new Set([...RPC_METHODS, 'session']))
+    expect(Object.getOwnPropertyNames(session)).toEqual(['env'])
+  })
+
+  it('session: true rejects a class that already defines session()', () => {
+    class HasSession extends WorkerEntrypoint {
+      session() {
+        return {}
+      }
+    }
+    expect(() => withLogging(HasSession, { session: true })).toThrow(/already defines session/)
+  })
+
+  it('fetch gets a Logging Context that continues an incoming traceparent', async () => {
+    const entries = _captureEntries()
+    const response = new Response('ok')
+    class WithFetch extends WorkerEntrypoint<typeof ENV> {
+      fetch(request: Request) {
+        getLogger().info({ path: new URL(request.url).pathname }, 'fetch')
+        return response
+      }
+    }
+    const worker = new (withLogging(WithFetch, { spans: true }))({} as any, ENV)
+
+    const result = await worker.fetch(
+      new Request('https://svc/ping', { headers: { traceparent: CALLER_TRACEPARENT } }),
+    )
+    await worker.fetch(new Request('https://svc/fresh'))
+
+    expect(result).toBe(response)
+    expect(entries[0]).toMatchObject({
+      message: 'fetch',
+      path: '/ping',
+      service: 'search',
+      traceId: '11111111111111111111111111111111',
+      parentSpanId: '2222222222222222',
+      rpcMethod: 'fetch',
+      entrypoint: 'WithFetch',
+    })
+    expect(entries[1]).toMatchObject({ message: 'span.end WithFetch.fetch' })
+    expect(entries[2]).toMatchObject({ message: 'fetch', path: '/fresh' })
+    expect(entries[2]!.traceId).not.toBe('11111111111111111111111111111111')
+  })
+
+  it('a nested call keeps the caller rpcMethod; only the child Span names the callee', () => {
+    const entries = _captureEntries()
+    const worker = new (withLogging(SearchWorker, { spans: true }))({} as any, ENV)
+
+    worker.nested()
+
+    expect(entries.find((e) => e.message === 'searching')).toMatchObject({ rpcMethod: 'nested' })
+    expect(spanEnds(entries)).toMatchObject([
+      { message: 'span.end SearchWorker.search', rpcMethod: 'nested' },
+      { message: 'span.end SearchWorker.nested', rpcMethod: 'nested' },
+    ])
+  })
+
+  it('user methods named traced and logger work on the entrypoint and on the session', () => {
+    const entries = _captureEntries()
+    class Shadowing extends WorkerEntrypoint<typeof ENV> {
+      traced(n: number) {
+        getLogger().info('in traced')
+        return n * 2
+      }
+
+      logger() {
+        return 'mine'
+      }
+    }
+    const worker = new (withLogging(Shadowing, { spans: true, session: true }))({} as any, ENV)
+
+    expect(worker.traced(2)).toBe(4)
+    expect(worker.logger()).toBe('mine')
+    const session = tracedSession(worker) as unknown as Shadowing
+    expect(session.traced(3)).toBe(6)
+    expect(session.logger()).toBe('mine')
+
+    expect(entries.filter((e) => e.message === 'in traced')).toMatchObject([
+      { rpcMethod: 'traced', entrypoint: 'Shadowing' },
+      { rpcMethod: 'traced', entrypoint: 'Shadowing' },
+    ])
+    expect(spanEnds(entries).map((e) => e.message)).toEqual([
+      'span.end Shadowing.traced',
+      'span.end Shadowing.logger',
+      'span.end Shadowing.traced',
+      'span.end Shadowing.logger',
+    ])
+  })
+
+  it('wrapping a TracedEntrypoint subclass uses its rootLogger (its envMapping)', () => {
+    const entries = _captureEntries()
+    interface Env {
+      NAME: string
+      SERVICE: string
+    }
+    class Mapped extends TracedEntrypoint<Env> {
+      protected override get envMapping(): EnvMapping<Env> {
+        return { service: 'SERVICE' }
+      }
+
+      hello() {
+        getLogger().info('hello')
+      }
+    }
+    const env = { NAME: 'wrong', SERVICE: 'mapped' }
+    const worker = new (withLogging(Mapped, { session: true }))({} as any, env)
+
+    worker.hello()
+    ;(tracedSession(worker) as unknown as Mapped).hello()
+
+    expect(entries.map((e) => e.service)).toEqual(['mapped', 'mapped'])
+    expect(_getDefaultLogger()).toBe((worker as any).rootLogger)
+    expect(() => withLogging(Mapped, { env: { service: 'NAME' } })).toThrow(
+      /TracedEntrypoint.*envMapping/,
+    )
+  })
+
+  it('session: true rejects a session getter, own or inherited', () => {
+    class Getter extends WorkerEntrypoint {
+      get session() {
+        return 1
+      }
+    }
+    class Inherits extends Getter {}
+    expect(() => withLogging(Getter, { session: true })).toThrow(/already defines session/)
+    expect(() => withLogging(Inherits, { session: true })).toThrow(/already defines session/)
+  })
+
+  it('wrapping a wrapped class returns it with the same options and throws with others', () => {
+    const entries = _captureEntries()
+    const mapping = { service: 'NAME' } as const
+    const Once = withLogging(SearchWorker, { spans: true, session: true, env: mapping })
+
+    const Twice = withLogging(Once, { spans: true, session: true, env: { service: 'NAME' } })
+    expect(Twice).toBe(Once)
+    new Twice({} as any, ENV).search('cats')
+    expect(spanEnds(entries)).toHaveLength(1)
+
+    expect(() => withLogging(Once, { session: true, env: mapping })).toThrow(
+      /already wrapped with other options/,
+    )
+    expect(() => withLogging(Once, { spans: true, env: mapping })).toThrow(
+      /already wrapped with other options/,
+    )
+    expect(() => withLogging(Once, { spans: true, session: true })).toThrow(
+      /already wrapped with other options/,
+    )
+    const Plain = withLogging(SearchWorker)
+    expect(withLogging(Plain)).toBe(Plain)
+    expect(withLogging(Plain, { spans: false, session: false, env: {} })).toBe(Plain)
+
+    class Sub extends Plain {}
+    expect(() => withLogging(Sub)).toThrow(/extends a class already wrapped/)
+    // The marker is not a visible property.
+    expect(Reflect.ownKeys(Once)).toEqual(Reflect.ownKeys(withLogging(SearchWorker)))
+  })
+
+  it('fetch: false leaves fetch inherited unchanged, with no Logging Context of its own', async () => {
+    const entries = _captureEntries()
+    class WithFetch extends WorkerEntrypoint<typeof ENV> {
+      fetch() {
+        getLogger().info('fetch')
+        return new Response(String(!!getTraceContext()))
+      }
+      search() {
+        getLogger().info('searching')
+      }
+    }
+    const Worker = withLogging(WithFetch, { spans: true, fetch: false })
+
+    expect(Object.hasOwn(Worker.prototype, 'fetch')).toBe(false)
+    expect(Worker.prototype.fetch).toBe(WithFetch.prototype.fetch)
+    const worker = new Worker({} as any, ENV)
+    expect(await worker.fetch().text()).toBe('false')
+    worker.search()
+
+    expect(entries[0]).toMatchObject({ message: 'fetch', service: 'search' })
+    expect(entries[0]).not.toHaveProperty('traceId')
+    expect(entries[0]).not.toHaveProperty('rpcMethod')
+    // The RPC methods are still wrapped.
+    expect(entries[1]).toMatchObject({ message: 'searching', rpcMethod: 'search' })
+    expect(spanEnds(entries)).toMatchObject([{ message: 'span.end WithFetch.search' }])
+  })
+
+  /**
+   * Send one request through a `withLogging` entrypoint whose `fetch` hands off to a
+   * Hono app with `useLogger`, and return the lines logged.
+   */
+  const fetchThroughApp = async (options: { fetch?: boolean }, headers?: HeadersInit) => {
+    const entries = _captureEntries()
+    const app = new Hono()
+    app.use(useLogger(createLogger({ service: 'search' })))
+    app.get('/ping', (c) => {
+      getLogger().info('handler')
+      return c.text('ok')
+    })
+    class AppWorker extends WorkerEntrypoint<typeof ENV> {
+      fetch(request: Request) {
+        getLogger().info('handing off')
+        return app.fetch(request, this.env)
+      }
+    }
+    const worker = new (withLogging(AppWorker, { spans: true, ...options }))({} as any, ENV)
+    const response = await worker.fetch(new Request('https://svc/ping', { headers }))
+    expect(await response.text()).toBe('ok')
+    return entries
+  }
+
+  it('fetch: false lets a Hono app with useLogger own the request: one trace', async () => {
+    const unwrapped = await fetchThroughApp({ fetch: false })
+    const traced = unwrapped.filter((e) => 'traceId' in e)
+    expect(traced.map((e) => e.message)).toEqual([
+      'request.start GET /ping',
+      'handler',
+      'request.end GET /ping',
+    ])
+    expect(new Set(traced.map((e) => e.traceId)).size).toBe(1)
+
+    const continued = await fetchThroughApp({ fetch: false }, { traceparent: CALLER_TRACEPARENT })
+    const continuedTraced = continued.filter((e) => 'traceId' in e)
+    expect(continuedTraced).toHaveLength(3)
+    for (const entry of continuedTraced) {
+      expect(entry).toMatchObject({
+        traceId: '11111111111111111111111111111111',
+        parentSpanId: '2222222222222222',
+      })
+    }
+
+    // The default wraps fetch as well, which splits the request into two root traces.
+    const wrapped = await fetchThroughApp({})
+    expect(new Set(wrapped.map((e) => e.traceId)).size).toBe(2)
+  })
+
+  it('methods added or overridden in a subclass of the wrapped class run outside any Logging Context', () => {
+    const entries = _captureEntries()
+    class Ext extends withLogging(SearchWorker) {
+      extra() {
+        getLogger().info('extra')
+      }
+      override search(q: string) {
+        getLogger().info({ q }, 'overridden')
+        return { q, trace: getTraceContext() }
+      }
+    }
+    const worker = new Ext({} as any, ENV)
+
+    worker.extra()
+    expect(worker.search('cats').trace).toBeNull()
+
+    expect(entries[0]).toMatchObject({ message: 'extra', service: 'search' })
+    expect(entries[1]).toMatchObject({ message: 'overridden', service: 'search' })
+    for (const entry of entries.slice(0, 2)) {
+      expect(entry).not.toHaveProperty('traceId')
+      expect(entry).not.toHaveProperty('rpcMethod')
+    }
+  })
+
+  it('throws for a class that does not extend WorkerEntrypoint', () => {
+    class Room {
+      constructor(
+        readonly ctx: unknown,
+        readonly env: unknown,
+      ) {}
+      alarm() {}
+      webSocketMessage() {}
+    }
+    expect(() => withLogging(Room as any)).toThrow(
+      /withLogging\(Room\): Room does not extend WorkerEntrypoint/,
+    )
+    expect(() => withLogging(WorkerEntrypoint as any)).toThrow(/does not extend WorkerEntrypoint/)
+    expect(() => withLogging(class {} as any)).toThrow(/the class does not extend WorkerEntrypoint/)
+  })
+
+  it('an anonymous class gets no entrypoint field and a bare span name', () => {
+    const entries = _captureEntries()
+    const Anonymous = (() =>
+      class extends WorkerEntrypoint<typeof ENV> {
+        search() {
+          getLogger().info('searching')
+        }
+      })()
+    expect(Anonymous.name).toBe('')
+
+    new (withLogging(Anonymous, { spans: true }))({} as any, ENV).search()
+
+    expect(entries[0]).toMatchObject({ message: 'searching', rpcMethod: 'search' })
+    expect(entries[0]).not.toHaveProperty('entrypoint')
+    expect(spanEnds(entries)).toMatchObject([{ message: 'span.end search' }])
+  })
+
+  it('the double-wrap guard compares fetch too (default true)', () => {
+    const Plain = withLogging(SearchWorker)
+    expect(withLogging(Plain, { fetch: true })).toBe(Plain)
+    expect(() => withLogging(Plain, { fetch: false })).toThrow(/already wrapped with other options/)
+    const NoFetch = withLogging(SearchWorker, { fetch: false })
+    expect(withLogging(NoFetch, { fetch: false })).toBe(NoFetch)
+    expect(() => withLogging(NoFetch)).toThrow(/already wrapped with other options/)
   })
 })

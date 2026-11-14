@@ -16,3 +16,9 @@ export interface MathService {
   multiply(a: number, b: number): Promise<number>
   divide(a: number, b: number): Promise<number>
 }
+
+/** math-worker's LoggedMath entrypoint: a plain WorkerEntrypoint wrapped with withLogging() */
+export interface LoggedMathService {
+  square(n: number): Promise<number>
+  fail(): Promise<never>
+}
