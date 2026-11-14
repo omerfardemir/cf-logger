@@ -30,7 +30,7 @@ Where each Logger Options field is read from in a Worker's (or process's) env: a
 _Avoid_: env config, var map
 
 **Argument Routing**:
-The rule that places every argument of a log call in exactly one part of the line (the message, top-level fields, `err` / `errors`, or the Overflow), for both the structured call style (fields or an `Error` first) and the console style (message first). No argument is ever dropped. It runs before serialization, so routed values are serialized like any field.
+The rule that places every argument of a log call in the line (the message, top-level fields, `err` / `errors`, or the Overflow), for both the structured call style (fields or an `Error` first) and the console style (message first). Most arguments land in one part; a leading number, boolean or `BigInt` lands in two (it is the message, and its value is in the Overflow). No argument is ever dropped: only a leading `undefined` / `null` ("no fields") and an `undefined` where the message would be ("no message") write nothing. It runs before serialization, so routed values are serialized like any field.
 _Avoid_: argument parsing, normalization
 
 **Overflow**:
