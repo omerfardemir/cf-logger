@@ -176,13 +176,13 @@ export function formatMessage(
  *
  * 1. Leading argument: a `string` is the message template. An `Error` becomes
  *    `err`, and the message defaults to `err.message`. A plain object is
- *    merged (see below). A leading `undefined` or `null` means "no fields"
- *    (an `Error | undefined` that is unset) and writes nothing. Any other
- *    primitive goes to `args` and is the message as `String(value)`.
- *    Anything else (array, class instance...) goes to `args`. After an
- *    `Error`, a plain object, `undefined` / `null`, an array or a class
- *    instance, a `string` second argument is the template, and `undefined`
- *    means "no message".
+ *    merged (see below). An `undefined` or `null` followed by a `string`
+ *    (an `Error | undefined` that is unset) writes nothing, and the string is
+ *    the template. Any other primitive, `undefined` and `null` included, goes
+ *    to `args` and is the message as `String(value)`. Anything else (array,
+ *    class instance...) goes to `args`. After an `Error`, a plain object, an
+ *    array or a class instance, a `string` second argument is the template,
+ *    and an `undefined` or `null` one goes to `args`.
  * 2. `printf` placeholders in the template take arguments in order
  *    (see `formatMessage()`).
  * 3. Every remaining argument, in order: the first `Error` becomes `err` if
@@ -242,9 +242,10 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
     }
     if (moved) overflow.push(moved)
   }
+  /** After a leading value that is not a message: a string is the template, `undefined` / `null` goes to `args`. */
   const takeTemplate = () => {
     if (typeof remaining[0] === 'string') template = remaining.shift() as string
-    else if (remaining.length > 0 && remaining[0] === undefined) remaining.shift()
+    else if (remaining.length > 0 && remaining[0] == null) overflow.push(remaining.shift())
   }
 
   const first = input[0]
@@ -264,9 +265,9 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
     } else if (isPlainObject(first)) {
       merge(first)
       takeTemplate()
-    } else if (first == null) {
-      // No fields (an `Error | undefined` that is unset): nothing to write for it.
-      takeTemplate()
+    } else if (first == null && typeof remaining[0] === 'string') {
+      // An `Error | undefined` that is unset, then the message: nothing to write for it.
+      template = remaining.shift() as string
     } else if (isPrimitive(first)) {
       overflow.push(first)
       message = String(first)

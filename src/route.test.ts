@@ -138,7 +138,11 @@ describe('routeArgs', () => {
   it('leading Error: err, with the message defaulting to err.message', () => {
     const err = new Error('boom')
     expect(routeArgs([err])).toEqual({ fields: { err }, message: 'boom' })
-    expect(routeArgs([err, undefined])).toEqual({ fields: { err }, message: 'boom' })
+    expect(routeArgs([err, undefined])).toEqual({
+      fields: { err },
+      message: 'boom',
+      args: [undefined],
+    })
     expect(routeArgs([err, 'failed %s', 'job'])).toEqual({
       fields: { err },
       message: 'failed job',
@@ -154,7 +158,12 @@ describe('routeArgs', () => {
       message: 'span.end op',
     })
     expect(routeArgs([{ a: 1 }])).toEqual({ fields: { a: 1 } })
-    expect(routeArgs([{ a: 1 }, undefined])).toEqual({ fields: { a: 1 } })
+    expect(routeArgs([{ a: 1 }, undefined])).toEqual({ fields: { a: 1 }, args: [undefined] })
+    expect(routeArgs([{ a: 1 }, null, 'x'])).toEqual({
+      fields: { a: 1 },
+      message: 'x',
+      args: [null],
+    })
     expect(routeArgs([Object.assign(Object.create(null), { a: 1 })])).toEqual({ fields: { a: 1 } })
   })
 
@@ -164,16 +173,32 @@ describe('routeArgs', () => {
     expect(routeArgs([10n])).toEqual({ fields: {}, message: '10', args: [10n] })
   })
 
-  it('leading undefined or null: no fields, and a following string is the template', () => {
+  it('leading undefined or null, then a string: writes nothing, and the string is the template', () => {
     expect(routeArgs([undefined, 'failed %s', 'id1'])).toEqual({
       fields: {},
       message: 'failed id1',
     })
     expect(routeArgs([null, 'failed %s', 'id1'])).toEqual({ fields: {}, message: 'failed id1' })
-    expect(routeArgs([undefined])).toEqual({ fields: {} })
-    expect(routeArgs([null])).toEqual({ fields: {} })
-    expect(routeArgs([null, 42])).toEqual({ fields: {}, message: '42' })
-    expect(routeArgs([undefined, { a: 1 }])).toEqual({ fields: { a: 1 } })
+  })
+
+  it('leading undefined or null alone or before a non-string: a leading primitive', () => {
+    expect(routeArgs([undefined])).toEqual({
+      fields: {},
+      message: 'undefined',
+      args: [undefined],
+    })
+    expect(routeArgs([null])).toEqual({ fields: {}, message: 'null', args: [null] })
+    expect(routeArgs([null, 42])).toEqual({ fields: {}, message: 'null 42', args: [null] })
+    expect(routeArgs([undefined, { a: 1 }])).toEqual({
+      fields: { a: 1 },
+      message: 'undefined',
+      args: [undefined],
+    })
+    expect(routeArgs([undefined, undefined, 'x'])).toEqual({
+      fields: {},
+      message: 'undefined undefined x',
+      args: [undefined],
+    })
   })
 
   it('leading array or class instance: args, and a following string is the template', () => {
@@ -406,6 +431,26 @@ describe('log call examples (issue #21), in both call styles', () => {
     expect(r).toMatchObject({ level: 'ERROR', message: 'failed id1' })
     expect(r).not.toHaveProperty('args')
     expect(r).not.toHaveProperty('err')
+  })
+
+  it('an undefined after a leading object or Error is in args, not the message', () => {
+    expect(record((l) => l.info({ a: 1 }, undefined))).toMatchObject({ a: 1, args: [null] })
+    const r = record((l) => l.error(new Error('boom'), undefined))
+    expect(r).toMatchObject({ message: 'boom', args: [null], err: { message: 'boom' } })
+  })
+
+  it('a leading undefined or null with no message after it is the message', () => {
+    const maybeErr = undefined as Error | undefined
+    expect(record((l) => l.error(maybeErr))).toMatchObject({
+      message: 'undefined',
+      args: [null],
+    })
+    const r = record((l) => (l.error as (...args: unknown[]) => void)(null, { a: 1 }))
+    expect(r).toMatchObject({
+      message: 'null',
+      a: 1,
+      args: [null],
+    })
   })
 
   it('an Error under %o is err, not {}', () => {
@@ -724,22 +769,6 @@ function generator(seed: number) {
   }
 }
 
-/**
- * How many `null` / `undefined` arguments write nothing: a leading one ("no
- * fields"), and an `undefined` second argument ("no message") after a leading
- * value that is not a string or a printable primitive.
- */
-function skippedNullish(values: readonly unknown[]): number {
-  const first = values[0]
-  const leadsWithValue =
-    first == null ||
-    typeof first === 'symbol' ||
-    typeof first === 'function' ||
-    typeof first === 'object'
-  const skipsSecond = values.length > 1 && values[1] === undefined && leadsWithValue
-  return (first == null ? 1 : 0) + (skipsSecond ? 1 : 0)
-}
-
 describe('routing property', () => {
   beforeEach(() => _reset())
 
@@ -771,7 +800,9 @@ describe('routing property', () => {
         const found = wordCount(String(literal)) + overflow.filter((v) => v === literal).length
         expect(found, `seed ${seed}: ${String(literal)}`).toBeGreaterThanOrEqual(count(literal))
       }
-      const nullish = count(null) + count(undefined) - skippedNullish(values)
+      // The one nullish value that writes nothing: an unset `Error | undefined` before the message.
+      const unsetError = values[0] == null && typeof values[1] === 'string' ? 1 : 0
+      const nullish = count(null) + count(undefined) - unsetError
       const foundNullish =
         wordCount('null') + wordCount('undefined') + overflow.filter((v) => v === null).length
       expect(foundNullish, `seed ${seed}: null/undefined`).toBeGreaterThanOrEqual(nullish)
