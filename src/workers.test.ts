@@ -38,6 +38,8 @@ import {
   _getDefaultLogger,
 } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
+import { useLogger } from './middleware'
+import { Hono } from 'hono'
 
 describe('Session Factory trace propagation', () => {
   beforeEach(() => {
@@ -1497,5 +1499,147 @@ describe('withLogging', () => {
     expect(() => withLogging(Sub)).toThrow(/extends a class already wrapped/)
     // The marker is not a visible property.
     expect(Reflect.ownKeys(Once)).toEqual(Reflect.ownKeys(withLogging(SearchWorker)))
+  })
+
+  it('fetch: false leaves fetch inherited unchanged, with no Logging Context of its own', async () => {
+    const entries = _captureEntries()
+    class WithFetch extends WorkerEntrypoint<typeof ENV> {
+      fetch() {
+        getLogger().info('fetch')
+        return new Response(String(!!getTraceContext()))
+      }
+      search() {
+        getLogger().info('searching')
+      }
+    }
+    const Worker = withLogging(WithFetch, { spans: true, fetch: false })
+
+    expect(Object.hasOwn(Worker.prototype, 'fetch')).toBe(false)
+    expect(Worker.prototype.fetch).toBe(WithFetch.prototype.fetch)
+    const worker = new Worker({} as any, ENV)
+    expect(await worker.fetch().text()).toBe('false')
+    worker.search()
+
+    expect(entries[0]).toMatchObject({ message: 'fetch', service: 'search' })
+    expect(entries[0]).not.toHaveProperty('traceId')
+    expect(entries[0]).not.toHaveProperty('rpcMethod')
+    // The RPC methods are still wrapped.
+    expect(entries[1]).toMatchObject({ message: 'searching', rpcMethod: 'search' })
+    expect(spanEnds(entries)).toMatchObject([{ message: 'span.end WithFetch.search' }])
+  })
+
+  /**
+   * Send one request through a `withLogging` entrypoint whose `fetch` hands off to a
+   * Hono app with `useLogger`, and return the lines logged.
+   */
+  const fetchThroughApp = async (options: { fetch?: boolean }, headers?: HeadersInit) => {
+    const entries = _captureEntries()
+    const app = new Hono()
+    app.use(useLogger(createLogger({ service: 'search' })))
+    app.get('/ping', (c) => {
+      getLogger().info('handler')
+      return c.text('ok')
+    })
+    class AppWorker extends WorkerEntrypoint<typeof ENV> {
+      fetch(request: Request) {
+        getLogger().info('handing off')
+        return app.fetch(request, this.env)
+      }
+    }
+    const worker = new (withLogging(AppWorker, { spans: true, ...options }))({} as any, ENV)
+    const response = await worker.fetch(new Request('https://svc/ping', { headers }))
+    expect(await response.text()).toBe('ok')
+    return entries
+  }
+
+  it('fetch: false lets a Hono app with useLogger own the request: one trace', async () => {
+    const unwrapped = await fetchThroughApp({ fetch: false })
+    const traced = unwrapped.filter((e) => 'traceId' in e)
+    expect(traced.map((e) => e.message)).toEqual([
+      'request.start GET /ping',
+      'handler',
+      'request.end GET /ping',
+    ])
+    expect(new Set(traced.map((e) => e.traceId)).size).toBe(1)
+
+    const continued = await fetchThroughApp({ fetch: false }, { traceparent: CALLER_TRACEPARENT })
+    const continuedTraced = continued.filter((e) => 'traceId' in e)
+    expect(continuedTraced).toHaveLength(3)
+    for (const entry of continuedTraced) {
+      expect(entry).toMatchObject({
+        traceId: '11111111111111111111111111111111',
+        parentSpanId: '2222222222222222',
+      })
+    }
+
+    // The default wraps fetch as well, which splits the request into two root traces.
+    const wrapped = await fetchThroughApp({})
+    expect(new Set(wrapped.map((e) => e.traceId)).size).toBe(2)
+  })
+
+  it('methods added or overridden in a subclass of the wrapped class run outside any Logging Context', () => {
+    const entries = _captureEntries()
+    class Ext extends withLogging(SearchWorker) {
+      extra() {
+        getLogger().info('extra')
+      }
+      override search(q: string) {
+        getLogger().info({ q }, 'overridden')
+        return { q, trace: getTraceContext() }
+      }
+    }
+    const worker = new Ext({} as any, ENV)
+
+    worker.extra()
+    expect(worker.search('cats').trace).toBeNull()
+
+    expect(entries[0]).toMatchObject({ message: 'extra', service: 'search' })
+    expect(entries[1]).toMatchObject({ message: 'overridden', service: 'search' })
+    for (const entry of entries.slice(0, 2)) {
+      expect(entry).not.toHaveProperty('traceId')
+      expect(entry).not.toHaveProperty('rpcMethod')
+    }
+  })
+
+  it('throws for a class that does not extend WorkerEntrypoint', () => {
+    class Room {
+      constructor(
+        readonly ctx: unknown,
+        readonly env: unknown,
+      ) {}
+      alarm() {}
+      webSocketMessage() {}
+    }
+    expect(() => withLogging(Room as any)).toThrow(
+      /withLogging\(Room\): Room does not extend WorkerEntrypoint/,
+    )
+    expect(() => withLogging(WorkerEntrypoint as any)).toThrow(/does not extend WorkerEntrypoint/)
+    expect(() => withLogging(class {} as any)).toThrow(/the class does not extend WorkerEntrypoint/)
+  })
+
+  it('an anonymous class gets no entrypoint field and a bare span name', () => {
+    const entries = _captureEntries()
+    const Anonymous = (() =>
+      class extends WorkerEntrypoint<typeof ENV> {
+        search() {
+          getLogger().info('searching')
+        }
+      })()
+    expect(Anonymous.name).toBe('')
+
+    new (withLogging(Anonymous, { spans: true }))({} as any, ENV).search()
+
+    expect(entries[0]).toMatchObject({ message: 'searching', rpcMethod: 'search' })
+    expect(entries[0]).not.toHaveProperty('entrypoint')
+    expect(spanEnds(entries)).toMatchObject([{ message: 'span.end search' }])
+  })
+
+  it('the double-wrap guard compares fetch too (default true)', () => {
+    const Plain = withLogging(SearchWorker)
+    expect(withLogging(Plain, { fetch: true })).toBe(Plain)
+    expect(() => withLogging(Plain, { fetch: false })).toThrow(/already wrapped with other options/)
+    const NoFetch = withLogging(SearchWorker, { fetch: false })
+    expect(withLogging(NoFetch, { fetch: false })).toBe(NoFetch)
+    expect(() => withLogging(NoFetch)).toThrow(/already wrapped with other options/)
   })
 })
