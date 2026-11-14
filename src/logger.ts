@@ -443,18 +443,26 @@ export function withSpan<R>(operation: string, fn: () => R): R {
  * Time `fn` as a Span covering the *current* Logging Context (no new span ID).
  *
  * Used by `withSpan()` after it opens a nested context, and by Traced Sessions,
- * whose whole Logging Context is the Span. Logs only when the trace is sampled.
+ * whose whole Logging Context is the Span. The `span.end` line is written only when
+ * the trace is sampled (and `timed` is on). Otherwise a throw is still logged, as one
+ * `<operation> failed` line at `ERROR` with `operation` and `err`, and success
+ * writes nothing.
  *
  * @internal Not exported from the package entry points.
  */
-export function recordSpan<R>(operation: string, fn: () => R): R {
+export function recordSpan<R>(operation: string, fn: () => R, timed = true): R {
   const store = als.getStore()
-  if (!store || (store.trace.traceFlags & 0x01) !== 0x01) return fn()
+  if (!store) return fn()
 
   const { logger } = store
+  const sampled = timed && (store.trace.traceFlags & 0x01) === 0x01
   const startTime = Date.now()
 
   const emit = (status: SpanContext['status'], error?: unknown) => {
+    if (!sampled) {
+      if (status === 'ERROR') logger.error({ operation, err: error }, '%s failed', operation)
+      return
+    }
     const endTime = Date.now()
     const span: SpanContext = {
       operation,
