@@ -3,6 +3,7 @@ import { matchedRoutes, routePath } from 'hono/route'
 import type { LogFields, LogLevel, Logger } from './types'
 import { extractCarrier, injectCarrier } from './trace'
 import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './logger'
+import { registerDefaultLogger } from './logger'
 
 /**
  * Where `useLogger` reads an incoming request ID from: a request header name
@@ -529,6 +530,8 @@ export function useLogger<T extends LogFields = LogFields>(
     if (!result?.dropped.length) return
     warn(logger, `${hook}.dropped`, DROPPED_KEYS[hook], { hook, droppedKeys: result.dropped })
   }
+  // A factory's logger is not registered: nothing guarantees it is a Root Logger.
+  if ('info' in loggerOrFactory) registerDefaultLogger(loggerOrFactory as Logger)
 
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)

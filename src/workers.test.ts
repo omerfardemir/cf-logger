@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+// The `env` that `import { env } from 'cloudflare:workers'` returns; tests set its vars.
+const workersEnv = vi.hoisted((): Record<string, unknown> => ({}))
+
 // Mock cloudflare:workers not available in Node/vitest
 vi.mock('cloudflare:workers', () => ({
+  env: workersEnv,
   RpcTarget: class RpcTarget {},
   WorkerEntrypoint: class WorkerEntrypoint {
     env: unknown
@@ -18,6 +22,7 @@ import {
   TracedEntrypoint,
   tracedWorker,
   loggerOptionsFromEnv,
+  defaultLoggerFromEnv,
 } from './workers'
 import type { EnvMapping, SessionInit, TracedServiceBinding } from './workers'
 import {
@@ -26,7 +31,9 @@ import {
   getLogger,
   _reset,
   createLogger,
+  setDefaultLogger,
   _captureEntries,
+  _getDefaultLogger,
 } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
 
@@ -507,12 +514,21 @@ describe('TracedEntrypoint', () => {
     _reset()
   })
 
-  it('loggerOptions reads NAME and LOG_LEVEL from env', () => {
-    const entrypoint = new TracedEntrypoint({} as any, { NAME: 'my-svc', LOG_LEVEL: 'warn' })
+  it('loggerOptions reads NAME, LOG_LEVEL, ENVIRONMENT and VERSION from env by default', () => {
+    const entrypoint = new TracedEntrypoint({} as any, {
+      NAME: 'my-svc',
+      LOG_LEVEL: 'warn',
+      ENVIRONMENT: 'staging',
+      VERSION: '1.2.3',
+    })
 
     const opts = (entrypoint as any).loggerOptions
-    expect(opts.service).toBe('my-svc')
-    expect(opts.level).toBe('warn')
+    expect(opts).toEqual({
+      service: 'my-svc',
+      level: 'warn',
+      environment: 'staging',
+      version: '1.2.3',
+    })
   })
 
   it('loggerOptions defaults when env vars missing', () => {
@@ -680,6 +696,55 @@ describe('tracedWorker', () => {
     })
   })
 
+  it('the documented version_metadata recipe falls back to id when tag is empty, and tolerates a missing binding', () => {
+    const entries = _captureEntries()
+
+    interface Env {
+      CF_VERSION_METADATA?: { id: string; tag: string }
+    }
+
+    class TestSession extends TracedSession<Env> {
+      hello() {
+        return this.traced(() => this.logger.info('hello'))
+      }
+    }
+
+    const Worker = tracedWorker(TestSession, {
+      env: { version: (e) => e.CF_VERSION_METADATA?.tag || e.CF_VERSION_METADATA?.id },
+    })
+    new Worker(undefined, { NAME: 'w', CF_VERSION_METADATA: { id: 'id-1', tag: '' } })
+      .session({})
+      .hello()
+    // Without the binding the recipe must not throw; version is just left off.
+    new Worker(undefined, { NAME: 'w2' }).session({}).hello()
+
+    expect(entries[0]).toMatchObject({ service: 'w', version: 'id-1' })
+    expect(entries[1]).toMatchObject({ service: 'w2' })
+    expect(entries[1]).not.toHaveProperty('version')
+  })
+
+  it('an invalid LOG_LEVEL warns once per isolate across repeated session() calls', () => {
+    const entries = _captureEntries()
+
+    class TestSession extends TracedSession {
+      hello() {
+        return this.traced(() => this.logger.info('hello'))
+      }
+    }
+
+    const instance = new (tracedWorker(TestSession))(undefined, {
+      NAME: 'bad-level',
+      LOG_LEVEL: 'verbose',
+    })
+    instance.session({}).hello()
+    instance.session({}).hello()
+
+    const warns = entries.filter((e) => e.level === 'WARN')
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toMatchObject({ invalidLevel: 'verbose', service: 'bad-level' })
+    expect(entries.filter((e) => e.message === 'hello')).toHaveLength(2)
+  })
+
   it('tracedWorker() without options reads the default vars', () => {
     const entries = _captureEntries()
 
@@ -780,5 +845,175 @@ describe('traceFlags sampling', () => {
 
     const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))
     expect(spanEntry).toBeDefined()
+  })
+})
+
+describe('Default Logger from the Workers helpers', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+    for (const key of Object.keys(workersEnv)) delete workersEnv[key]
+  })
+
+  it('a TracedEntrypoint whose rootLogger returns getLogger() does not loop', () => {
+    const entries = _captureEntries()
+    class Forwarding extends TracedEntrypoint {
+      protected override get rootLogger() {
+        return getLogger()
+      }
+    }
+
+    expect(() => new Forwarding({} as any, {})).not.toThrow()
+    expect(_getDefaultLogger()).toBeUndefined()
+    getLogger().info('x')
+    expect(entries.at(-1)).toMatchObject({ service: 'unknown', message: 'x' })
+  })
+
+  it('a TracedEntrypoint whose rootLogger is a child of getLogger() does not lock in unknown', () => {
+    const entries = _captureEntries()
+    class ForwardingChild extends TracedEntrypoint {
+      protected override get rootLogger() {
+        return getLogger().child({ component: 'pkg' })
+      }
+    }
+
+    expect(() => new ForwardingChild({} as any, {})).not.toThrow()
+    expect(_getDefaultLogger()).toBeUndefined()
+    workersEnv.NAME = 'orders'
+    defaultLoggerFromEnv()
+    getLogger().info('x')
+    expect(entries.at(-1)).toMatchObject({ service: 'orders', message: 'x' })
+  })
+
+  it('defaultLoggerFromEnv() builds the Root Logger from env and registers it', () => {
+    const entries = _captureEntries()
+    Object.assign(workersEnv, {
+      NAME: 'cron-worker',
+      LOG_LEVEL: 'debug',
+      ENVIRONMENT: 'production',
+      VERSION: '4.0.0',
+    })
+
+    const logger = defaultLoggerFromEnv()
+    expect(_getDefaultLogger()).toBe(logger)
+
+    getLogger().debug('outside any Logging Context')
+    expect(entries[0]).toMatchObject({
+      level: 'DEBUG',
+      service: 'cron-worker',
+      environment: 'production',
+      version: '4.0.0',
+    })
+    expect(entries[0]).not.toHaveProperty('traceId')
+  })
+
+  it('defaultLoggerFromEnv(mapping) reads vars through an Env Mapping', () => {
+    const entries = _captureEntries()
+    Object.assign(workersEnv, {
+      SERVICE_NAME: 'mapped',
+      CF_VERSION_METADATA: { id: 'v-id' },
+    })
+
+    defaultLoggerFromEnv<{ CF_VERSION_METADATA: { id: string } }>({
+      service: 'SERVICE_NAME',
+      version: (e) => e.CF_VERSION_METADATA.id,
+    })
+    getLogger().info('hello')
+
+    expect(entries[0]).toMatchObject({ service: 'mapped', version: 'v-id' })
+  })
+
+  it('defaultLoggerFromEnv() returns the same Root Logger as TracedEntrypoint for the same env', () => {
+    Object.assign(workersEnv, { NAME: 'shared' })
+    const entrypoint = new TracedEntrypoint({} as any, { NAME: 'shared' })
+
+    expect(defaultLoggerFromEnv()).toBe(defaultLoggerFromEnv())
+    expect(defaultLoggerFromEnv()).toBe((entrypoint as any).rootLogger)
+  })
+
+  it('defaultLoggerFromEnv() does not replace a default set with setDefaultLogger()', () => {
+    Object.assign(workersEnv, { NAME: 'from-env' })
+    const explicit = createLogger({ service: 'explicit' })
+    setDefaultLogger(explicit)
+
+    const logger = defaultLoggerFromEnv()
+
+    expect(logger).not.toBe(explicit)
+    expect(_getDefaultLogger()).toBe(explicit)
+  })
+
+  it('TracedEntrypoint registers its Root Logger when constructed', () => {
+    const entries = _captureEntries()
+
+    class Entrypoint extends TracedEntrypoint {
+      scheduled() {
+        getLogger().info('scheduled, outside a Logging Context')
+      }
+    }
+
+    const entrypoint = new Entrypoint({} as any, {
+      NAME: 'rpc-worker',
+      ENVIRONMENT: 'staging',
+      VERSION: '1.0.0',
+    })
+    entrypoint.scheduled()
+
+    expect(_getDefaultLogger()).toBe((entrypoint as any).rootLogger)
+    expect(entries[0]).toMatchObject({
+      service: 'rpc-worker',
+      environment: 'staging',
+      version: '1.0.0',
+    })
+    expect(entries[0]).not.toHaveProperty('traceId')
+  })
+
+  it('TracedEntrypoint registers an overridden rootLogger', () => {
+    const custom = createLogger({ service: 'custom-root' })
+
+    class Entrypoint extends TracedEntrypoint {
+      protected override get rootLogger() {
+        return custom
+      }
+    }
+
+    const entrypoint = new Entrypoint({} as any, { NAME: 'ignored' })
+    expect(_getDefaultLogger()).toBe((entrypoint as any).rootLogger)
+    expect(_getDefaultLogger()).toBe(custom)
+  })
+
+  it('tracedWorker() registers its Root Logger; Context Fields never reach the default', () => {
+    const entries = _captureEntries()
+
+    class TestSession extends TracedSession {
+      hello() {
+        return this.traced(() => this.logger.info('inside'))
+      }
+    }
+
+    const instance = new (tracedWorker(TestSession))(undefined, { NAME: 'bind' })
+    instance.session({ fields: { requestId: 'req-1' } }).hello()
+    getLogger().info('outside')
+
+    expect(entries.find((e) => e.message === 'inside')).toMatchObject({ requestId: 'req-1' })
+    const outside = entries.find((e) => e.message === 'outside')!
+    expect(outside).toMatchObject({ service: 'bind' })
+    expect(outside).not.toHaveProperty('requestId')
+    expect(outside).not.toHaveProperty('traceId')
+  })
+
+  it('first seen wins, and setDefaultLogger() overrides a registered default', () => {
+    const a = new TracedEntrypoint({} as any, { NAME: 'first' })
+    const b = new TracedEntrypoint({} as any, { NAME: 'second' })
+    const first = (a as any).rootLogger
+    expect((b as any).rootLogger).not.toBe(first)
+
+    expect(_getDefaultLogger()).toBe(first)
+
+    const explicit = createLogger({ service: 'explicit' })
+    setDefaultLogger(explicit)
+    const again = new TracedEntrypoint({} as any, { NAME: 'first' })
+    expect((again as any).rootLogger).toBe(first)
+
+    expect(_getDefaultLogger()).toBe(explicit)
   })
 })
