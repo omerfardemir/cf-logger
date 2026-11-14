@@ -13,6 +13,8 @@ import type { Logger } from './types'
 
 const TRACEPARENT = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
 
+function onTick() {}
+
 class Point {
   constructor(
     public x: number,
@@ -76,6 +78,19 @@ describe('formatMessage', () => {
     const shared = { a: 1 }
     expect(formatMessage('v=%j', [{ x: shared, y: shared }])).toEqual({
       message: 'v={"x":{"a":1},"y":{"a":1}}',
+      unprinted: [],
+    })
+  })
+
+  it('%d %i %f do not print a function; %s prints its source', () => {
+    for (const code of ['d', 'i', 'f']) {
+      expect(formatMessage(`n=%${code}`, [onTick])).toEqual({
+        message: `n=%${code}`,
+        unprinted: [onTick],
+      })
+    }
+    expect(formatMessage('n=%s', [onTick])).toEqual({
+      message: `n=${String(onTick)}`,
       unprinted: [],
     })
   })
@@ -425,6 +440,11 @@ describe('log call examples (issue #21), in both call styles', () => {
     const r = record((l) => l.info('m', { a: 1, toJSON: () => 'replaced' }))
     expect(r).toMatchObject({ level: 'INFO', message: 'm', a: 1 })
     expect(r.args).toEqual([{ toJSON: '[Function: toJSON]' }])
+  })
+
+  it('a function under %d is in args, not NaN', () => {
+    const r = record((l) => l.info('n=%d', onTick))
+    expect(r).toMatchObject({ message: 'n=%d', args: ['[Function: onTick]'] })
   })
 
   it('keeps functions and symbols in args', () => {

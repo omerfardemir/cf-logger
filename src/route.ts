@@ -112,9 +112,23 @@ function stringify(value: unknown): string | typeof UNRENDERED {
 }
 
 /**
+ * Whether `%d %i %f` print `value` as a number: a string, number, boolean or
+ * `BigInt`. `null`, `undefined`, a symbol, an object, an array or a function
+ * would print `NaN` or nothing and lose the value.
+ *
+ * @param {unknown} value - The placeholder's argument.
+ * @returns {boolean} `true` when `Number(value)` stands for the value.
+ */
+function isNumeric(value: unknown): value is string | number | boolean | bigint {
+  const type = typeof value
+  return type === 'string' || type === 'number' || type === 'boolean' || type === 'bigint'
+}
+
+/**
  * Render one argument for placeholder `code`, or `UNRENDERED` when the
  * placeholder would not print it. `%s %d %i %f` never render an object or an
- * array (`[object Object]`, `NaN` would hide its fields), and `%j %o %O` never
+ * array (`[object Object]`, `NaN` would hide its fields), `%d %i %f` never
+ * render a function (`NaN`), and `%j %o %O` never
  * render an `Error` (`{}` would hide its stack) or a value JSON cannot write,
  * so it is routed like a trailing argument instead.
  */
@@ -122,11 +136,9 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
   switch (code) {
     case 'd':
     case 'f':
-      if (value == null || typeof value === 'symbol' || typeof value === 'object') return UNRENDERED
-      return String(Number(value))
+      return isNumeric(value) ? String(Number(value)) : UNRENDERED
     case 'i':
-      if (value == null || typeof value === 'symbol' || typeof value === 'object') return UNRENDERED
-      return String(Math.floor(Number(value)))
+      return isNumeric(value) ? String(Math.floor(Number(value))) : UNRENDERED
     case 'j':
     case 'o':
     case 'O':
@@ -151,7 +163,7 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
  *
  * Each `%` sequence takes the next argument in order. When it cannot print
  * that argument (`%d` with `null`, `%j` with `undefined`, `%s %d %i %f` with
- * an object or array, `%j %o %O` with an `Error` or a value JSON cannot write
+ * an object or array, `%d %i %f` with a function, `%j %o %O` with an `Error` or a value JSON cannot write
  * other than a cycle, an unknown sequence such as `% ` or `%c`), the sequence
  * stays in the text and the argument is returned in `unprinted` instead.
  * `%%` becomes `%` only when there are arguments, like `console.log`.
