@@ -245,20 +245,18 @@ function describeReturned(value: unknown): string {
 }
 
 /** How much of an unknown level string the WARN shows. */
-const MAX_RETURNED_LEVEL_LENGTH = 32
 
 /**
- * An unusable `level` result, for the WARN. A string is shown (`'WARN'` is a likely mistake and
- * tells the app what went wrong), cut to `MAX_RETURNED_LEVEL_LENGTH` characters and marked with
- * `…`. Anything else is described like `describeReturned` does.
+ * An unusable `level` result, for the WARN. A level name in the wrong case (`'WARN'`) is shown,
+ * since it tells the app what went wrong. Any other string is described only as `'string'`: it
+ * could be a header value or a token. Anything else is described like `describeReturned` does.
  *
  * @param value - The unusable result.
- * @returns The string, cut when long, or the value's type.
+ * @returns The level name as returned, or the value's type.
  */
 function describeReturnedLevel(value: unknown): string {
   if (typeof value !== 'string') return describeReturned(value)
-  if (value.length <= MAX_RETURNED_LEVEL_LENGTH) return value
-  return `${value.slice(0, MAX_RETURNED_LEVEL_LENGTH)}…`
+  return LOG_LEVELS.has(value.toLowerCase()) ? value : 'string'
 }
 
 /** A synchronous `fields` / `endFields` result: a plain object, or nothing. */
@@ -522,7 +520,7 @@ function matches(pattern: RegExp, value: string): boolean {
  */
 function requestIdPicker(
   options: RequestIdOptions = {},
-  warn: WarnOnce = warnOnce(),
+  warn: WarnOnce,
 ): (c: Context, logger: Pick<Logger, 'warn'>) => PickedRequestId {
   const {
     from = DEFAULT_REQUEST_ID_SOURCES,

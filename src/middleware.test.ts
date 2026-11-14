@@ -1218,7 +1218,7 @@ describe('useLogger hook errors', () => {
     await app.request('/')
     expect(end()).toMatchObject({ level: 'INFO' })
     expect(warnings()).toHaveLength(1)
-    expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'warning' })
+    expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'string' })
   })
 
   it('treats an async fields or endFields hook as a failure: no fields, one WARN each', async () => {
@@ -1741,12 +1741,15 @@ describe('useLogger returned values in the hook WARN', () => {
     expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'WARN' })
   })
 
-  it('cuts a long string a level hook returned to 32 characters, marked with …', async () => {
-    const { warnings, app } = optionsApp({ level: () => 'x'.repeat(40) as never })
+  it('never logs a string a level hook returned that is not a level name', async () => {
+    const { warnings, app } = optionsApp({
+      level: (_s, _e, c) => c.req.header('authorization') as never,
+    })
     app.get('/', (c) => c.text('ok'))
-    await app.request('/')
+    await app.request('/', { headers: { authorization: 'Bearer secret-token' } })
     expect(warnings()).toHaveLength(1)
-    expect(warnings()[0]).toMatchObject({ hook: 'level', returned: `${'x'.repeat(32)}…` })
+    expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'string' })
+    expect(JSON.stringify(warnings())).not.toContain('secret-token')
   })
 })
 
