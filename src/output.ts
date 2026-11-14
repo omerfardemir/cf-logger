@@ -520,17 +520,17 @@ function charge(walk: Walk, key: string, value: unknown): void {
  * re-write budget. A repeat is written in full or, once the budget is spent,
  * is `"[Repeated]"` as a whole: never cut part way.
  *
- * @param {object} object - The repeated object.
+ * @param {() => unknown} write - Writes the repeated object (or its `toJSON` result).
  * @param {Walk} walk - The current walk.
  * @returns {unknown} Its JSON-ready value, or `"[Repeated]"`.
  * @throws `NOT_JSON` in a strict walk, instead of `"[Repeated]"`.
  */
-function repeatToJSONValue(object: object, walk: Walk): unknown {
-  if (walk.inRepeat > 0) return objectToJSONValue(object, walk) // the outer repeat is charged
+function repeatToJSONValue(write: () => unknown, walk: Walk): unknown {
+  if (walk.inRepeat > 0) return write() // the outer repeat is charged
   if (walk.budget.values <= 0 || walk.budget.chars <= 0) return standIn(walk, '[Repeated]')
   walk.inRepeat++
   try {
-    return objectToJSONValue(object, walk)
+    return write()
   } catch (thrown) {
     if (thrown !== BUDGET_SPENT) throw thrown
     walk.budget.values = 0
@@ -539,6 +539,16 @@ function repeatToJSONValue(object: object, walk: Walk): unknown {
     walk.inRepeat--
   }
 }
+
+/**
+ * Whether the line has already written `object`, outside repeats.
+ *
+ * @param {object} object - Any object.
+ * @param {Walk} walk - The current walk.
+ * @returns {boolean} `true` for a repeat.
+ */
+const isRepeat = (object: object, walk: Walk): boolean =>
+  walk.seen.has(object) || walk.earlier?.objects.has(object) === true
 
 /**
  * A string, outside repeats: a long one the line has already written is a
@@ -582,8 +592,8 @@ function standIn(walk: Walk, text: string): string {
  * `[key, value]` pairs, a `Set` an array; a `BigInt` is its digits, a
  * function `[Function: name]`, a symbol `Symbol(description)` (boxed or
  * not); a real cycle is `"[Circular]"` (a `toJSON` result that refers back to
- * its object included); a repeated object, or a repeated long string, is
- * written again within a budget per line (see `MAX_REWRITTEN_VALUES`), then
+ * its object included); a repeated object (one with a `toJSON` included), or
+ * a repeated long string, is written again within a budget per line (see `MAX_REWRITTEN_VALUES`), then
  * is `"[Repeated]"`; a getter or a `toJSON` that throws is `unserializable()`
  * for that value only.
  *
@@ -621,7 +631,14 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
         } catch (thrown) {
           return standIn(walk, unserializable(thrown))
         }
-        if (replaced !== object) return toJSONValue(replaced, key, walk, false)
+        if (replaced !== object) {
+          const write = () => toJSONValue(replaced, key, walk, false)
+          // A `toJSON` may return a new object each time, so the object itself is what repeats.
+          if (typeof replaced !== 'object' || replaced === null || walk.inRepeat > 0) return write()
+          if (isRepeat(object, walk)) return repeatToJSONValue(write, walk)
+          walk.seen.add(object)
+          return write()
+        }
       } finally {
         walk.ancestors.delete(object)
       }
@@ -630,8 +647,8 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
 
   walk.ancestors.add(object)
   try {
-    if (walk.seen.has(object) || walk.earlier?.objects.has(object))
-      return repeatToJSONValue(object, walk)
+    if (isRepeat(object, walk))
+      return repeatToJSONValue(() => objectToJSONValue(object, walk), walk)
     if (walk.inRepeat === 0) walk.seen.add(object)
     return objectToJSONValue(object, walk)
   } finally {
@@ -770,6 +787,14 @@ const newWalk = (strict: boolean, budget: Budget, earlier?: Written): Walk => ({
 const NEEDS_WALK = new Error('needs walk')
 
 /**
+ * How many values the fast path writes before it hands the line to the
+ * walk. The fast path sees what a `toJSON` returns, not the object it was
+ * called on, so it can't tell a shared object whose `toJSON` returns a new
+ * object each time; the walk can, and charges it to the budget.
+ */
+const MAX_FAST_VALUES = 100_000
+
+/**
  * Serialize a record to one JSON line. Never throws for a value in it: a
  * value JSON cannot write gets a stand-in (see `toJSONValue()`), and only
  * that value. The record's own `toJSON` key, if any, is written as a field,
@@ -778,8 +803,9 @@ const NEEDS_WALK = new Error('needs walk')
  *
  * Most lines take a fast path: native `JSON.stringify`, which gives up on
  * the first object or long string seen twice (a repeat or a cycle), boxed
- * symbol, or getter or `toJSON` that throws. Those lines are written again
- * by the `toJSONValue()` walk, so a getter on them runs twice.
+ * symbol, or getter or `toJSON` that throws, and after `MAX_FAST_VALUES`
+ * values. Those lines are written again by the `toJSONValue()` walk, so a
+ * getter on them runs twice.
  *
  * @param {LogRecord} record - The record to serialize.
  * @returns {string} One JSON line.
@@ -789,8 +815,10 @@ export function stringifyRecord(record: LogRecord): string {
   if (typeof record.toJSON !== 'function') {
     const seen = new WeakSet<object>()
     let strings: Set<string> | undefined
+    let values = 0
     try {
       return JSON.stringify(record, (_key, value: unknown) => {
+        if (++values > MAX_FAST_VALUES) throw NEEDS_WALK
         if (typeof value === 'string') {
           if (value.length >= LONG_STRING) {
             strings ??= new Set()

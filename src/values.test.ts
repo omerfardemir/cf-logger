@@ -747,6 +747,48 @@ describe('repeated long strings count against the budget', () => {
   })
 })
 
+describe('a shared object with a toJSON is a repeat too', () => {
+  beforeEach(() => _reset())
+
+  /** A chain of `depth` nodes whose `toJSON` returns a new `{ l, r }`, both the next node. */
+  class Node {
+    constructor(readonly next: unknown) {}
+    toJSON() {
+      return { l: this.next, r: this.next }
+    }
+  }
+  const chain = (depth: number) => {
+    let node: unknown = { leaf: 1 }
+    for (let i = 0; i < depth; i++) node = new Node(node)
+    return node
+  }
+
+  it('a chain of toJSON nodes 30 deep: well under 1 s, with a bounded line', () => {
+    let line = ''
+    const ms = elapsed(() => (line = lineFor({ tree: chain(30) })))
+    expect(ms).toBeLessThan(500)
+    expect(line.length).toBeLessThan(1_000_000)
+    expect(line).toContain('"[Repeated]"')
+    expect(JSON.parse(line).logError).toBeUndefined()
+  })
+
+  it('a toJSON that returns a new wide object, shared 200 times, is bounded', () => {
+    const big = wide(20_000)
+    const fresh = { toJSON: () => ({ ...big }) }
+    const items = JSON.parse(lineFor({ items: Array.from({ length: 200 }, () => fresh) }))
+      .items as unknown[]
+    expect(items[0]).toEqual(big)
+    expect(items.at(-1)).toBe('[Repeated]')
+  })
+
+  it('a shared Date is written every time: its toJSON gives a string', () => {
+    const at = new Date(0)
+    const rows = JSON.parse(lineFor({ rows: Array.from({ length: 20_000 }, () => at) }))
+      .rows as unknown[]
+    expect(rows.every((row) => row === '1970-01-01T00:00:00.000Z')).toBe(true)
+  })
+})
+
 describe('boxed primitives are told by their brand, not their tag', () => {
   class Money {
     amount = 5
