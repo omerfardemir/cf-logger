@@ -225,11 +225,11 @@ function serializeOverflowItem(value: unknown): unknown {
 }
 
 /**
- * loggercf's own keys: written for every call, so logger bindings and
- * Context Fields cannot set them. `workersSink` picks the console method
+ * The Record Keys: loggercf writes them for every call, so logger bindings
+ * and Context Fields cannot set them. `workersSink` picks the console method
  * from `level`, so a binding for it would change the line's severity.
  */
-export const OWN_KEYS = ['time', 'level', 'message', 'errors', 'args'] as const
+export const RECORD_KEYS = ['time', 'level', 'message', 'errors', 'args'] as const
 
 /** The Trace Context's keys, which `applyTrace()` writes inside a Logging Context. */
 export const TRACE_KEYS = ['traceId', 'spanId', 'parentSpanId'] as const
@@ -238,21 +238,21 @@ export const TRACE_KEYS = ['traceId', 'spanId', 'parentSpanId'] as const
 export const OPTION_KEYS = ['service', 'environment', 'version'] as const
 
 /**
- * `source` without the `OWN_KEYS`. Their defined values are pushed onto
+ * `source` without the Record Keys (`RECORD_KEYS`). Their defined values are pushed onto
  * `moved` as one object, so they land in `args` instead of being dropped.
  *
  * @param {LogRecord | undefined} source - Logger bindings or Context Fields. Never mutated.
  * @param {LogRecord[]} moved - Collects the values taken out, one object per source.
  * @returns {LogRecord | undefined} `source` itself when it has none of the keys, else a copy without them.
  */
-export function takeOwnKeys(
+export function takeRecordKeys(
   source: LogRecord | undefined,
   moved: LogRecord[],
 ): LogRecord | undefined {
-  if (!source || !OWN_KEYS.some((key) => Object.hasOwn(source, key))) return source
+  if (!source || !RECORD_KEYS.some((key) => Object.hasOwn(source, key))) return source
   const rest: LogRecord = { ...source }
   const taken: LogRecord = {}
-  for (const key of OWN_KEYS) {
+  for (const key of RECORD_KEYS) {
     if (rest[key] !== undefined) taken[key] = rest[key]
     delete rest[key]
   }
@@ -276,33 +276,41 @@ export function applyTrace(record: LogRecord, trace: TraceContext): void {
 }
 
 /**
- * One log call, ready to build: what the logger adds (`time`, `level`,
- * bindings) and where `routeArgs()` put the arguments.
+ * Where `routeArgs()` put the arguments of one log call. Nothing is
+ * serialized yet: `buildRecord()` does that, so routed values go through the
+ * same serializers as structured fields.
  */
-export interface RecordEntry {
-  /** ISO 8601 time of the call. */
-  time: string
-  /** The upper-case level label. */
-  level: string
-  /** The logger's bindings (`createLogger` / `.child()`). */
-  bindings: LogRecord
-  /** Fields passed at the call. Routing has already moved their reserved keys to `args`. */
+export interface RoutedArgs {
+  /** Top-level fields: `err` and the object arguments' keys, in call order. Routing has already moved their `MOVED_KEYS` to `args`. */
   fields: LogRecord
   /** The formatted message, when the call gave one. */
   message?: string
   /** Errors after the first, in call order. */
-  errors?: unknown[]
-  /** The call's overflow, in call order. */
+  errors?: Error[]
+  /** Values with no better place (the Overflow), in call order. */
   args?: unknown[]
+}
+
+/**
+ * One log call, ready to build: what the logger adds (`time`, `level`,
+ * logger bindings) and where `routeArgs()` put the arguments.
+ */
+export interface RecordEntry extends RoutedArgs {
+  /** ISO 8601 time of the call. */
+  time: string
+  /** The upper-case level label. */
+  level: string
+  /** The logger bindings (`createLogger` / `.child()`). */
+  bindings: LogRecord
 }
 
 /**
  * Build the final log record from a log call's entry and the current Logging Context.
  *
- * loggercf's own keys (`OWN_KEYS`) and the trace IDs are always written by
+ * The Record Keys (`RECORD_KEYS`) and the trace IDs are always written by
  * loggercf. For the other keys, strongest first: fields passed at the log
  * call → logger bindings (`createLogger` / `.child()`) → Context Fields.
- * A binding or Context Field for one of loggercf's own keys (trace IDs
+ * A binding or Context Field for one of the Record Keys (trace IDs
  * aside) moves to `args`, after the call's own `args`, bindings first, so it
  * is not dropped. `Error` values are serialized with `serializeError()`: at
  * the top level, in `errors`, and in `args` items (one level down, e.g.
@@ -314,8 +322,8 @@ export interface RecordEntry {
  */
 export function buildRecord(entry: RecordEntry, context?: RecordContext): LogRecord {
   const moved: LogRecord[] = []
-  const bindings = takeOwnKeys(entry.bindings, moved)
-  const contextFields = takeOwnKeys(context?.fields, moved)
+  const bindings = takeRecordKeys(entry.bindings, moved)
+  const contextFields = takeRecordKeys(context?.fields, moved)
   const record: LogRecord = {
     time: entry.time,
     level: entry.level,

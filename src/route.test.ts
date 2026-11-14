@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import { formatMessage, routeArgs, RESERVED_KEYS } from './route'
+import { formatMessage, routeArgs, MOVED_KEYS } from './route'
 import {
   createLogger,
   runWithLogger,
@@ -246,7 +246,7 @@ describe('routeArgs', () => {
       message: 'm',
       args: [{ service: 'other' }, { level: 'custom', traceId: 'mine' }, { message: 'other' }],
     })
-    for (const key of RESERVED_KEYS) {
+    for (const key of MOVED_KEYS) {
       if (key === 'err') continue
       expect(routeArgs(['m', { [key]: 'v' }]).args).toEqual([{ [key]: 'v' }])
       expect(routeArgs([{ [key]: 'v' }, 'm']).args).toEqual([{ [key]: 'v' }])
@@ -702,7 +702,7 @@ const KINDS: Kind[] = [
   'protoObject',
   'toJSONObject',
 ]
-const RESERVED = [...RESERVED_KEYS]
+const RESERVED = [...MOVED_KEYS]
 
 /**
  * One generated argument, with the unique token that must appear in the

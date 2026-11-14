@@ -18,7 +18,7 @@ import {
   describeFailure,
   nodeSink,
   stringifyRecord,
-  takeOwnKeys,
+  takeRecordKeys,
   workersSink,
   type LogRecord,
   type Sink,
@@ -92,7 +92,7 @@ function write(label: string, bindings: LogRecord, input: unknown[]): void {
  * throws, a value nested too deep for the stack): a minimal line is written
  * instead, with `time`, `level`, the trace IDs, bindings, the message
  * template as given, and `logError` describing the failure. As in
- * `buildRecord()`, bindings for loggercf's own keys move to `args`. If even
+ * `buildRecord()`, bindings for the Record Keys move to `args`. If even
  * that fails, the line is written without bindings, then dropped.
  *
  * @param {string} label - The upper-case level written as `level`.
@@ -123,7 +123,7 @@ function safeWrite(label: string, bindings: LogRecord, input: unknown[]): void {
     try {
       // Like `buildRecord()`: bindings cannot set `time`, `level` or `message`.
       const moved: LogRecord[] = []
-      const line = minimal(takeOwnKeys(bindings, moved))
+      const line = minimal(takeRecordKeys(bindings, moved))
       if (moved.length > 0) line.args = moved
       sink.write(line)
     } catch {

@@ -3,42 +3,28 @@ import {
   inlineJSON,
   isPlainObject,
   OPTION_KEYS,
-  OWN_KEYS,
+  RECORD_KEYS,
   readEntries,
   TRACE_KEYS,
   unserializable,
   type LogRecord,
+  type RoutedArgs,
 } from './output'
 
 /**
- * Record keys a log call's object arguments cannot set: their values for these
- * keys move to `args` instead, so a call can never overwrite loggercf's own
- * fields and nothing is dropped. `err` and `message` are the exceptions while
+ * The keys a log call's object arguments cannot set: the Record Keys, the
+ * Logger Options keys, the trace IDs and `err`. Their values for these keys
+ * move to `args` instead, so a call can never overwrite what loggercf writes
+ * and nothing is dropped. `err` and `message` are the exceptions while
  * they are unset (see `routeArgs()`): `logger.error({ err }, 'msg')` is how a
  * structured call passes an error.
  */
-export const RESERVED_KEYS: ReadonlySet<string> = new Set([
-  ...OWN_KEYS,
+export const MOVED_KEYS: ReadonlySet<string> = new Set([
+  ...RECORD_KEYS,
   ...OPTION_KEYS,
   ...TRACE_KEYS,
   'err',
 ])
-
-/**
- * Where the arguments of one log call ended up. Nothing is serialized yet:
- * `buildRecord()` does that, so routed values go through the same serializers
- * as structured fields.
- */
-export interface RoutedArgs {
-  /** Top-level fields: `err` and the object arguments' keys, in call order. */
-  fields: LogRecord
-  /** The formatted message, when the call gave one. */
-  message?: string
-  /** Errors after the first, in call order. */
-  errors?: Error[]
-  /** Values with no better place (the overflow), in call order. */
-  args?: unknown[]
-}
 
 /**
  * Whether `value` is one `console.log('a', 'b', 3)` would print as a word.
@@ -194,10 +180,10 @@ export function formatMessage(
  *
  * Merging a plain object, leading or not: its keys go to the top level, later
  * objects winning. `err` is set only when still unset. The other
- * `RESERVED_KEYS`, an `err` that is already set, an own `__proto__` key (from
+ * `MOVED_KEYS`, an `err` that is already set, an own `__proto__` key (from
  * `JSON.parse`) and a function-valued `toJSON` (as text, so it cannot replace
  * the line) move to `args` as one object per argument, so a call can never
- * overwrite loggercf's own fields.
+ * overwrite what loggercf writes.
  * The exception is `message`: when the call gives no other message, the first
  * object's string `message` becomes the message (`logger.info({ message })`).
  *
@@ -234,7 +220,7 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
     for (const [key, value] of readEntries(object)) {
       if (key === 'err' && setErr(value)) continue
       const isToJSON = key === 'toJSON' && typeof value === 'function'
-      if (!RESERVED_KEYS.has(key) && key !== '__proto__' && !isToJSON) {
+      if (!MOVED_KEYS.has(key) && key !== '__proto__' && !isToJSON) {
         fields[key] = value
         continue
       }

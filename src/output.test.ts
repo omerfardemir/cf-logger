@@ -279,7 +279,7 @@ const normalizeAll = (line: string) =>
  * 15a214a, pino 10), captured by running the same calls against that build.
  * Key order included: the internal core must match.
  */
-const PINO_LINES = [
+const BASELINE_LINES = [
   String.raw`{"time":"<t>","level":"INFO","service":"svc","environment":"test","version":"1.0.0","region":"eu","message":"outside"}`,
   String.raw`{"time":"<t>","level":"DEBUG","requestId":"req-1","a":"call","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"n":1,"message":"debug 1","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
   String.raw`{"time":"<t>","level":"INFO","requestId":"req-1","a":"binding","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"user":"u-1","message":"info line","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
@@ -323,7 +323,7 @@ describe('same lines as the pino-based logger', () => {
         }).catch(() => {})
       },
     )
-    expect(lines.map(normalizeAll)).toEqual(PINO_LINES)
+    expect(lines.map(normalizeAll)).toEqual(BASELINE_LINES)
   })
 })
 
