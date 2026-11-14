@@ -149,6 +149,14 @@ describe('loggerOptionsFromEnv', () => {
       expect(entries).toHaveLength(1)
     })
 
+    it('rejects "silent", which 0.0.1 accepted through pino, with the warning', () => {
+      const entries = _captureEntries()
+
+      expect(loggerOptionsFromEnv({ LOG_LEVEL: 'silent' }).level).toBe('info')
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({ level: 'WARN', invalidLevel: 'silent' })
+    })
+
     it('_reset() re-arms the warning', () => {
       const entries = _captureEntries()
 

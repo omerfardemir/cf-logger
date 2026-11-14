@@ -80,16 +80,16 @@ export default tracedWorker(MySession, {
 })
 ```
 
-Use this exact form. `tag` is `""` for an upload without `wrangler versions upload --tag` and in local dev, and an empty string counts as absent, so `.tag` alone would silently drop `version`; `.id` is always set. Keep the `?.`: without it, a missing binding throws inside the Root Logger getter, so every `session()` call on the entrypoint fails. Note that `version` is then a tag on tagged deploys and a version UUID on untagged ones, and under `wrangler dev` the ID is a new random UUID on every start; tag every deploy if you query by `version`.
+Use this exact form. `tag` is `""` for a deploy without `--tag` (on `wrangler deploy` or `wrangler versions upload`) and in local dev, and an empty string counts as absent, so `.tag` alone would silently drop `version`; `.id` is always set. Keep the `?.`: without it, a missing binding throws inside the Root Logger getter, so every `session()` call on the entrypoint fails. Note that `version` is then a tag on tagged deploys and a version UUID on untagged ones, and under `wrangler dev` the ID is a new random UUID on every start; tag every deploy if you query by `version`.
 
 ### Upgrading from 0.0.1
 
-Notable changes to the Logger Options read from env:
+Changes to the Logger Options read from env:
 
-- An absent or empty `ENVIRONMENT` or `VERSION` is left off every line. 0.0.1 logged an absent one as `'unknown'` and an empty one as `""`. Update any query or alert on `environment = "unknown"` or `version = "unknown"`.
+- An absent `ENVIRONMENT` or `VERSION` is left off every log line; 0.0.1 logged `'unknown'` (an empty one was already left off). Update any query or alert on `environment = "unknown"` or `version = "unknown"`.
 - An empty `NAME` gives `service: 'unknown'` (0.0.1: `service: ""`).
-- A numeric `VERSION` is logged as a string (`2` becomes `"2"`).
-- An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw. An empty `LOG_LEVEL` means `'info'`; 0.0.1 threw.
+- A numeric `VERSION` is logged as a string (`2` becomes `"2"`), and `VERSION: 0`, which 0.0.1 left off, is now logged as `"0"`.
+- An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw.
 - `LOG_LEVEL: "silent"` is no longer accepted. In 0.0.1 it muted all logs; now it falls back to `'info'` with a `WARN`, so **a Worker that had `"silent"` starts writing info-level logs**. Change it before upgrading. The quietest level is `fatal`: only `logger.fatal()` lines are written. There is no off switch.
 
 ## Core API (`loggercf`)

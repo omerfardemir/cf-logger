@@ -240,7 +240,7 @@ logger.info('charged', { orderId }) // the object is dropped from the line
 ```
 
 - `nodejs_compat` is required, because loggercf uses `AsyncLocalStorage` from `node:async_hooks`.
-- `loggerOptionsFromEnv(env)`, `tracedWorker` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'`).
+- `loggerOptionsFromEnv(env)`, `tracedWorker` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'` for a missing one).
 - `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error` or `fatal`. Any other value (including `DEBUG` and `silent`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value. There is no off switch; the quietest level is `fatal`.
 - To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })`, or to an `envMapping` getter on a `TracedEntrypoint` subclass.
 
@@ -265,5 +265,5 @@ export default tracedWorker(BillingSession, {
 })
 ```
 
-- The `version_metadata` binding name is yours to choose in Wrangler, so loggercf never reads it by itself: map it with a function as above. `id` is the deployed version's ID and `tag` is the `--tag` from `wrangler versions upload`, which is `""` without `--tag` and in local dev: hence `tag || id`. Keep the `?.`, or a missing binding throws inside the Root Logger getter and every `session()` call fails.
+- The `version_metadata` binding name is yours to choose in Wrangler, so loggercf never reads it by itself: map it with a function as above. `id` is the deployed version's ID and `tag` is the `--tag` from `wrangler deploy` or `wrangler versions upload`, which is `""` without `--tag` and in local dev: hence `tag || id`. Keep the `?.`, or a missing binding throws inside the Root Logger getter and every `session()` call fails.
 - On Node.js there is no Wrangler config: call `createLogger({ service, level, environment, version })` or `createLogger(loggerOptionsFromEnv(process.env))` at startup.
