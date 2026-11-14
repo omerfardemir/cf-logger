@@ -92,10 +92,12 @@ export interface UseLoggerOptions {
    * Context Fields to add at the start of the request, so they are on every line of it,
    * `request.start` included. Runs before the handlers, so it sees the request but not what
    * later middleware sets. Must be synchronous. It cannot set the keys `useLogger` owns:
-   * `requestId`, `requestIdRejected`, `cfRay`, `method`, `path`, `route`, `statusCode`,
-   * `statusCodeAssumed`, `duration`, `err`, `originalErr`, and `userAgent` / `cf` when `include`
-   * turns them on. Those keys are dropped from its result, and one WARN names them (never their
-   * values). When it throws, returns anything but a plain object or `undefined` (a Promise, for
+   * `requestId`, `requestIdRejected`, `cfRay`, `statusCode`, `statusCodeAssumed`, `duration`,
+   * `err`, `originalErr`, and `userAgent` / `cf` when `include` turns them on. Those keys are
+   * dropped from its result, and one WARN names them (never their values). It can set `method`,
+   * `path` and `route`, which then appear on the handlers' lines, but `request.start` and
+   * `request.end` always write their own. When it throws, returns anything but a plain object or
+   * `undefined` (a Promise, for
    * example), or its result throws while it is read (a getter, a Proxy), the request is logged
    * without these fields and one WARN is written.
    */
@@ -103,7 +105,8 @@ export interface UseLoggerOptions {
   /**
    * Fields to add to `request.end` only. Runs after the handlers, so it sees `c.var` values
    * they set (an authenticated user ID, for example). Must be synchronous. It cannot set the
-   * same keys `fields` cannot, and the same WARN names the ones it returned. When it fails the
+   * same keys `fields` cannot, and the same WARN names the ones it returned. A `method`, `path` or
+   * `route` it returns is replaced by the one `request.end` writes itself. When it fails the
    * way `fields` can, `request.end` is written without these fields and one WARN is written.
    */
   endFields?: (c: Context) => LogFields | undefined
@@ -271,14 +274,16 @@ function isLevel(value: unknown): value is LogLevel {
   return LOG_LEVELS.has(value)
 }
 
-/** The Owned Keys every request has: the keys `useLogger` writes, which a hook cannot set. */
+/**
+ * The Owned Keys every request has: the keys `useLogger` writes, which a hook cannot set.
+ * `method`, `path` and `route` are not among them: a hook may add them to the handlers' lines,
+ * and `request.start` and `request.end` still write their own, since a line's own fields win
+ * over Context Fields and over the `endFields` result.
+ */
 const OWNED_KEYS = [
   'requestId',
   'requestIdRejected',
   'cfRay',
-  'method',
-  'path',
-  'route',
   'statusCode',
   'statusCodeAssumed',
   'duration',

@@ -23,7 +23,7 @@ The lines the Hono middleware writes about one HTTP request itself: an optional 
 _Avoid_: access log, `request.error` (folded into `request.end`)
 
 **Owned Keys**:
-The keys the Hono middleware writes itself on the Request Lines and as Context Fields (`requestId`, `requestIdRejected`, `cfRay`, `method`, `path`, `route`, `statusCode`, `statusCodeAssumed`, `duration`, `err`, `originalErr`, and `userAgent` / `cf` when they are included). A `fields` or `endFields` hook cannot set them: they are dropped from its result, and one WARN names them, never their values.
+The keys the Hono middleware writes itself on the Request Lines and as Context Fields that a `fields` or `endFields` hook cannot set (`requestId`, `requestIdRejected`, `cfRay`, `statusCode`, `statusCodeAssumed`, `duration`, `err`, `originalErr`, and `userAgent` / `cf` when they are included). They are dropped from a hook's result, and one WARN names them, never their values. `method`, `path` and `route` are not Owned Keys: a hook may set them, so they appear on the handlers' lines, but the Request Lines always write their own, which win.
 _Avoid_: protected keys, own keys, reserved keys
 
 **Root Logger**:
