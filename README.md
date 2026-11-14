@@ -92,6 +92,12 @@ Changes to the Logger Options read from env:
 - An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw.
 - `LOG_LEVEL: "silent"` is no longer accepted. In 0.0.1 it muted all logs; now it falls back to `'info'` with a `WARN`, so **a Worker that had `"silent"` starts writing info-level logs**. Change it before upgrading. The quietest level is `fatal`: only `logger.fatal()` lines are written. There is no off switch.
 
+Changes to the Hono middleware (`useLogger`):
+
+- `request.error` lines are gone. A request that failed has one `request.end` with `err`. Move any alert or query on `request.error` to `request.end` with `err` present, or to its level.
+- `request.end` is no longer always `INFO`: it is `WARN` for a 4xx response and `ERROR` for a 5xx or a caught error (change it with the `level` option). Queries that count `INFO` `request.end` lines miss failed requests.
+- A throw that escapes `useLogger` (one Hono's `onError()` did not answer) now gets a `request.end` at `ERROR` with `statusCode: 500` and `statusCodeAssumed: true`, then is rethrown unchanged; 0.0.1 wrote no `request.end` for it.
+
 ## Core API (`loggercf`)
 
 ### `createLogger(options)`
@@ -274,7 +280,7 @@ Creates a Hono middleware that:
 3. Adds `requestId` (and `cfRay` when the request has a `cf-ray` header) to the Logging Context's fields so they appear on every log line
 4. Sets `c.var.logger`, `c.var.requestId`, and `c.var.traceId` for use in route handlers
 5. Sets response headers: `X-Request-Id`, `X-Trace-Id`, `traceparent` (and `tracestate` when present)
-6. Lets Hono own error responses, then logs `request.error` and `request.end` using the final `c.res.status`
+6. Lets Hono own error responses, then writes one `request.end` with the final `c.res.status`, at a level picked from it (see [Request lines](#request-lines))
 
 ```ts
 import { Hono } from 'hono'
@@ -345,7 +351,89 @@ app.use(
 
 When the request has a `cf-ray` header, its value is also recorded as `cfRay` on every line, whether or not it is the request ID (except with `trustIncoming: false`). Use it to look a request up in Cloudflare's own logs. It must pass the default format check above (a custom `validate` does not apply to it); otherwise `cfRay` is left out. Only trust `cf-ray` on requests that reach the Worker straight from Cloudflare's edge: a Worker called over a service binding `fetch` receives whatever headers the calling Worker sends, `cf-ray` included, and under `wrangler dev`, in tests or on Node.js a client can send any value.
 
-`useLogger()` does not catch, create, or replace error responses. It lets Hono run downstream handlers and app-level `onError()` normally, then checks `c.error` after `await next()`. Failed requests emit `request.error` with the final `c.res.status`; all requests emit `request.end` with the final `c.res.status`.
+#### Request lines
+
+`useLogger` writes `request.start` when the request arrives and one `request.end` when it is done. A failed request is that same single `request.end`, with `err`: there is no separate `request.error` line.
+
+| Field               | On         | Value                                                                                                                                                                    |
+| ------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `method`            | start, end | `GET`, `POST`, ...                                                                                                                                                       |
+| `path`              | start, end | The URL pathname. The query string is never logged, because it often carries tokens and personal data.                                                                   |
+| `route`             | start, end | The matched route pattern, such as `/users/:id`, so requests to one endpoint can be grouped.                                                                             |
+| `statusCode`        | end        | The final `c.res.status`, after `onError()` and `notFound()` ran. For a throw that escapes `useLogger`, an assumed `500` ([see below](#when-a-throw-escapes-uselogger)). |
+| `statusCodeAssumed` | end        | `true` only when a throw escaped `useLogger`, so it could not see the response and `statusCode: 500` is an assumption. Absent otherwise.                                 |
+| `duration`          | end        | Milliseconds spent in the handlers after `useLogger`, until they return the `Response` ([streamed bodies](#streamed-responses) end later).                               |
+| `err`               | end        | The error Hono caught (`c.error`), when there is one, or the value thrown past `useLogger`.                                                                              |
+| `originalErr`       | end        | When a throw escapes after Hono caught a different error (for example, `onError()` threw): the error Hono caught (`c.error`). `err` is then the value that escaped.      |
+| `userAgent`         | start, end | With `include: { userAgent: true }`, when the request has a `User-Agent` header.                                                                                         |
+| `cf`                | start, end | With `include: { cf: true }`: `{ colo, country, asn }` from `request.cf`, when present.                                                                                  |
+| _yours_             | every line | The keys the `fields` option returns, as Context Fields.                                                                                                                 |
+| _yours_             | end        | The keys the `endFields` option returns.                                                                                                                                 |
+
+```ts
+import { Hono } from 'hono'
+import { HTTPException } from 'hono/http-exception'
+import { defaultRequestEndLevel, useLogger } from 'loggercf/hono'
+import { createLogger } from 'loggercf'
+
+const app = new Hono<{ Variables: { userId?: string } }>()
+
+app.use(
+  useLogger(createLogger({ service: 'api' }), {
+    requestStart: false, // default true; false writes request.end only
+    // default: error for a caught error or a 5xx, warn for a 4xx, info otherwise
+    level: (status, err, c) =>
+      err instanceof HTTPException && status < 500 ? 'warn' : defaultRequestEndLevel(status, err),
+    fields: (c) => ({ tenant: c.req.header('x-tenant-id') }), // every line, from the start
+    endFields: (c) => ({ userId: c.get('userId') }), // request.end only, after the handlers ran
+    include: { userAgent: true, cf: true }, // off by default
+  }),
+)
+```
+
+| Option         | Default                  | Effect                                                                                                                                                                |
+| -------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `requestStart` | `true`                   | `false` writes no `request.start`.                                                                                                                                    |
+| `level`        | `defaultRequestEndLevel` | `(statusCode, err, c) => LogLevel` for `request.end`. The default is `error` when `c.error` is set or the status is 5xx, `warn` for 4xx, `info` otherwise.            |
+| `fields`       | none                     | `(c) => fields`, synchronous, called before the handlers. Added as Context Fields, so they are on `request.start`, every line the handlers write, and `request.end`.  |
+| `endFields`    | none                     | `(c) => fields`, synchronous, called after the handlers, so it sees `c.var` values they set. Added to `request.end` only.                                             |
+| `include`      | `{}`                     | `{ userAgent?: boolean, cf?: boolean }`. Adds the `User-Agent` header and Cloudflare's `request.cf` `colo`, `country` and `asn` to `request.start` and `request.end`. |
+
+Neither `fields` nor `endFields` can set the keys `useLogger` owns (its **Owned Keys**): `requestId`, `requestIdRejected`, `cfRay`, `method`, `path`, `route`, `statusCode`, `statusCodeAssumed`, `duration`, `err` and `originalErr`, plus `userAgent` and `cf` when `include` turns them on. Those keys are dropped from the hooks' results, even when the request has no value for them (no `cf-ray` header, no error). So that the removal stays visible, the first time each hook returns one, a WARN with `hook` and `droppedKeys` (the key names, never their values) reports it, once per hook per `useLogger()` call. For app data such as a user or tenant ID, use these hooks; for the request details Cloudflare provides, use `include`.
+
+A hook result that sets `level`, `time` or `message` currently overrides that key of the record, on every line for `fields` and on `request.end` for `endFields`. Avoid those names until [#21](https://github.com/omerfardemir/loggercf/issues/21) settles how such keys are routed.
+
+A throwing `HTTPException` sets `c.error`, so with the default `level` a `throw new HTTPException(401)` is logged at `error`. The example above logs those at `warn`.
+
+**`route`** is the pattern of the endpoint the request was routed to, including a sub-app's base path (`/api/items/:id`), read from Hono's `matchedRoutes(c)`:
+
+- On `request.end`, it is the route that answered, when that route was registered for a method (`app.get`, `app.post`, `app.on`, ...). A method-registered middleware ahead of the handler, such as `app.get('*', cache(...))`, does not hide the handler.
+- Otherwise, and on `request.start` (written before any handler runs), it is the first route registered for a method among those that matched after `useLogger`. So a middleware registered with `app.use` that answers early (an auth check returning 401) still logs the handler's pattern, and a catch-all registered later (`app.get('*', spaFallback)`) does not replace it.
+- When no method route matched, it is the last matched route: an `app.all()` handler's pattern, or, for a request no handler matched (a 404 from `notFound()`), the last matching middleware's, such as `/*` for `app.use(useLogger(...))`.
+
+The two lines differ only when a method-registered middleware runs before the handler: `request.start` can only expect that middleware's pattern. Group by `route` on `request.end`.
+
+So a cache-style `app.get('*', cache(...))` that answers a hit itself logs `route: '/*'` on that `request.end`, while a miss, answered by the handler, logs the handler's pattern. Register such a middleware with `app.use` if hits should be grouped under the handler's pattern too.
+
+**When an option fails**, `useLogger` does not let the error reach your app and does not drop a line. A `fields` that throws, returns anything but a plain object or `undefined` (a Promise from an `async` function, a string, an array), or returns an object that throws while `useLogger` reads it (a throwing getter, a Proxy), leaves its fields off the request's lines; such an `endFields` leaves its fields off `request.end`; a `level` that throws or returns an unknown level uses the default level. Each option's first failure is reported in one WARN per `useLogger()` call, with `hook` naming the option and either `err` (what it threw; a non-`Error` value as `{ type, message }`) or `returned`; later failures of the same option are not repeated. For `fields` and `endFields`, `returned` is only the type of the result (`string`, `array`, `Promise`, `thenable`, ...), never the value, which could be a token. For `level`, it is the string returned only when it is a level name in the wrong case (such as `WARN`); any other string is reported as `string`, and anything else by its type. `useLogger` never calls `then` on a thenable that is not a `Promise` (from the same realm: on Node, a Promise built in another `vm` context counts as a thenable, so its rejection is not handled).
+
+A line the sink cannot write, such as one with a value whose `toJSON` throws, is lost, but it never changes the response, and a thrown value `useLogger` rethrows stays the same. That covers `request.start`, `request.end` and the WARNs above.
+
+`useLogger()` does not handle errors, or create or replace error responses. It lets Hono run downstream handlers and app-level `onError()` normally, then reads `c.error` and the final `c.res.status` after `await next()`. A throw that escapes `await next()` is logged and rethrown unchanged ([see below](#when-a-throw-escapes-uselogger)).
+
+##### Streamed responses
+
+For a streamed body (`stream()`, `streamText()`, `streamSSE()` from `hono/streaming`, or a `Response` with a `ReadableStream`), the handler returns the `Response` before the body is sent, and `request.end` is written then. So `duration` does not include the time spent streaming, and an error while streaming happens after `request.end`: it is not on that line. Log it from the stream's own error callback.
+
+##### When a throw escapes `useLogger`
+
+Hono turns a thrown `Error` into a response. A throw it does not handle (a non-`Error` value such as `throw 'boom'`, or an `onError()` that throws) makes `await next()` reject: `useLogger` still writes `request.end` at `error`, with `err` (an `Error` as usual, any other value as `{ type, message }`), then rethrows the same value unchanged. The `level` option is not called for it, and no response headers are set, because there is no response yet.
+
+`useLogger` cannot see the response that is sent after that, so that line's `statusCode: 500` is an assumption (what a runtime answers an uncaught exception with), marked with `statusCodeAssumed: true`. The real status is decided above `useLogger`:
+
+- An outer middleware that catches the throw sends whatever it sets: a `503`, or even a `200`, while the line says `ERROR` and `500`.
+- When `onError()` throws an `Error`, Hono catches it one level up, at `useLogger`'s own middleware, and calls `onError()` again with that new error. So an `onError()` that throws `new HTTPException(502)` and answers an `HTTPException` with `err.getResponse()` sends a `502`. On that line, `err` is the `HTTPException` and `originalErr` is the handler's error that `onError()` was handling.
+- With nothing above it, the runtime answers the uncaught exception, usually with a `500`.
 
 ---
 
