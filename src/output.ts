@@ -210,7 +210,7 @@ interface SerializedError {
 /**
  * The Errors one line has already serialized, by nesting depth. A repeated
  * reference to an `Error` at the same depth is the same serialized object,
- * so `stringifyRecord()` sees a repeat and its re-write budget applies. By
+ * so `stringifyRecord()` sees a repeat and its Re-write Budget applies. By
  * depth, so a copy built deep (its chain cut off sooner) is never reused
  * higher up, and `MAX_CAUSE_DEPTH` still bounds the nesting. A copy cut off
  * at an `Error` outside it is reused where the same Errors sit at those
@@ -256,7 +256,7 @@ interface Cost {
  * What a copy of an `Error` writes at its own level: a value per key and
  * per `errors` item, and the characters of its keys and short texts (see
  * `textLength()`). A long one (see `LONG_STRING`) is left out: the line's
- * re-write budget already bounds it, as the same text. Nested Errors are
+ * Re-write Budget already bounds it, as the same text. Nested Errors are
  * charged when they are serialized again themselves.
  *
  * @param {LogRecord} out - The copy.
@@ -513,7 +513,7 @@ export interface RecordEntry extends RoutedArgs {
   level: string
   /** The logger bindings (`createLogger` / `.child()`). */
   bindings: LogRecord
-  /** The line's re-write budget, which the message's placeholders may have spent from. */
+  /** The line's Re-write Budget, which the message's placeholders may have spent from. */
   budget?: Budget
 }
 
@@ -634,7 +634,7 @@ interface Written {
 /** Thrown by a strict walk: the value cannot be written as JSON as it is. */
 const NOT_JSON = new Error('not JSON')
 
-/** Thrown inside a repeat when the line's re-write budget runs out. */
+/** Thrown inside a repeat when the line's Re-write Budget runs out. */
 const BUDGET_SPENT = new Error('re-write budget spent')
 
 /** The state of one `toJSONValue()` walk. */
@@ -653,12 +653,12 @@ interface Walk {
   earlier?: Written
   /** How many repeats the current value is nested in. */
   inRepeat: number
-  /** The line's re-write budget. */
+  /** The line's Re-write Budget. */
   budget: Budget
 }
 
 /**
- * Charge the walk's re-write budget for one value inside a repeat.
+ * Charge the walk's Re-write Budget for one value inside a repeat.
  *
  * @param {Walk} walk - The current walk, inside a repeat.
  * @param {string} key - The value's key in its parent.
@@ -673,7 +673,7 @@ function charge(walk: Walk, key: string, text: string | undefined): void {
 
 /**
  * Write a repeat, an object the line has already written, again, within the
- * re-write budget. A repeat is written in full or, once the budget is spent,
+ * Re-write Budget. A repeat is written in full or, once the budget is spent,
  * is `"[Repeated]"` as a whole: never cut part way.
  *
  * @param {object} object - The repeated object.
@@ -757,7 +757,7 @@ function standIn(walk: Walk, text: string): string {
  * function `[Function: name]`, a symbol `Symbol(description)` (boxed or
  * not); a real cycle is `"[Circular]"` (a `toJSON` result that refers back to
  * its object included); a repeated object (one with a `toJSON` included), or
- * a repeated long string, is written again within a budget per line (see `MAX_REWRITTEN_VALUES` and `MAX_REWRITTEN_CHARS`), then
+ * a repeated long string, is written again within the Re-write Budget (see `MAX_REWRITTEN_VALUES` and `MAX_REWRITTEN_CHARS`), then
  * is `"[Repeated]"`; a getter or a `toJSON` that throws is `unserializable()`
  * for that value only.
  *
@@ -968,7 +968,7 @@ function objectToJSONValue(object: object, walk: Walk): unknown {
  * A new walk.
  *
  * @param {boolean} strict - Whether to give up instead of writing a stand-in.
- * @param {Budget} budget - The line's re-write budget.
+ * @param {Budget} budget - The line's Re-write Budget.
  * @param {Written} [earlier] - What earlier walks of the same line wrote.
  * @returns {Walk} Its state.
  */
@@ -1096,7 +1096,7 @@ export interface MessagePrinter {
  * spends from `budget`; a placeholder that gives up prints nothing and spends
  * nothing, so what it saw is not a repeat.
  *
- * @param {Budget} budget - The line's re-write budget.
+ * @param {Budget} budget - The line's Re-write Budget.
  * @returns {MessagePrinter} The printer.
  */
 export function inlinePrinter(budget: Budget): MessagePrinter {

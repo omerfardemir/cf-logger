@@ -833,7 +833,7 @@ describe('an Error is serialized once per line', () => {
   })
 })
 
-describe('one re-write budget per line', () => {
+describe('one Re-write Budget per line', () => {
   beforeEach(() => _reset())
 
   it('%j 500 times with one wide object: the message is bounded', () => {
@@ -1244,6 +1244,16 @@ describe('the text of a BigInt, a function or a symbol counts against the budget
       expect(args[0]).toBe(String(big)) // nothing is dropped
       expect(args.at(-1)).toBe('[Repeated]')
     }
+  })
+
+  it('a function with a 5,000-character name under %j, 1,000 times: admitted like %s', () => {
+    const fn = Object.defineProperty(() => 0, 'name', { value: 'f'.repeat(5_000) })
+    const { line, ms } = timed((log) => log.info('%j '.repeat(1_000), ...Array(1_000).fill(fn)))
+    expect(ms).toBeLessThan(500)
+    expect(line.length).toBeLessThan(500_000)
+    const { message, args } = JSON.parse(line)
+    expect(message.startsWith(`${fn.name} `)).toBe(true)
+    expect(args.at(-1)).toBe('[Repeated]') // routed to Overflow once the budget is spent
   })
 
   it('a short BigInt, function or symbol repeats freely', () => {

@@ -58,7 +58,7 @@ The fixed fields a logger writes on every line: a Root Logger's `service`, `envi
 _Avoid_: logger fields, child fields
 
 **Overflow**:
-The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, a leading `undefined` / `null` not followed by a string, an `undefined` / `null` in the message's place after a leading object or `Error`, a long string the message can't hold again within the Re-write Budget, an object's values for the Moved Keys, and a Logger Binding's or Context Field's value for a Record Key), in call order. Present only when non-empty.
+The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, a leading `undefined` / `null` not followed by a string, an `undefined` / `null` in the message's place after a leading object or `Error`, a long string or `BigInt` the message can't hold again within the Re-write Budget, an object's values for the Moved Keys, and a Logger Binding's or Context Field's value for a Record Key), in call order. Present only when non-empty.
 _Avoid_: extras, rest, leftovers
 
 **Re-write Budget**:

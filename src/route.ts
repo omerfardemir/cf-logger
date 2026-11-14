@@ -117,7 +117,10 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
     case 'O':
       if (value === undefined || isError(value)) return UNRENDERED
       if (typeof value === 'string') return printer.admit(value) ? `'${value}'` : UNRENDERED
-      if (typeof value === 'function') return functionName(value) || functionText(value)
+      if (typeof value === 'function') {
+        const text = functionName(value) || functionText(value)
+        return printer.admit(text) ? text : UNRENDERED
+      }
       return printer.json(value) ?? UNRENDERED
     case 's': {
       let text: string
@@ -145,7 +148,7 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
  * in `unprinted`, so it is routed to `err` with its stack; it prints a
  * `Date` as its ISO string. Never throws. `%%` becomes `%` only when there
  * are arguments, like `console.log`. Everything printed spends from the
- * line's re-write budget through `printer`, all placeholders together: a
+ * line's Re-write Budget through `printer`, all placeholders together: a
  * repeated object under `%j`, or a long string the message already holds.
  *
  * @param {string} template - The message template.
@@ -231,7 +234,7 @@ export function formatMessage(
  * for `budget`, which the placeholders spend from.
  *
  * @param {readonly unknown[]} input - The arguments the log method received.
- * @param {Budget} [budget] - The line's re-write budget.
+ * @param {Budget} [budget] - The line's Re-write Budget.
  * @returns {RoutedArgs} Where each argument goes.
  */
 export function routeArgs(input: readonly unknown[], budget: Budget = newBudget()): RoutedArgs {
