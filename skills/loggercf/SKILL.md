@@ -207,7 +207,7 @@ Call these inside a Logging Context: `useLogger`, `this.traced`, a `withLogging`
 
 Wrap the body of every RPC method in `this.traced(fn, 'svc.op')`. The operation name makes the call a Span. Inside `traced`, `this.logger` is the Logging Context's logger. Outside it, `this.logger` is the bare Root Logger, with no trace IDs.
 
-Every method and getter on the subclass is an RPC member any caller can call. `traced`, `logger` and `env` are not: they are instance properties, which JSRPC never exposes. Make a helper you do not want callable a `#private` method or a function outside the class, and do not override `traced` or `logger`.
+Every method and getter on the subclass is an RPC member any caller can call. `traced`, `logger` and `env` are not: they are instance properties, which JSRPC never exposes. Make a helper you do not want callable a `#private` method or a function outside the class, and do not override `traced` or `logger`: TypeScript rejects it, and in plain JavaScript a member with either name replaces the helper and becomes callable over RPC.
 
 ```ts
 import { TracedSession, tracedWorker, withTrace, type TracedServiceBinding } from 'loggercf/workers'

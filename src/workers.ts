@@ -96,6 +96,8 @@ let runTraced: <R>(session: TracedSession<any>, fn: () => R, operation?: string)
  * @param {PropertyDescriptor} descriptor - A `value` or a `get`.
  */
 function defineInstanceMember(target: object, name: string, descriptor: PropertyDescriptor): void {
+  // A member the subclass already declares wins: withLogging's session relies on this
+  // when an entrypoint has its own `traced` or `logger` method.
   if (name in target) return
   Object.defineProperty(target, name, { ...descriptor, enumerable: false, configurable: true })
 }
@@ -104,7 +106,7 @@ function defineInstanceMember(target: object, name: string, descriptor: Property
  * Base class for Traced Sessions.
  *
  * JSRPC exposes only the methods and getters your subclass declares. The Trace
- * Carrier and Root Logger are `#private`, and `traced`, `logger` and `env` are
+ * Carrier, Context Fields and Root Logger are `#private`, and `traced`, `logger` and `env` are
  * instance properties, which JSRPC never exposes: a caller holding a session stub
  * cannot call `traced` or read `logger` or `env`.
  * Subclass this with your RPC methods and wrap them with `this.traced()`.
