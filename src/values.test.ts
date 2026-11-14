@@ -29,6 +29,24 @@ const throwing = (thrown: unknown = 1): Record<string, unknown> =>
     },
   })
 
+/** A revoked Proxy: every trap, `getPrototypeOf` included, throws. */
+const revoked = () => {
+  const { proxy, revoke } = Proxy.revocable({}, {})
+  revoke()
+  return proxy
+}
+/** A Proxy whose `getPrototypeOf` trap throws (`instanceof`, `Array.isArray` on a revoked one). */
+const noPrototype = () =>
+  new Proxy(
+    { b: 2 },
+    {
+      getPrototypeOf() {
+        throw new Error('no prototype')
+      },
+    },
+  )
+const REVOKED = /^\[Unserializable: TypeError: .*revoked.*\]$/
+
 /** How long `fn` takes, in milliseconds. */
 const elapsed = (fn: () => void) => {
   const start = performance.now()
@@ -271,6 +289,79 @@ describe('one bad value does not cost the rest of the line', () => {
     logger.info('m', [throwing()])
     expect(entries[0]).toMatchObject({ message: 'm', a: '[Unserializable: Error: x]' })
     expect(entries[1]).toMatchObject({ message: 'm', args: [[{ a: '[Unserializable: 1]' }]] })
+  })
+
+  it('a revoked Proxy in a field, an args item or an Error: only that value is replaced', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    logger.info({ p: revoked(), a: 1 }, 'msg')
+    logger.info('msg', [revoked()], { a: 1 })
+    logger.info('msg', { p: revoked() }, { a: 1 }, [1])
+    const err = Object.assign(new Error('boom'), { p: revoked() })
+    logger.error('failed', err, { a: 1 })
+    logger.error('caused', new Error('outer', { cause: revoked() }))
+
+    expect(entries.map((e) => e.logError)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+    expect(entries[0]).toMatchObject({ message: 'msg', a: 1, p: expect.stringMatching(REVOKED) })
+    expect(entries[1]).toMatchObject({ message: 'msg', a: 1 })
+    expect((entries[1].args as unknown[][])[0][0]).toMatch(REVOKED)
+    expect(entries[2]).toMatchObject({
+      message: 'msg',
+      a: 1,
+      args: [[1]],
+      p: expect.stringMatching(REVOKED),
+    })
+    expect(entries[3]).toMatchObject({
+      message: 'failed',
+      a: 1,
+      err: { message: 'boom', p: expect.stringMatching(REVOKED) },
+    })
+    expect(entries[4]).toMatchObject({
+      err: { message: 'outer', cause: expect.stringMatching(REVOKED) },
+    })
+  })
+
+  it('a Proxy whose getPrototypeOf throws, as a field, an args item or in one', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    logger.info({ p: noPrototype(), a: 1 }, 'msg')
+    logger.info('msg', noPrototype(), [noPrototype()], { a: 1 })
+    expect(entries.map((e) => e.logError)).toEqual([undefined, undefined])
+    expect(entries[0]).toMatchObject({ message: 'msg', a: 1 })
+    expect(entries[0].p).toMatch(/^\[Unserializable: Error: no prototype\]$/)
+    expect(entries[1]).toMatchObject({ message: 'msg', a: 1 })
+    expect(JSON.stringify(entries[1].args)).toContain('[Unserializable: Error: no prototype]')
+  })
+
+  it('a revoked Proxy leading, or under %j and %s, is routed as a stand-in', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    logger.info(revoked(), 'msg %s', 'x', { a: 1 })
+    logger.info('v=%j s=%s', revoked(), revoked(), { a: 1 })
+    expect(entries.map((e) => e.logError)).toEqual([undefined, undefined])
+    expect(entries[0]).toMatchObject({ message: 'msg x', a: 1 })
+    expect(entries[0].args).toEqual([expect.stringMatching(REVOKED)])
+    expect(entries[1]).toMatchObject({ message: 'v=%j s=%s', a: 1 })
+    expect(entries[1].args).toEqual([
+      expect.stringMatching(REVOKED),
+      expect.stringMatching(REVOKED),
+    ])
+  })
+
+  it('a revoked Proxy as a Context Field or a binding keeps the line', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' }).child({ bad: revoked(), b: 1 })
+    runWithLogger({ logger, fields: { ctx: revoked(), r: 1 } }, () => getLogger().info('m %s', 'x'))
+    expect(entries[0]).toMatchObject({ message: 'm x', b: 1, r: 1 })
+    expect(entries[0].bad).toMatch(REVOKED)
+    expect(entries[0].ctx).toMatch(REVOKED)
+    expect(entries[0].logError).toBeUndefined()
   })
 
   it('the minimal line is the last resort: when writing the full line fails', () => {

@@ -111,6 +111,21 @@ export function copyBindings(source: unknown): LogRecord {
   }
 }
 
+/**
+ * Whether `value` is an `Error`, never throwing: `instanceof` throws on a
+ * revoked `Proxy`, or one whose `getPrototypeOf` trap throws.
+ *
+ * @param {unknown} value - Any value.
+ * @returns {boolean} `true` for an `Error`; `false` for anything else, or when it can't be told.
+ */
+export function isError(value: unknown): value is Error {
+  try {
+    return value instanceof Error
+  } catch {
+    return false // the serializer writes it as `unserializable()`
+  }
+}
+
 /** How many levels of `cause` (and of `Error`-valued properties) are serialized before the chain is cut off. */
 const MAX_CAUSE_DEPTH = 5
 
@@ -168,10 +183,10 @@ export function serializeError(
     }
     for (const [key, value] of entries) {
       if (key in out || key === 'cause') continue
-      out[key] = value instanceof Error ? nested(value) : value
+      out[key] = isError(value) ? nested(value) : value
     }
     const cause = read(() => error.cause)
-    if (cause !== undefined) out.cause = cause instanceof Error ? nested(cause) : cause
+    if (cause !== undefined) out.cause = isError(cause) ? nested(cause) : cause
     return out
   } finally {
     ancestors.delete(error)
@@ -179,26 +194,32 @@ export function serializeError(
 }
 
 /**
- * Serialize `value` when it is an `Error`.
+ * Serialize `value` when it is an `Error`. Never throws.
  *
  * @param {unknown} value - Any value.
  * @returns {unknown} `serializeError(value)` for an `Error`; anything else as is.
  */
 const serializeIfError = (value: unknown): unknown =>
-  value instanceof Error ? serializeError(value) : value
+  isError(value) ? serializeError(value) : value
 
 /**
- * `serializeIfError` on an overflow value and, one level down, on its items or values.
+ * `serializeIfError` on an overflow value and, one level down, on its items
+ * or values. Never throws: an item that can't be inspected (a `Proxy` whose
+ * traps throw) is `unserializable()`.
  *
  * @param {unknown} value - One item of `args`.
  * @returns {unknown} The item, with Errors serialized at its top level and one level down.
  */
 function serializeOverflowItem(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(serializeIfError)
-  if (isPlainObject(value)) {
-    const out: LogRecord = Object.create(null) // `value` may have an own `__proto__` key
-    for (const [key, v] of readEntries(value)) out[key] = serializeIfError(v)
-    return out
+  try {
+    if (Array.isArray(value)) return value.map(serializeIfError)
+    if (isPlainObject(value)) {
+      const out: LogRecord = Object.create(null) // `value` may have an own `__proto__` key
+      for (const [key, v] of readEntries(value)) out[key] = serializeIfError(v)
+      return out
+    }
+  } catch (thrown) {
+    return unserializable(thrown)
   }
   return serializeIfError(value)
 }
