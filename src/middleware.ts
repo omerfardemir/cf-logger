@@ -4,6 +4,85 @@ import { extractCarrier, injectCarrier } from './trace'
 import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './logger'
 
 /**
+ * Where `useLogger` reads an incoming request ID from: a request header name
+ * (case-insensitive), or a function that returns the ID, or `undefined` when it has none.
+ */
+export type RequestIdSource = string | ((c: Context) => string | undefined)
+
+/**
+ * How `useLogger` picks the request ID. The first valid value wins:
+ *
+ * 1. each source in `from`, in order (skipped entirely when `trustIncoming` is `false`),
+ * 2. `c.var.requestId`, when an earlier middleware set it,
+ * 3. `generate(c)`.
+ *
+ * Every value from steps 1 and 2 must pass `validate`; one that fails is skipped.
+ * The generated ID is used as is.
+ */
+export interface RequestIdOptions {
+  /**
+   * Sources to read the incoming ID from, in order. A source is a header name or a function.
+   * Defaults to `['x-request-id']`. Use `['cf-ray', 'x-request-id']` to prefer Cloudflare's Ray ID.
+   */
+  from?: RequestIdSource[]
+  /**
+   * `false` ignores every source in `from`, so a client can never choose the ID.
+   * `c.var.requestId` from an earlier middleware is still used, because the app set it.
+   * Defaults to `true`.
+   */
+  trustIncoming?: boolean
+  /**
+   * Accepts or rejects an incoming ID. Replaces the default check, including its length cap.
+   * Defaults to `/^[\w\-=:.]{1,128}$/`: 1 to 128 of `A-Z a-z 0-9 _ - = : .`.
+   */
+  validate?: RegExp | ((id: string, c: Context) => boolean)
+  /** Builds an ID when no source gives a valid one. Defaults to `crypto.randomUUID()`. */
+  generate?: (c: Context) => string
+}
+
+/** Options for `useLogger`. */
+export interface UseLoggerOptions {
+  /** How the request ID is read, validated and generated. */
+  requestId?: RequestIdOptions
+}
+
+/**
+ * The default `requestId.validate`. Accepts UUIDs and `cf-ray` values. It is also the check
+ * a `cf-ray` header must pass to be recorded as `cfRay`.
+ */
+const DEFAULT_REQUEST_ID_PATTERN = /^[\w\-=:.]{1,128}$/
+
+const DEFAULT_REQUEST_ID_SOURCES: readonly RequestIdSource[] = ['x-request-id']
+
+function matches(pattern: RegExp, value: string): boolean {
+  // A global or sticky RegExp keeps state in lastIndex between test() calls.
+  pattern.lastIndex = 0
+  return pattern.test(value)
+}
+
+function resolveRequestId(c: Context, options: RequestIdOptions = {}): string {
+  const {
+    from = DEFAULT_REQUEST_ID_SOURCES,
+    trustIncoming = true,
+    validate = DEFAULT_REQUEST_ID_PATTERN,
+    generate = () => crypto.randomUUID(),
+  } = options
+  const isValid = (id: unknown): id is string =>
+    typeof id === 'string' &&
+    id !== '' &&
+    (typeof validate === 'function' ? validate(id, c) : matches(validate, id))
+
+  if (trustIncoming) {
+    for (const source of from) {
+      const id = typeof source === 'function' ? source(c) : c.req.header(source)
+      if (isValid(id)) return id
+    }
+  }
+  const fromEarlierMiddleware: unknown = c.get('requestId' as never)
+  return isValid(fromEarlierMiddleware) ? fromEarlierMiddleware : generate(c)
+}
+
+/**
  * Logging Middleware for Hono.
  *
  * Opens a Logging Context (via `runWithLogger()`) for each request.
@@ -12,13 +91,15 @@ import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './lo
  *
  * Handles `X-Request-Id`, `X-Trace-Id`, `traceparent`, and `tracestate` headers:
  * - Continues the incoming trace, or starts a new one.
- * - Reuses an incoming `X-Request-Id`, otherwise generates one.
- * - Adds `requestId` to the Context Fields so it appears on every log line.
+ * - Reuses a valid incoming request ID, otherwise generates one (see `RequestIdOptions`).
+ * - Adds `requestId`, and `cfRay` when the `cf-ray` header is present, to the Context Fields
+ *   so they appear on every log line.
  * - Logs `request.start` / `request.end` (and `request.error` when Hono caught one).
  * - Sets `c.var.logger`, `c.var.requestId`, `c.var.traceId` and the response headers.
  *
  * @template T - The type of user-defined log fields.
  * @param {Logger<T> | ((c: Context) => Logger<T>)} loggerOrFactory - A logger instance or a per-request factory.
+ * @param {UseLoggerOptions} [options] - How the request ID is read, validated and generated.
  * @returns {MiddlewareHandler} The middleware handler function.
  *
  * @example
@@ -30,24 +111,29 @@ import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './lo
  * const app = new Hono()
  * const logger = createLogger({ service: 'api', level: 'info' })
  *
- * app.use(useLogger(logger))
+ * app.use(useLogger(logger, { requestId: { from: ['cf-ray', 'x-request-id'] } }))
  * app.get('/', (c) => c.text('Hello!'))
  * ```
  */
 export function useLogger<T extends LogFields = LogFields>(
-  loggerOrFactory: Logger<T> | ((c: Parameters<MiddlewareHandler>[0]) => Logger<T>),
+  loggerOrFactory: Logger<T> | ((c: Context) => Logger<T>),
+  options: UseLoggerOptions = {},
 ): MiddlewareHandler {
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
 
-    const requestId = c.req.header('X-Request-Id') || c.var?.requestId || crypto.randomUUID()
+    const requestId = resolveRequestId(c, options.requestId)
+    const cfRay = c.req.header('cf-ray')
     const method = c.req.method
     const path = new URL(c.req.url).pathname
 
     const contextOptions = {
       logger: rootLogger,
       ...extractCarrier((name) => c.req.header(name)),
-      fields: { requestId },
+      fields: {
+        requestId,
+        ...(cfRay !== undefined && matches(DEFAULT_REQUEST_ID_PATTERN, cfRay) && { cfRay }),
+      },
     }
     await runWithLogger(contextOptions, async () => {
       const logger = getLogger<T>()
