@@ -32,5 +32,5 @@ class MathSession extends TracedSession<Env> implements MathService {
 }
 
 export default tracedWorker(MathSession, {
-  env: { version: (env) => env.CF_VERSION_METADATA.tag || env.CF_VERSION_METADATA.id },
+  env: { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id },
 })

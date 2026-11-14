@@ -76,9 +76,13 @@ Using other var names, or deriving a field from a binding, takes a mapping (see 
 
 ```ts
 export default tracedWorker(MySession, {
-  env: { version: (env) => env.CF_VERSION_METADATA.id }, // or .tag, set by `wrangler versions upload --tag`
+  env: { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id },
 })
 ```
+
+Use this exact form. `tag` is `""` for an upload without `wrangler versions upload --tag` and in local dev, and an empty string counts as absent, so `.tag` alone would silently drop `version`; `.id` is always set on a deployed Worker. Keep the `?.`: without it, a missing binding throws inside the Root Logger getter and every RPC call on the entrypoint fails.
+
+Changes from 0.0.1: an absent `ENVIRONMENT` or `VERSION` used to be logged as `'unknown'` and is now left off (update any query or alert on `version = "unknown"`), and an invalid `LOG_LEVEL` used to throw and now falls back to `'info'` with a `WARN`. `LOG_LEVEL: "silent"` is no longer accepted: it falls back to `'info'` like any other invalid value. To mute logs, use `LOG_LEVEL: "fatal"`.
 
 ## Core API (`loggercf`)
 
@@ -217,7 +221,11 @@ const logger = createLogger(loggerOptionsFromEnv(env))
 createLogger(loggerOptionsFromEnv(env, { version: 'RELEASE' }))
 
 // Or derive it, e.g. from a `version_metadata` binding:
-createLogger(loggerOptionsFromEnv(env, { version: (e) => e.CF_VERSION_METADATA?.id }))
+createLogger(
+  loggerOptionsFromEnv(env, {
+    version: (e) => e.CF_VERSION_METADATA?.tag || e.CF_VERSION_METADATA?.id,
+  }),
+)
 ```
 
 The `EnvMapping<Env>` type describes the mapping.
@@ -356,7 +364,10 @@ export default tracedWorker(MySession)
 
 // Read other vars for the Root Logger:
 export default tracedWorker(MySession, {
-  env: { service: 'SERVICE_NAME', version: (env) => env.CF_VERSION_METADATA.id },
+  env: {
+    service: 'SERVICE_NAME',
+    version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id,
+  },
 })
 
 // Or extend it if you need scheduled(), queue(), etc:
@@ -433,7 +444,7 @@ class MySession extends TracedSession<Env> {
 
 export default class extends TracedEntrypoint<Env> {
   protected override get envMapping(): EnvMapping<Env> {
-    return { version: (env) => env.CF_VERSION_METADATA.id }
+    return { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id }
   }
 
   session(init: SessionInit) {

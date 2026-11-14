@@ -22,7 +22,7 @@ export type EnvSource<E = unknown> = string | ((env: E) => string | undefined)
  * @example
  * ```ts
  * const mapping: EnvMapping<Env> = {
- *   version: (env) => env.CF_VERSION_METADATA?.id, // or 'RELEASE' to read another var
+ *   version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id, // or 'RELEASE' to read another var
  * }
  * ```
  */
@@ -107,7 +107,7 @@ function resolveLevel(
  * ```ts
  * loggerOptionsFromEnv(env) // NAME, LOG_LEVEL, ENVIRONMENT, VERSION
  * loggerOptionsFromEnv(env, { version: 'RELEASE' }) // read another var
- * loggerOptionsFromEnv(env, { version: (e) => e.CF_VERSION_METADATA?.id }) // derive it
+ * loggerOptionsFromEnv(env, { version: (e) => e.CF_VERSION_METADATA?.tag || e.CF_VERSION_METADATA?.id }) // derive it
  * ```
  */
 export function loggerOptionsFromEnv<E = unknown>(

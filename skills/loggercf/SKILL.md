@@ -261,7 +261,7 @@ const logger = createLogger(loggerOptionsFromEnv(env, { version: 'RELEASE' }))
 class BillingSession extends TracedSession<Env> {}
 
 export default tracedWorker(BillingSession, {
-  env: { version: (e) => e.CF_VERSION_METADATA.tag || e.CF_VERSION_METADATA.id },
+  env: { version: (e) => e.CF_VERSION_METADATA?.tag || e.CF_VERSION_METADATA?.id },
 })
 ```
 
