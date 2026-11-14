@@ -467,6 +467,30 @@ describe('withSpan', () => {
     expect((spanEnd.err as Record<string, unknown>).message).toBe('disk full')
   })
 
+  it('keeps span.error for a falsy thrown value', () => {
+    const entries = _captureEntries()
+
+    runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent: SAMPLED }, () => {
+      for (const thrown of [0, '', undefined]) {
+        let caught: unknown = 'not thrown'
+        try {
+          withSpan('falsy', () => {
+            throw thrown
+          })
+        } catch (err) {
+          caught = err
+        }
+        expect(caught).toBe(thrown)
+      }
+    })
+
+    expect(entries.filter(isSpanEnd).map((e) => (e.span as { error?: string }).error)).toEqual([
+      '0',
+      '',
+      'undefined',
+    ])
+  })
+
   it('does not log span.end when the trace is unsampled, but still nests', () => {
     const entries = _captureEntries()
     let outer: ReturnType<typeof getTraceContext>

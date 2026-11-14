@@ -21,4 +21,9 @@ export {
 } from './logger'
 export { loggerOptionsFromEnv } from './env'
 export type { EnvMapping, EnvSource } from './env'
-export type { TracedServiceBinding, SessionInit, TracedWorkerOptions } from './workers'
+export type {
+  TracedServiceBinding,
+  SessionInit,
+  TracedWorkerOptions,
+  WithLoggingOptions,
+} from './workers'

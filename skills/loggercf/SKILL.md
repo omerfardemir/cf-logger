@@ -25,17 +25,18 @@ Imports come from exactly three entry points:
 
 ## Pick the API by unit of work
 
-| Situation                                       | Use                                                                                                        |
-| ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| HTTP in a Hono app                              | `app.use(useLogger(rootLogger))`                                                                           |
-| Receiving Worker-to-Worker RPC                  | `class S extends TracedSession<Env>`, each method body in `this.traced(fn, 'svc.op')`, `tracedWorker(S)`   |
-| Calling another Worker over RPC                 | `withTrace(env.SVC, (s) => s.op())`, or `tracedSession(env.SVC)` for several calls                         |
-| Queue consumer, cron, Node job, any other work  | `runWithLogger({ logger: rootLogger, fields }, fn)`                                                        |
-| Passing a trace over a queue or other transport | sender puts `getTraceCarrier()` in the payload; receiver calls `runWithLogger({ logger, ...carrier }, fn)` |
-| Outbound HTTP                                   | `tracedFetch(url, init)` in place of `fetch`                                                               |
-| Timing a sub-operation                          | `withSpan('db.getUser', fn)`                                                                               |
-| Logging from code that receives no logger       | `getLogger()`, which returns the Logging Context's logger, or the Default Logger outside one               |
-| Code outside every Logging Context              | register a Default Logger: `defaultLoggerFromEnv()` on Workers, `setDefaultLogger(rootLogger)` elsewhere   |
+| Situation                                       | Use                                                                                                          |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| HTTP in a Hono app                              | `app.use(useLogger(rootLogger))`                                                                             |
+| Receiving Worker-to-Worker RPC                  | `class S extends TracedSession<Env>`, each method body in `this.traced(fn, 'svc.op')`, `tracedWorker(S)`     |
+| Plain `WorkerEntrypoint` RPC, not yet migrated  | `export default withLogging(C, { spans: true, session: true })`, then move callers to `withTrace` one by one |
+| Calling another Worker over RPC                 | `withTrace(env.SVC, (s) => s.op())`, or `tracedSession(env.SVC)` for several calls                           |
+| Queue consumer, cron, Node job, any other work  | `runWithLogger({ logger: rootLogger, fields }, fn)`                                                          |
+| Passing a trace over a queue or other transport | sender puts `getTraceCarrier()` in the payload; receiver calls `runWithLogger({ logger, ...carrier }, fn)`   |
+| Outbound HTTP                                   | `tracedFetch(url, init)` in place of `fetch`                                                                 |
+| Timing a sub-operation                          | `withSpan('db.getUser', fn)`                                                                                 |
+| Logging from code that receives no logger       | `getLogger()`, which returns the Logging Context's logger, or the Default Logger outside one                 |
+| Code outside every Logging Context              | register a Default Logger: `defaultLoggerFromEnv()` on Workers, `setDefaultLogger(rootLogger)` elsewhere     |
 
 Queue consumer continuing a producer's trace:
 
@@ -104,11 +105,11 @@ getLogger().info('module loaded') // has service, environment, version; no trace
 export default app
 ```
 
-On Node.js, or to choose the logger yourself, call `setDefaultLogger(rootLogger)` from `loggercf`. It always replaces the current default. `useLogger(rootLogger)`, `defaultLoggerFromEnv()`, and `TracedEntrypoint` / `tracedWorker` (when the entrypoint is constructed) register their Root Logger only when no default is set yet (first seen wins). `useLogger`'s factory form registers nothing, so with a factory call `setDefaultLogger` yourself or use `defaultLoggerFromEnv()`. Pass the Root Logger itself, never `rootLogger.child({ requestId })` or a logger taken inside a Logging Context: fields passed to `.child()` would appear on every line logged outside a context. `getLogger('name')` with a name still returns a standalone logger without `environment` or `version`.
+On Node.js, or to choose the logger yourself, call `setDefaultLogger(rootLogger)` from `loggercf`. It always replaces the current default. `useLogger(rootLogger)`, `defaultLoggerFromEnv()`, and `TracedEntrypoint` / `tracedWorker` / `withLogging` (when the entrypoint is constructed) register their Root Logger only when no default is set yet (first seen wins). `useLogger`'s factory form registers nothing, so with a factory call `setDefaultLogger` yourself or use `defaultLoggerFromEnv()`. Pass the Root Logger itself, never `rootLogger.child({ requestId })` or a logger taken inside a Logging Context: fields passed to `.child()` would appear on every line logged outside a context. `getLogger('name')` with a name still returns a standalone logger without `environment` or `version`.
 
 ### Per-request data goes in Context Fields
 
-Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `runWithLogger`, or call `setLoggerContext({ ... })` inside the Logging Context. Every later line in that context carries them, including `useLogger`'s `request.end` and lines from code that calls `getLogger()`. `useLogger` already adds `requestId`, and `cfRay` when the request has a `cf-ray` header.
+Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `runWithLogger`, or call `setLoggerContext({ ... })` inside the Logging Context. Every later line in that context carries them, including `useLogger`'s `request.end` and lines from code that calls `getLogger()`. `useLogger` already adds `requestId`, and `cfRay` when the request has a `cf-ray` header. In Hono, data known from the request alone can come from `useLogger`'s `fields` option, so `request.start` has it too (see [Request lines in Hono](#request-lines-in-hono)).
 
 ```ts
 import { Hono } from 'hono'
@@ -157,6 +158,38 @@ app.use(
 
 export default app
 ```
+
+### Request lines in Hono
+
+`useLogger` writes `request.start` and one `request.end` per request. `request.end` has `method`, `path` (never the query string), `route` (the matched pattern, such as `/users/:id`; group by it, not by `path`), `statusCode`, `duration`, and `err` when Hono caught an error. A throw that escapes `useLogger` (a non-`Error` value, or an `onError` that throws) is rethrown unchanged after a `request.end` at `error` with `statusCode: 500` and `statusCodeAssumed: true`: that 500 is a guess, because an outer middleware or the runtime sends the real response, and Hono hands an `Error` thrown by `onError` back to `onError` (an `HTTPException(502)` it throws becomes a 502). Don't read `statusCode` as the sent status on a line with `statusCodeAssumed`. There is no `request.error` line: find failed requests by `err` or by the level of `request.end`. That level is by default `error` for a caught error or a 5xx, `warn` for a 4xx and `info` otherwise; the `level` option changes it, so check the app's `useLogger` options before relying on it. Use the options instead of logging your own per-request summary line:
+
+```ts
+import { Hono } from 'hono'
+import { createLogger } from 'loggercf'
+import { useLogger } from 'loggercf/hono'
+
+const app = new Hono<{ Variables: { userId?: string } }>()
+app.use(
+  useLogger(createLogger({ service: 'api' }), {
+    requestStart: false, // default true; false: request.end only
+    fields: (c) => ({ tenant: c.req.header('x-tenant-id') }), // Context Fields: every line
+    endFields: (c) => ({ userId: c.get('userId') }), // request.end only, after the handlers
+    include: { userAgent: true, cf: true }, // userAgent and cf: { colo, country, asn }; off by default
+    // level: (status, err, c) => LogLevel, for request.end
+  }),
+)
+
+export default app
+```
+
+```ts wrong
+app.use(async (c, next) => {
+  await next()
+  c.var.logger.info({ status: c.res.status, url: c.req.url }, 'request done') // duplicates request.end, and logs the query string
+})
+```
+
+`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, returns a Promise or an unknown level, or returns an object that throws when read) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`. Keys `useLogger` owns, its Owned Keys (`requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration`, `err`, ...) are dropped from a `fields`/`endFields` result, with one WARN listing them in `droppedKeys`: pick other names. For a streamed body, `request.end` is written when the handler returns the `Response`, so `duration` leaves out the streaming and an error while streaming is not on it: log that from the stream's error callback.
 
 ### Context helpers need a Logging Context
 
@@ -226,6 +259,43 @@ export default class extends TracedEntrypoint<Env> {
 }
 ```
 
+### Plain `WorkerEntrypoint` RPC: wrap it with `withLogging`
+
+A `WorkerEntrypoint` whose methods are called directly (`env.SVC.method()`) runs them outside every Logging Context. Do not rewrite it into a Traced Session and every caller in one change. Wrap the class with `withLogging` from `loggercf/workers`: each method call (and `fetch`) gets its own Logging Context with `service` from env, a `traceId`, and the Context Fields `rpcMethod` and `entrypoint`. Leave the method bodies alone; `getLogger()` and `setLoggerContext` work inside them.
+
+```ts
+import { WorkerEntrypoint } from 'cloudflare:workers'
+import { getLogger } from 'loggercf'
+import { withLogging } from 'loggercf/workers'
+
+interface Env {
+  NAME: string
+  LOG_LEVEL: string
+}
+
+class SearchWorker extends WorkerEntrypoint<Env> {
+  async search(q: string): Promise<string[]> {
+    getLogger().info({ q }, 'searching')
+    return []
+  }
+}
+
+// spans: one span.end per call, ERROR on throw. session: adds session(init) for migrated callers.
+export default withLogging(SearchWorker, { spans: true, session: true })
+```
+
+- A direct call has no Trace Carrier, so it starts a new root trace. Callers that move to `withTrace(env.SVC, (s) => s.search(q))` continue their own trace instead; migrate them one at a time. Type the binding as `SearchService & TracedServiceBinding<SearchService>` while both styles are in use.
+- `withLogging` changes nothing a caller sees: same RPC methods, same return values, the same error thrown. It never retries or catches. `session: true` is the one addition: a `session(init)` method. The class must not already have a `session` method or getter, own or inherited.
+- `scheduled`, `queue` and `tail` are not wrapped. Open a Logging Context per unit of work yourself (`runWithLogger`, one per queue message).
+- When `fetch` hands the request to a Hono app that uses `useLogger` (`return app.fetch(req, this.env, this.ctx)`), pass `fetch: false`. `useLogger` opens its own Logging Context and continues `traceparent`; wrapping `fetch` as well splits each request into two root traces.
+- Put every RPC method on the class before wrapping it. A method added or overridden in a subclass of the wrapped class runs outside every Logging Context; extend the wrapped class only to add handlers. The class must extend `WorkerEntrypoint`: wrapping a Durable Object, or anything else, throws.
+- A method named like a handler (`trace`, `test`, `email`, `connect`, `queue`, `tail`, `tailStream`) is never wrapped.
+- Only method calls are wrapped. A getter read over RPC, and the body of an `async *` method (it runs on each `.next()`, after the call has returned), log outside the Logging Context. A sync method that returns an un-awaited `RpcPromise` gets a span that ends at once; make it `async` and `await` the call to time it.
+- A method called while any Logging Context is active joins it and adds no `rpcMethod` or `entrypoint`: another public method (`this.search()`) gives a child Span `C.search` with the caller's `rpcMethod`, and a call inside your own `runWithLogger` in `scheduled` logs with that context's fields only.
+- On the `session()` path, caller fields named `rpcMethod` or `entrypoint` are replaced. An anonymous class gets no `entrypoint` field, and its Spans are named by the method alone.
+- Wrap a class once. Wrapping the result again with the same options (`spans`, `session`, `fetch`, `env`) returns it; other options, or wrapping a subclass of it, throw.
+- It takes the same Env Mapping as `tracedWorker`: `withLogging(C, { env: { version: ... } })`. A `TracedEntrypoint` subclass keeps its own `envMapping` instead; passing `env` to it throws.
+
 ### Log call shape
 
 Two call styles work, and no argument is ever dropped. Prefer the structured style (fields or an `Error` first, then the message) for data you want to query. The console style (message first) also keeps every argument: a trailing object's keys become top-level fields, the first trailing `Error` becomes `err`, extra strings and numbers join the message, and anything else goes to an `args` array.
@@ -278,9 +348,9 @@ logger.info('loaded order %s', order) // message stays 'loaded order %s', order'
 ```
 
 - `nodejs_compat` is required, because loggercf uses `AsyncLocalStorage` from `node:async_hooks`.
-- `loggerOptionsFromEnv(env)`, `tracedWorker` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'` for a missing one).
+- `loggerOptionsFromEnv(env)`, `tracedWorker`, `withLogging` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'` for a missing one).
 - `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error` or `fatal`. Any other value (including `DEBUG` and `silent`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value. There is no off switch; the quietest level is `fatal`.
-- To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })`, or to an `envMapping` getter on a `TracedEntrypoint` subclass.
+- To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to an `envMapping` getter on a `TracedEntrypoint` subclass.
 
 ```ts
 import { createLogger, loggerOptionsFromEnv } from 'loggercf'
