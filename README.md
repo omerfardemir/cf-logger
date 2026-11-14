@@ -12,11 +12,11 @@ pnpm add hono
 
 ## Entry Points
 
-| Import             | Contents                                                                                                                           |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
-| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware; `UseLoggerOptions`, `RequestIdOptions`, `RequestIdSource` types                       |
-| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                                  |
+| Import             | Contents                                                                                                                                               |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setDefaultLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
+| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware; `UseLoggerOptions`, `RequestIdOptions`, `RequestIdSource` types                                           |
+| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`, `defaultLoggerFromEnv`                                              |
 
 ## How Trace Propagation Works
 
@@ -104,7 +104,7 @@ logger.info({ userId: 'u-42' }, 'Request started')
 
 ### `getLogger(service?)`
 
-Get the current Logging Context's logger. Outside any Logging Context, it returns a standalone logger cached per `service` (default `'unknown'`), useful for code that doesn't know whether it runs inside a context. Where you do know, prefer your Root Logger or `runWithLogger`.
+Get the current Logging Context's logger. Outside any Logging Context, `getLogger()` returns the **Default Logger** (see [`setDefaultLogger`](#setdefaultloggerlogger)), or, when none is registered, a standalone logger with `service: 'unknown'`. `getLogger(service)` with a name returns a standalone logger cached per `service`, with no `environment` or `version`, whether or not a default is set. This suits code that doesn't know whether it runs inside a context. Where you do know, prefer your Root Logger or `runWithLogger`.
 
 ```ts
 import { getLogger } from 'loggercf'
@@ -114,8 +114,28 @@ const log = getLogger() // the Logging Context's logger
 log.info('has traceId automatically')
 
 // Outside a Logging Context:
-const log = getLogger('cron') // cached standalone logger
+const log = getLogger() // the Default Logger, or service: 'unknown' without one
+const cron = getLogger('cron') // cached standalone logger
 ```
+
+### `setDefaultLogger(logger)`
+
+Register a Root Logger as the isolate's **Default Logger**: the logger `getLogger()` returns outside every Logging Context. Code that runs outside a context (module scope, plain `WorkerEntrypoint` RPC methods, `scheduled`, Durable Object methods, shared packages) then logs with that logger's `service`, `environment` and `version` instead of `service: 'unknown'`.
+
+```ts
+import { createLogger, getLogger, loggerOptionsFromEnv, setDefaultLogger } from 'loggercf'
+
+const logger = createLogger(loggerOptionsFromEnv(process.env))
+setDefaultLogger(logger)
+
+getLogger().info('starting') // service, environment and version from env
+```
+
+- Outside a context the line has no trace IDs and no Context Fields. Context Fields live in each Logging Context, never on the logger, so registering a logger (even the one `getLogger()` returns inside a context) cannot carry one request's data into other work.
+- Pass the Root Logger. A `.child({ ... })` of it is accepted, but its bindings go on every line logged outside a context, so they must be per-process data too.
+- `setDefaultLogger` always replaces the current default, including one registered automatically. Calling it again replaces it again.
+
+`useLogger(rootLogger)`, `TracedEntrypoint`, `tracedWorker` and `defaultLoggerFromEnv` register their Root Logger the first time they see one, unless a default is already set: first seen wins. On Workers, [`defaultLoggerFromEnv()`](#defaultloggerfromenvmapping) builds and registers one from `env` with no setup.
 
 ### `setLoggerContext(fields)`
 
@@ -257,6 +277,8 @@ app.get('/', (c) => {
   return c.text('ok')
 })
 ```
+
+With a logger instance (Option A), `useLogger` registers it as the [Default Logger](#setdefaultloggerlogger) unless one is already set, so `getLogger()` outside a request logs with its `service`. A factory's logger (Option B) is not registered, because nothing guarantees it returns a Root Logger rather than a per-request child. Register it yourself with `setDefaultLogger`, or on Workers build it with `useLogger(defaultLoggerFromEnv())`, which needs no `c.env`.
 
 #### Request ID
 
@@ -417,7 +439,7 @@ All workers in the chain share the same `traceId`.
 
 ### `TracedEntrypoint<Env>`
 
-Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Override the `envMapping` getter to read other vars (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)), or override `loggerOptions` to build the options yourself.
+Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. The first read of `this.rootLogger` (every `session()` call does one) registers it as the [Default Logger](#setdefaultloggerlogger) unless one is already set; `tracedWorker()` does the same. Override the `envMapping` getter to read other vars (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)), or override `loggerOptions` to build the options yourself.
 
 ```ts
 import {
@@ -445,6 +467,27 @@ export default class extends TracedEntrypoint<Env> {
   }
 }
 ```
+
+### `defaultLoggerFromEnv(mapping?)`
+
+The zero-config way to get a [Default Logger](#setdefaultloggerlogger) on Workers. It reads the Worker's `env` through `import { env } from 'cloudflare:workers'`, so it works at module scope and in code that never receives `env`. It builds the Root Logger from `loggerOptionsFromEnv(env, mapping)`, registers it as the Default Logger unless one is already set, and returns it.
+
+```ts
+import { Hono } from 'hono'
+import { getLogger } from 'loggercf'
+import { useLogger } from 'loggercf/hono'
+import { defaultLoggerFromEnv } from 'loggercf/workers'
+
+const logger = defaultLoggerFromEnv() // NAME, LOG_LEVEL, ENVIRONMENT, VERSION
+// or: defaultLoggerFromEnv({ version: (env) => env.CF_VERSION_METADATA.id })
+
+const app = new Hono()
+app.use(useLogger(logger))
+
+getLogger().info('module scope') // service, environment and version from env
+```
+
+The Root Logger is created once per Logger Options and is the same instance `TracedEntrypoint` and `tracedWorker` use for the same env. `mapping` takes the same [Env Mapping](#loggeroptionsfromenvenv-mapping) as `loggerOptionsFromEnv`; its env type defaults to `Cloudflare.Env` (from `wrangler types`). A `setDefaultLogger` call made before it keeps its logger as the default; one made after it replaces it.
 
 ### Service Type Convention
 

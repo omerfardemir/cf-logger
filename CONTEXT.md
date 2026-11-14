@@ -22,6 +22,10 @@ _Avoid_: correlation ID, trace ID (that is the Trace Context's)
 The logger built once per process or isolate from Logger Options, carrying only per-process data (`service`, `environment`, `version`). It never holds per-unit-of-work data, because an isolate serves many requests concurrently.
 _Avoid_: base logger, factory
 
+**Default Logger**:
+The Root Logger an isolate registers for code that runs outside every Logging Context (module scope, plain RPC methods, `scheduled`, shared packages); `getLogger()` returns it there. Set with `setDefaultLogger`, or registered by `useLogger`, `TracedEntrypoint`, `tracedWorker` or `defaultLoggerFromEnv` the first time they see a Root Logger. Like every Root Logger it carries no Context Fields, so no unit of work's data reaches another through it.
+_Avoid_: global logger, fallback logger
+
 **Logger Options**:
 The per-process configuration a Root Logger is built from: service name, minimum level, environment, version.
 
