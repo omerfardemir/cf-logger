@@ -402,6 +402,31 @@ describe('tracedFetcher', () => {
       expect(second).toMatchObject({ method: 'GET', host: 'svc.internal', path: '/health' })
     })
 
+    it('logs the method as it goes on the wire: only the methods fetch normalises are uppercased', async () => {
+      const entries = _captureEntries()
+      const binding = mockBinding()
+      const svc = tracedFetcher(binding, { spans: true })
+      await inContext(async () => {
+        await svc.fetch('https://svc/a', { method: 'dElEtE' })
+        await svc.fetch('https://svc/a', { method: 'Options' })
+        await svc.fetch('https://svc/a', { method: 'propfind' })
+      })
+      expect(binding.sent.map((request) => request.method)).toEqual([
+        'DELETE',
+        'OPTIONS',
+        'propfind',
+      ])
+      expect(entries.map((entry) => entry.method)).toEqual(['DELETE', 'OPTIONS', 'propfind'])
+
+      // `patch` is sent as `patch` (Node's Request warns about it, so this binding builds none).
+      const raw = { fetch: vi.fn(async (..._args: unknown[]) => new Response('ok')) }
+      await inContext(() =>
+        tracedFetcher(raw, { spans: true }).fetch('https://svc/a', { method: 'patch' }),
+      )
+      expect(raw.fetch.mock.calls[0][1]).toMatchObject({ method: 'patch' })
+      expect(entries[3]).toMatchObject({ message: 'span.end fetch', method: 'patch' })
+    })
+
     it('the span is the parent of the downstream work: traceparent carries its span ID', async () => {
       const entries = _captureEntries()
       const binding = mockBinding()
@@ -544,6 +569,7 @@ describe('tracedFetcher', () => {
       expect('connect' in svc).toBe(true)
       expect(Object.isFrozen(binding)).toBe(true)
     })
+
   })
 })
 

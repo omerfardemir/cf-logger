@@ -65,6 +65,11 @@ const REQUEST_INIT_KEYS = [
 ] as const
 
 /**
+ * The methods `fetch` uppercases (case-insensitively). Any other method is sent as given.
+ */
+const NORMALIZED_METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'POST', 'PUT'])
+
+/**
  * @param {unknown} value - Any value.
  * @returns {boolean} Whether `value` is a `Request`.
  */
@@ -144,6 +149,16 @@ function withCarrier({ args, input, init, request }: Call, options: TracedFetchO
 }
 
 /**
+ * @param {string} method - The method the caller gave.
+ * @returns {string} The method as `fetch` sends it: one of `NORMALIZED_METHODS` uppercased
+ *   (ASCII only, as `fetch` does), any other as given (`patch` stays `patch`).
+ */
+function wireMethod(method: string): string {
+  const upper = method.replace(/[a-z]+/g, (letters) => letters.toUpperCase())
+  return NORMALIZED_METHODS.has(upper) ? upper : method
+}
+
+/**
  * The Span fields for a call. All four are always set, `undefined` when unknown (a URL that
  * cannot be parsed, no response yet), so the caller's own Context Fields of the same names
  * never show on the Span's line.
@@ -159,7 +174,7 @@ function spanFields({ input, init, request }: Call): {
 } {
   let method = 'GET'
   try {
-    method = String(init?.method ?? request?.method ?? 'GET').toUpperCase()
+    method = wireMethod(String(init?.method ?? request?.method ?? 'GET'))
   } catch {
     // a method whose toString throws: fetch will reject it
   }

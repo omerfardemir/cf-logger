@@ -264,7 +264,7 @@ export default class extends TracedEntrypoint<Env> {
 Use `tracedFetch` for `fetch`, and wrap a service binding with `tracedFetcher` before calling its `fetch`. Do not set `traceparent` by hand, and do not wrap the call in your own retry or `try/catch` for the logger's sake: the wrapper returns or throws exactly what `fetch` or the binding does. It never mutates the `Request` or `init` you pass. Forwarding `c.req.raw` passes the client's headers on as they are, `X-Request-Id` included, unless `forwardRequestId` is on. Its options are off by default:
 
 - `forwardRequestId: true` sends the `requestId` Context Field as `X-Request-Id`, replacing any already on the call (a forwarded `c.req.raw`'s included), so the receiver's `useLogger` reuses this Worker's ID. To send your own ID, leave it off and set the header. On `tracedFetch` the ID goes to whatever host you call.
-- `spans: true` logs one `span.end fetch` per call with `method`, `host`, `path` (no query string) and `statusCode`. A 5xx response is still an `OK` Span (look at `statusCode`); a network failure is an `ERROR` Span, and the error is rethrown. The error is logged as it is, so a message that quotes the URL puts its query string on that line.
+- `spans: true` logs one `span.end fetch` per call with `method` (as sent), `host`, `path` (no query string) and `statusCode`. A 5xx response is still an `OK` Span (look at `statusCode`); a network failure is an `ERROR` Span, and the error is rethrown. The error is logged as it is, so a message that quotes the URL puts its query string on that line.
 
 ```ts
 import { Hono } from 'hono'
