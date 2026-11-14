@@ -352,7 +352,7 @@ try {
 }
 ```
 
-An `Error | undefined` that is unset writes nothing when the message follows it: `logger.error(maybeErr, 'failed %s', id)` gives `failed id1`. Alone, or before anything but a string, it is kept: `logger.error(maybeErr)` gives the message `undefined`. After a leading object or `Error`, an `undefined` in the message's place lands in `args`.
+An `Error | undefined` that is unset writes nothing when the message follows it: `logger.error(maybeErr, 'failed %s', id)` gives `failed id1`. Alone, or before anything but a string, it is a leading primitive, like a number: `String(value)` is the message, the value is in `args` (as `null`), and the arguments after it are routed as usual. `logger.error(maybeErr)` gives the message `undefined`, and `logger.info(undefined, { a: 1 })` the message `undefined` with `a: 1` as a field. After a leading object or `Error`, an `undefined` in the message's place lands in `args`.
 
 An `Error` is serialized with type, message, stack, own fields and `cause`. A value that can't be serialized (a getter or a `toJSON` that throws) becomes `"[Unserializable: <reason>]"` on its own; the rest of the line is kept. `printf` placeholders (`%s %d %i %f %j %o %O %%`) take arguments in order. `%s %d %i %f` don't print an object: the placeholder stays in the text and the object is routed like a later argument:
 

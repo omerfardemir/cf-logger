@@ -42,11 +42,11 @@ Where each Logger Options field is read from in a Worker's (or process's) env: a
 _Avoid_: env config, var map
 
 **Argument Routing**:
-The rule that places every argument of a log call in the line (the message, top-level fields, `err` / `errors`, or the Overflow), for both the structured call style (fields or an `Error` first) and the console style (message first). Most arguments land in one part; a leading number, boolean or `BigInt` lands in two (it is the message, and its value is in the Overflow). No argument is ever dropped: the only value that writes nothing is a leading `undefined` / `null` directly followed by the message (an unset `Error | undefined`). A value that can't be read or serialized is replaced, on its own, by an `[Unserializable: <reason>]` stand-in. It runs before serialization, so routed values are serialized like any field.
+The rule that places every argument of a log call in the line (the message, top-level fields, `err` / `errors`, or the Overflow), for both the structured call style (fields or an `Error` first) and the console style (message first). Most arguments land in one part; a leading number, boolean, `BigInt`, or an `undefined` / `null` not followed by a string, lands in two (it is the message, and its value is in the Overflow), and the arguments after it are routed as usual. No argument is ever dropped: the only argument that writes nothing is a leading `undefined` / `null` directly followed by the message (an unset `Error | undefined`). A value that can't be read or serialized is replaced, on its own, by an `[Unserializable: <reason>]` stand-in. It runs before serialization, so routed values are serialized like any field.
 _Avoid_: argument parsing, normalization
 
 **Overflow**:
-The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, a leading `undefined` / `null` with no message after it, an `undefined` / `null` in the message's place after a leading object or `Error`, an object's values for loggercf's own keys, and a logger binding's or Context Field's value for `time`, `level`, `message`, `errors` or `args`), in call order. Present only when non-empty.
+The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, a leading `undefined` / `null` not followed by a string, an `undefined` / `null` in the message's place after a leading object or `Error`, an object's values for loggercf's own keys, and a logger binding's or Context Field's value for `time`, `level`, `message`, `errors` or `args`), in call order. Present only when non-empty.
 _Avoid_: extras, rest, leftovers
 
 ### Tracing

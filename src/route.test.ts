@@ -453,6 +453,17 @@ describe('log call examples (issue #21), in both call styles', () => {
     })
   })
 
+  it('after a leading undefined or null that is the message, later arguments route as usual', () => {
+    const fields = record((l) => (l.info as (...args: unknown[]) => void)(undefined, { a: 1 }))
+    expect(fields).toMatchObject({ message: 'undefined', a: 1, args: [null] })
+    expect(fields).not.toHaveProperty('err')
+    const word = record((l) => (l.info as (...args: unknown[]) => void)(null, 42))
+    expect(word).toMatchObject({ message: 'null 42', args: [null] })
+    // After a leading object, the nullish in the message's place is in args; later strings are words.
+    const after = record((l) => (l.info as (...args: unknown[]) => void)({ a: 1 }, null, 'x', 'y'))
+    expect(after).toMatchObject({ message: 'x y', a: 1, args: [null] })
+  })
+
   it('an Error under %o is err, not {}', () => {
     const err = new Error('boom')
     const r = record((l) => l.error('failed: %o', err))

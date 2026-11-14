@@ -179,7 +179,9 @@ export function formatMessage(
  *    merged (see below). An `undefined` or `null` followed by a `string`
  *    (an `Error | undefined` that is unset) writes nothing, and the string is
  *    the template. Any other primitive, `undefined` and `null` included, goes
- *    to `args` and is the message as `String(value)`. Anything else (array,
+ *    to `args` and is the message as `String(value)`; the arguments after it
+ *    are routed as usual (step 3), so `[undefined, { a: 1 }]` merges `a` and
+ *    `[null, 42]` is the message `null 42`. Anything else (array,
  *    class instance...) goes to `args`. After an `Error`, a plain object, an
  *    array or a class instance, a `string` second argument is the template,
  *    and an `undefined` or `null` one goes to `args`.

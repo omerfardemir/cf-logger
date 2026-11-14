@@ -163,8 +163,11 @@ export interface LogFn<T extends LogFields = LogFields> {
   <F extends object>(fields: F & KnownFields<T>, msg?: string, ...args: unknown[]): void
   /**
    * A message or an `Error` whose static type is a union (`string | Error`,
-   * `Error | undefined`, `Error | null`). An unset `undefined` / `null` writes
-   * nothing, and the next string is still the message: `logger.error(maybeErr, 'failed %s', id)`.
+   * `Error | undefined`, `Error | null`). An unset `undefined` / `null`
+   * followed by a string writes nothing, and the string is still the message:
+   * `logger.error(maybeErr, 'failed %s', id)`. Alone, or before anything else,
+   * it is a leading primitive: `String(value)` is the message, the value is in
+   * `args`, and the arguments after it are routed as usual.
    */
   (value: string | Error | null | undefined, msg?: string, ...args: unknown[]): void
   /**
