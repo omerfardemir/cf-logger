@@ -234,7 +234,7 @@ class BillingSession extends TracedSession<Env> {
 export default tracedWorker(BillingSession)
 ```
 
-`tracedWorker(S)` builds the entrypoint: one Root Logger per isolate from the env vars, a `session(init)` method, and a 404 `fetch`. When the Worker also needs `scheduled`, `queue` or a real `fetch` with logging, extend `TracedEntrypoint` instead. It gives you `this.rootLogger`. A session's constructor is `(init, rootLogger, env)`, and `session()` takes one object, `{ traceparent?, tracestate?, fields? }`:
+`tracedWorker(S)` builds the entrypoint: one Root Logger per isolate from the env vars, a `session(init)` method, and a 404 `fetch`. When the Worker also needs `scheduled`, `queue` or a real `fetch` with logging, extend `TracedEntrypoint` instead. It gives you `this[TracedEntrypoint.rootLogger]`: its hooks are getters keyed by the symbols `TracedEntrypoint.envMapping`, `.loggerOptions` and `.rootLogger`, so a caller holding the binding cannot reach them over RPC. Override `[TracedEntrypoint.envMapping]` (or `.loggerOptions`, `.rootLogger`) to change them, never a getter named `envMapping`, `loggerOptions` or `rootLogger`: that is an RPC member, and `TracedEntrypoint` never calls it. A session's constructor is `(init, rootLogger, env)`, and `session()` takes one object, `{ traceparent?, tracestate?, fields? }`:
 
 ```ts
 import { getLogger } from 'loggercf'
@@ -257,7 +257,7 @@ const nightly = withScheduled(async (controller: ScheduledController, env: Env) 
 
 export default class extends TracedEntrypoint<Env> {
   session(init: SessionInit) {
-    return new MathSession(init, this.rootLogger, this.env)
+    return new MathSession(init, this[TracedEntrypoint.rootLogger], this.env)
   }
 
   scheduled(controller: ScheduledController) {
@@ -330,7 +330,7 @@ export default withLogging(SearchWorker, { spans: true, session: true })
 - A method called while any Logging Context is active joins it and adds no `rpcMethod` or `entrypoint`: another public method (`this.search()`) gives a child Span `C.search` with the caller's `rpcMethod`, and a call inside a `withScheduled` handler logs with that context's fields only.
 - On the `session()` path, caller fields named `rpcMethod` or `entrypoint` are replaced. An anonymous class gets no `entrypoint` field, and its Spans are named by the method alone.
 - Wrap a class once. Wrapping the result again with the same options (`spans`, `session`, `fetch`, `env`) returns it; other options, or wrapping a subclass of it, throw.
-- It takes the same Env Mapping as `tracedWorker`: `withLogging(C, { env: { version: ... } })`. A `TracedEntrypoint` subclass keeps its own `envMapping` instead; passing `env` to it throws.
+- It takes the same Env Mapping as `tracedWorker`: `withLogging(C, { env: { version: ... } })`. A `TracedEntrypoint` subclass keeps its own `[TracedEntrypoint.envMapping]` hook instead; passing `env` to it throws.
 
 ### Durable Objects: wrap them with `withLogging`
 
@@ -433,7 +433,7 @@ logger.info('charged', { orderId }) // the object is dropped from the line
 - `nodejs_compat` is required, because loggercf uses `AsyncLocalStorage` from `node:async_hooks`.
 - `loggerOptionsFromEnv(env)`, `tracedWorker`, `withLogging` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'` for a missing one).
 - `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error`, `fatal` or `silent`. `silent` writes nothing at all. Any other value (including `DEBUG` and `SILENT`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value.
-- To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to an `envMapping` getter on a `TracedEntrypoint` subclass.
+- To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to a `[TracedEntrypoint.envMapping]` getter on a `TracedEntrypoint` subclass.
 
 ```ts
 import { createLogger, loggerOptionsFromEnv } from 'loggercf'
