@@ -74,17 +74,18 @@ export interface UseLoggerOptions {
   /**
    * Context Fields to add at the start of the request, so they are on every line of it,
    * `request.start` included. Runs before the handlers, so it sees the request but not what
-   * later middleware sets. Must be synchronous. `requestId` and `cfRay` cannot be replaced.
+   * later middleware sets. Must be synchronous. It cannot set the keys `useLogger` owns:
+   * `requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration`, `err`, and
+   * `userAgent` / `cf` when `include` turns them on; those keys are dropped from its result.
    * When it throws or returns anything but a plain object or `undefined` (a Promise, for
    * example), the request is logged without these fields and one WARN is written.
    */
   fields?: (c: Context) => LogFields | undefined
   /**
    * Fields to add to `request.end` only. Runs after the handlers, so it sees `c.var` values
-   * they set (an authenticated user ID, for example). Must be synchronous. It cannot replace
-   * `requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration` or `err`. When it
-   * throws or returns anything but a plain object or `undefined`, `request.end` is written
-   * without these fields and one WARN is written.
+   * they set (an authenticated user ID, for example). Must be synchronous. It cannot set the
+   * same keys `fields` cannot. When it throws or returns anything but a plain object or
+   * `undefined`, `request.end` is written without these fields and one WARN is written.
    */
   endFields?: (c: Context) => LogFields | undefined
   /** Request details to add to `request.start` and `request.end`. All off by default. */
@@ -138,9 +139,14 @@ type HookFailure = { err: unknown } | { returned: string }
 
 type HookResult<R> = { value?: R; failure?: HookFailure }
 
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return typeof (value as { then?: unknown } | null | undefined)?.then === 'function'
+}
+
 /**
  * Calls an option hook. A throw, or a value `accepts` rejects, becomes a `failure` instead of
- * reaching the app; the hook's result is then not used.
+ * reaching the app; the hook's result is then not used. A Promise result is never awaited, but
+ * its rejection is handled, so an async hook cannot cause an unhandled rejection.
  */
 function callHook<R>(fn: () => unknown, accepts: (value: unknown) => value is R): HookResult<R> {
   let value: unknown
@@ -149,14 +155,22 @@ function callHook<R>(fn: () => unknown, accepts: (value: unknown) => value is R)
   } catch (err) {
     return { failure: { err } }
   }
-  return accepts(value) ? { value } : { failure: { returned: describe(value) } }
+  if (isThenable(value)) {
+    try {
+      value.then(undefined, () => {})
+    } catch {
+      // A thenable whose then() throws is still only reported as a failure below.
+    }
+  }
+  return accepts(value) ? { value } : { failure: { returned: describeReturned(value) } }
 }
 
-function describe(value: unknown): string {
+/** A short description of an unusable hook result, for the WARN. */
+function describeReturned(value: unknown): string {
   if (typeof value === 'string') return value
   if (value === null) return 'null'
   if (Array.isArray(value)) return 'array'
-  if (typeof (value as { then?: unknown } | undefined)?.then === 'function') return 'Promise'
+  if (isThenable(value)) return 'Promise'
   return typeof value
 }
 
@@ -164,19 +178,47 @@ function describe(value: unknown): string {
 function isFields(value: unknown): value is LogFields | undefined {
   if (value === undefined) return true
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
-  return typeof (value as { then?: unknown }).then !== 'function'
+  return !isThenable(value)
 }
 
 function isLevel(value: unknown): value is LogLevel {
   return LOG_LEVELS.has(value)
 }
 
-/** `fields` without the keys `useLogger` owns, which the hook must not replace. */
-function withoutOwnFields(fields: LogFields | undefined): LogFields {
+/** The keys `useLogger` writes, which a `fields` or `endFields` result must not set. */
+const OWN_KEYS = ['requestId', 'cfRay', 'method', 'path', 'route', 'statusCode', 'duration', 'err']
+
+function ownKeys(include: RequestDetailsOptions): readonly string[] {
+  return [...OWN_KEYS, ...(include.userAgent ? ['userAgent'] : []), ...(include.cf ? ['cf'] : [])]
+}
+
+/** A hook result without the keys `useLogger` owns. */
+function withoutKeys(fields: LogFields | undefined, keys: readonly string[]): LogFields {
   const rest = { ...fields }
-  delete rest.requestId
-  delete rest.cfRay
+  for (const key of keys) delete rest[key]
   return rest
+}
+
+/**
+ * `err` for a value thrown past `useLogger`: an `Error` as is (the record serializes it),
+ * anything else as `{ type, message }`, which every sink can write.
+ */
+function thrownErr(thrown: unknown): unknown {
+  if (thrown instanceof Error) return thrown
+  return { type: thrown === null ? 'null' : typeof thrown, message: printable(thrown) }
+}
+
+function printable(value: unknown): string {
+  if (typeof value === 'string') return value
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    try {
+      return String(value)
+    } catch {
+      return 'unprintable value'
+    }
+  }
 }
 
 /**
@@ -299,6 +341,10 @@ function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => string
  * and never drops `request.end`: the line is written without that hook's result, and one WARN
  * per hook per `useLogger()` call names it.
  *
+ * A throw Hono does not turn into a response (a non-`Error` value, or an `onError` that
+ * throws) still gets a `request.end` at `error`, with `statusCode: 500` and `err`, and is
+ * then rethrown unchanged. No response headers are set then: there is no response yet.
+ *
  * @template T - The type of user-defined log fields.
  * @param {Logger<T> | ((c: Context) => Logger<T>)} loggerOrFactory - A logger instance or a per-request factory.
  * @param {UseLoggerOptions} [options] - Request ID, request lines and extra fields.
@@ -324,6 +370,7 @@ export function useLogger<T extends LogFields = LogFields>(
   const pickRequestId = requestIdPicker(options.requestId)
   const { requestStart = true, level, fields, endFields, include = {} } = options
   const reportHookFailure = hookFailureReporter()
+  const protectedKeys = ownKeys(include)
 
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
@@ -344,7 +391,7 @@ export function useLogger<T extends LogFields = LogFields>(
     const contextOptions = {
       logger: rootLogger,
       ...extractCarrier((name) => c.req.header(name)),
-      fields: { ...appFields?.value, ...ownFields },
+      fields: { ...withoutKeys(appFields?.value, protectedKeys), ...ownFields },
     }
     await runWithLogger(contextOptions, async () => {
       const logger = getLogger<T>()
@@ -362,22 +409,35 @@ export function useLogger<T extends LogFields = LogFields>(
       }
 
       const start = Date.now()
-      await next()
+      // Hono turns an Error into a response itself. A non-Error throw, or an onError that
+      // throws, rejects next() instead: request.end is still written, then the same value is
+      // rethrown, so whatever handles it upstream sees exactly what it would without useLogger.
+      let escaped: { thrown: unknown } | undefined
+      try {
+        await next()
+      } catch (thrown) {
+        escaped = { thrown }
+      }
 
       const duration = Date.now() - start
-      const statusCode = c.res.status
-      const err = c.error
+      // A runtime answers an exception that escapes the app with a 500.
+      const statusCode = escaped ? 500 : c.res.status
+      const err = escaped ? thrownErr(escaped.thrown) : c.error
 
       const endExtra = endFields ? callHook(() => endFields(c), isFields) : undefined
       if (endExtra?.failure) reportHookFailure(logger, 'endFields', endExtra.failure)
 
-      const pickedLevel = level ? callHook(() => level(statusCode, err, c), isLevel) : undefined
-      if (pickedLevel?.failure) reportHookFailure(logger, 'level', pickedLevel.failure)
-      const endLevel = pickedLevel?.value ?? defaultRequestEndLevel(statusCode, err)
+      let endLevel: LogLevel = 'error'
+      if (!escaped) {
+        const caught = c.error
+        const picked = level ? callHook(() => level(statusCode, caught, c), isLevel) : undefined
+        if (picked?.failure) reportHookFailure(logger, 'level', picked.failure)
+        endLevel = picked?.value ?? defaultRequestEndLevel(statusCode, caught)
+      }
 
       logger[endLevel](
         {
-          ...withoutOwnFields(endExtra?.value),
+          ...withoutKeys(endExtra?.value, protectedKeys),
           ...ownFields,
           ...details,
           method,
@@ -389,6 +449,7 @@ export function useLogger<T extends LogFields = LogFields>(
         },
         `request.end ${method} ${path}`,
       )
+      if (escaped) throw escaped.thrown
 
       c.header('X-Request-Id', requestId)
       c.header('X-Trace-Id', trace.traceId)

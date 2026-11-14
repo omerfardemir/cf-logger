@@ -636,6 +636,12 @@ describe('useLogger request.end level', () => {
   })
 })
 
+/** A cache-style middleware: answers itself on a hit (`?hit=1`), calls the handler otherwise. */
+const cache: MiddlewareHandler = async (c, next) => {
+  if (c.req.query('hit')) return c.text('cached')
+  await next()
+}
+
 describe('useLogger route', () => {
   beforeEach(() => _reset())
 
@@ -686,6 +692,20 @@ describe('useLogger route', () => {
     expect(end().route).toBe('/api/users/:id')
   })
 
+  it("logs a method-registered cache's pattern on a hit and the handler's on a miss; app.use keeps the handler's", async () => {
+    for (const register of ['get', 'use'] as const) {
+      const { ends, app } = optionsApp()
+      if (register === 'get') app.get('*', cache)
+      else app.use('*', cache)
+      app.get('/items/:id', (c) => c.text('fresh'))
+      await app.request('/items/1?hit=1')
+      await app.request('/items/1')
+      expect(ends().map((e) => e.route)).toEqual(
+        register === 'get' ? ['/*', '/items/:id'] : ['/items/:id', '/items/:id'],
+      )
+    }
+  })
+
   it('uses the wildcard pattern when only a wildcard handler matches', async () => {
     const { end, app } = optionsApp()
     app.get('/users/:id', (c) => c.text('ok'))
@@ -727,6 +747,10 @@ describe('useLogger requestStart', () => {
     expect(end()).toMatchObject({ statusCode: 200 })
   })
 })
+
+function forgedDetails() {
+  return { userAgent: 'forged', cf: { colo: 'forged' } }
+}
 
 describe('useLogger fields and endFields', () => {
   beforeEach(() => _reset())
@@ -797,6 +821,68 @@ describe('useLogger fields and endFields', () => {
     app.get('/x', (c) => c.text('ok'))
     await app.request('/x')
     expect(end()).not.toHaveProperty('cfRay')
+  })
+
+  it('does not let fields set cfRay, err or the request.end fields when the request has none of them', async () => {
+    const { entries, start, end, app } = optionsApp({
+      fields: () => ({
+        tenant: 't-1',
+        cfRay: 'forged',
+        err: 'forged',
+        method: 'forged',
+        path: 'forged',
+        route: 'forged',
+        statusCode: 1,
+        duration: -1,
+      }),
+    })
+    app.get('/x', (c) => {
+      ;(c.get('logger' as never) as Logger).info('from handler')
+      return c.text('ok')
+    })
+    await app.request('/x')
+    expect(entries()).toHaveLength(3)
+    for (const entry of entries()) {
+      expect(entry.tenant).toBe('t-1')
+      expect(entry).not.toHaveProperty('cfRay')
+      expect(entry).not.toHaveProperty('err')
+    }
+    const fromHandler = entries().find((e) => e.message === 'from handler')!
+    for (const key of ['method', 'path', 'route', 'statusCode', 'duration']) {
+      expect(fromHandler).not.toHaveProperty(key)
+    }
+    expect(start()).not.toHaveProperty('statusCode')
+    expect(end()).toMatchObject({ method: 'GET', path: '/x', route: '/x', statusCode: 200 })
+  })
+
+  it('never lets endFields write err, even on a successful request', async () => {
+    const { end, app } = optionsApp({ endFields: () => ({ err: 'forged', userId: 'u-1' }) })
+    app.get('/x', (c) => c.text('ok'))
+    await app.request('/x')
+    expect(end()).toMatchObject({ level: 'INFO', userId: 'u-1' })
+    expect(end()).not.toHaveProperty('err')
+  })
+
+  it('does not let a hook set userAgent or cf when include turns them on, even if the request has neither', async () => {
+    const { entries, app } = optionsApp({
+      include: { userAgent: true, cf: true },
+      fields: forgedDetails,
+      endFields: forgedDetails,
+    })
+    app.get('/x', (c) => c.text('ok'))
+    await app.request('/x')
+    expect(entries().length).toBeGreaterThan(0)
+    for (const entry of entries()) {
+      expect(entry).not.toHaveProperty('userAgent')
+      expect(entry).not.toHaveProperty('cf')
+    }
+  })
+
+  it('lets a hook set userAgent and cf when include leaves them off', async () => {
+    const { end, app } = optionsApp({ endFields: () => ({ userAgent: 'mine', cf: 'mine' }) })
+    app.get('/x', (c) => c.text('ok'))
+    await app.request('/x')
+    expect(end()).toMatchObject({ userAgent: 'mine', cf: 'mine' })
   })
 })
 
@@ -898,6 +984,36 @@ describe('useLogger hook errors', () => {
     ])
   })
 
+  it('handles a rejecting async hook, so there is no unhandled rejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const { ends, warnings, app } = optionsApp({
+        fields: (() => Promise.reject(new Error('fields rejected'))) as never,
+        endFields: (async () => {
+          throw new Error('endFields rejected')
+        }) as never,
+        level: (() => Promise.reject(new Error('level rejected'))) as never,
+      })
+      app.get('/', (c) => c.text('ok'))
+      const res = await app.request('/')
+      expect(res.status).toBe(200)
+      // Unhandled rejections are reported after the microtask queue drains.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(unhandled).toEqual([])
+      expect(ends()).toHaveLength(1)
+      expect(ends()[0]).toMatchObject({ level: 'INFO', statusCode: 200 })
+      expect(warnings().map((w) => [w.hook, w.returned])).toEqual([
+        ['fields', 'Promise'],
+        ['endFields', 'Promise'],
+        ['level', 'Promise'],
+      ])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   it('treats a fields hook that returns a string or an array as a failure', async () => {
     for (const value of ['abc', ['a']]) {
       const { entries, warnings, app } = optionsApp({ fields: () => value as never })
@@ -934,17 +1050,100 @@ describe('useLogger hook errors', () => {
   })
 })
 
+describe('useLogger throws that escape Hono', () => {
+  beforeEach(() => _reset())
+
+  it('writes request.end at ERROR for a non-Error throw, then rethrows the same value', async () => {
+    const { end, app } = optionsApp({
+      endFields: () => ({ userId: 'u-1' }),
+      level: () => 'info',
+    })
+    app.get('/x', () => {
+      throw 'boom'
+    })
+    await expect(app.request('/x')).rejects.toBe('boom')
+    expect(end()).toMatchObject({
+      level: 'ERROR',
+      statusCode: 500,
+      route: '/x',
+      path: '/x',
+      userId: 'u-1',
+      err: { type: 'string', message: 'boom' },
+    })
+    expect(typeof end().duration).toBe('number')
+  })
+
+  it('writes request.end when onError throws, then rethrows its error', async () => {
+    const { end, app } = optionsApp()
+    app.onError(() => {
+      throw new Error('onError broke')
+    })
+    app.get('/x', () => {
+      throw new Error('handler broke')
+    })
+    await expect(app.request('/x')).rejects.toThrow('onError broke')
+    expect(end()).toMatchObject({
+      level: 'ERROR',
+      statusCode: 500,
+      err: expect.objectContaining({ type: 'Error', message: 'onError broke' }),
+    })
+  })
+
+  it('leaves the thrown value and the response to an outer middleware, unchanged', async () => {
+    const lines = _captureLines()
+    const thrown = { code: 42 }
+    let caught: unknown
+    const app = new Hono()
+    app.use(async (c, next) => {
+      try {
+        await next()
+      } catch (value) {
+        caught = value
+        c.res = new Response('outer', { status: 503 })
+      }
+    })
+    app.use(useLogger(createLogger({ service: 'test-mw' })))
+    app.get('/x', () => {
+      throw thrown
+    })
+    const res = await app.request('/x')
+    expect(caught).toBe(thrown)
+    expect(res.status).toBe(503)
+    expect(await res.text()).toBe('outer')
+    expect(res.headers.get('X-Request-Id')).toBeNull()
+    const ends = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter(messageStartsWith('request.end'))
+    expect(ends).toHaveLength(1)
+    expect(ends[0]).toMatchObject({
+      level: 'ERROR',
+      err: { type: 'object', message: '{"code":42}' },
+    })
+  })
+})
+
 describe('useLogger query string', () => {
   beforeEach(() => _reset())
 
-  it('never logs the query string, with every option on', async () => {
-    const { lines, end, app } = optionsApp({ include: { userAgent: true, cf: true } })
+  it('never logs the query string, with include, fields, endFields and level on', async () => {
+    const { lines, end, app } = optionsApp({
+      include: { userAgent: true, cf: true },
+      fields: () => ({ tenant: 't-1' }),
+      endFields: () => ({ userId: 'u-1' }),
+      level: () => 'info',
+    })
     app.get('/search', (c) => c.text('ok'))
-    await app.request('/search?token=s3cr3t&q=private')
+    await app.request(
+      cfRequest('/search?token=s3cr3t&q=private', CF, { 'user-agent': 'test-agent/1.0' }),
+    )
     expect(end()).toMatchObject({
       path: '/search',
       route: '/search',
       message: 'request.end GET /search',
+      tenant: 't-1',
+      userId: 'u-1',
+      userAgent: 'test-agent/1.0',
+      cf: CF_BASICS,
     })
     expect(lines.length).toBeGreaterThan(0)
     for (const line of lines) {
