@@ -206,7 +206,7 @@ await runWithLogger({ logger, ...msg.body.trace }, async () => {
 
 Map Worker (or `process.env`) variables into `LoggerOptions`: `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` by default (see [Cloudflare Worker Requirements](#cloudflare-worker-requirements) for fallbacks).
 
-`mapping` overrides where each field comes from: `service`, `level`, `environment` or `version` take a var name or a function `(env) => string | undefined`. Fields you leave out keep their default var. A mapped field doesn't fall back to its default var, and an empty string or a non-string value counts as absent.
+`mapping` overrides where each field comes from: `service`, `level`, `environment` or `version` take a var name or a function `(env) => string | undefined`. Fields you leave out keep their default var. A mapped field doesn't fall back to its default var. A number is used as its string form; an empty string or any other non-string value counts as absent.
 
 ```ts
 import { createLogger, loggerOptionsFromEnv } from 'loggercf'

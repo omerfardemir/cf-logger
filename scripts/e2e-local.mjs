@@ -4,7 +4,8 @@
 // `pnpm dev`, sends requests carrying a known traceparent, and asserts:
 //   - HTTP: status, X-Request-Id / X-Trace-Id / traceparent / tracestate response headers, bodies.
 //   - Logs: the Workers' own output continues the trace across every RPC hop,
-//     with the span chain intact and no duplicate keys on any line.
+//     with the span chain intact and no duplicate keys on any line, and each
+//     Worker's `version` read through its Env Mapping.
 //
 // Runs on Linux, macOS and Windows.
 //
@@ -244,6 +245,13 @@ function checkLogs(failures) {
     failures.push(
       `logs: math.multiply parent ${multiply.parentSpanId} is not bind.multiHop span ${multiHop.spanId}`,
     )
+  }
+  // Env Mapping: bind reads the default VERSION var, math maps version_metadata (dev/*/wrangler.jsonc).
+  if (multiHop && multiHop.version !== '1.0.0') {
+    failures.push(`logs: bind.multiHop version ${multiHop.version} is not VERSION 1.0.0`)
+  }
+  if (multiply && (typeof multiply.version !== 'string' || multiply.version === '')) {
+    failures.push('logs: math.multiply has no version from its version_metadata binding')
   }
   const divideByZero = spans.get('bind.divideByZero')
   if (divideByZero?.span?.status !== 'ERROR' || divideByZero?.err?.message !== 'Division by zero') {

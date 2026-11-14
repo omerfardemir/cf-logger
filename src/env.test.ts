@@ -29,8 +29,16 @@ describe('loggerOptionsFromEnv', () => {
 
   it('treats empty strings and non-string values as absent', () => {
     expect(
-      loggerOptionsFromEnv({ NAME: '', LOG_LEVEL: '', ENVIRONMENT: '', VERSION: 42 }),
+      loggerOptionsFromEnv({ NAME: '', LOG_LEVEL: '', ENVIRONMENT: { stage: 'x' }, VERSION: null }),
     ).toStrictEqual({ service: 'unknown', level: 'info' })
+  })
+
+  it('uses a numeric var as its string form', () => {
+    expect(loggerOptionsFromEnv({ NAME: 'api', VERSION: 2 })).toStrictEqual({
+      service: 'api',
+      level: 'info',
+      version: '2',
+    })
   })
 
   it('omits absent fields from every log line', () => {

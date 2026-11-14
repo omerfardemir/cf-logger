@@ -158,10 +158,10 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
   /**
    * Where `loggerOptions` reads each field from. Default: no overrides.
    *
-   * @returns {EnvMapping<E> | undefined} The per-field var name or derive function.
+   * @returns {EnvMapping<E>} The per-field var name or derive function.
    */
-  protected get envMapping(): EnvMapping<E> | undefined {
-    return undefined
+  protected get envMapping(): EnvMapping<E> {
+    return {}
   }
 
   /**
@@ -193,7 +193,11 @@ export interface TracedWorkerOptions<E = unknown> {
   env?: EnvMapping<E>
 }
 
-/** The env type of a `TracedSession` subclass. */
+/**
+ * The env type of a `TracedSession` subclass.
+ *
+ * @template S - The `TracedSession` subclass.
+ */
 type SessionEnv<S> = S extends TracedSession<infer E> ? E : unknown
 
 /**
@@ -205,7 +209,7 @@ type SessionEnv<S> = S extends TracedSession<infer E> ? E : unknown
  *
  * @template S - The `TracedSession` subclass.
  * @param {new (...args: any[]) => S} SessionClass - The session class to wrap.
- * @param {TracedWorkerOptions} [options] - `env`: per-field var name or derive function.
+ * @param {TracedWorkerOptions<SessionEnv<S>>} [options] - `env`: the Env Mapping for the Root Logger.
  * @returns A `WorkerEntrypoint` class with `session()` and `fetch()` implemented.
  *
  * @example
@@ -240,8 +244,8 @@ export function tracedWorker<S extends TracedSession>(
   }
 } {
   return class extends TracedEntrypoint<SessionEnv<S>> {
-    protected override get envMapping(): EnvMapping<SessionEnv<S>> | undefined {
-      return options.env
+    protected override get envMapping(): EnvMapping<SessionEnv<S>> {
+      return options.env ?? {}
     }
 
     /**
