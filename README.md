@@ -44,7 +44,7 @@ Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 }
 ```
 
-The package expects these environment variables when using `loggerOptionsFromEnv()` or `tracedWorker()`:
+`loggerOptionsFromEnv()`, `tracedWorker()` and `TracedEntrypoint` read these environment variables by default:
 
 ```jsonc
 {
@@ -55,6 +55,29 @@ The package expects these environment variables when using `loggerOptionsFromEnv
     "VERSION": "1.0.0",
   },
 }
+```
+
+| Var           | Logger Option | When absent             |
+| ------------- | ------------- | ----------------------- |
+| `NAME`        | `service`     | `'unknown'`             |
+| `LOG_LEVEL`   | `level`       | `'info'`                |
+| `ENVIRONMENT` | `environment` | left off every log line |
+| `VERSION`     | `version`     | left off every log line |
+
+`LOG_LEVEL` must be one of `trace`, `debug`, `info`, `warn`, `error` or `fatal` (lowercase). Any other value falls back to `'info'` and writes one `WARN` per isolate with `invalidLevel` and `validLevels`.
+
+Using other var names, or deriving a field from a binding, takes a mapping (see [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)). To use Cloudflare's [version metadata](https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/) as `version`, add the binding under a name of your choice and map it with a function:
+
+```jsonc
+{
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
+}
+```
+
+```ts
+export default tracedWorker(MySession, {
+  env: { version: (env) => env.CF_VERSION_METADATA.id }, // or .tag, set by `wrangler versions upload --tag`
+})
 ```
 
 ## Core API (`loggercf`)
@@ -179,15 +202,25 @@ await runWithLogger({ logger, ...msg.body.trace }, async () => {
 
 `useLogger` (HTTP headers), `tracedFetch` (outgoing requests) and `tracedSession` / `withTrace` (RPC) do this for you.
 
-### `loggerOptionsFromEnv(env)`
+### `loggerOptionsFromEnv(env, mapping?)`
 
-Map the conventional Worker environment variables into `LoggerOptions`.
+Map Worker (or `process.env`) variables into `LoggerOptions`: `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` by default (see [Cloudflare Worker Requirements](#cloudflare-worker-requirements) for fallbacks).
+
+`mapping` overrides where each field comes from: `service`, `level`, `environment` or `version` take a var name or a function `(env) => string | undefined`. Fields you leave out keep their default var. A mapped field doesn't fall back to its default var, and an empty string or a non-string value counts as absent.
 
 ```ts
 import { createLogger, loggerOptionsFromEnv } from 'loggercf'
 
 const logger = createLogger(loggerOptionsFromEnv(env))
+
+// Read the version from another var:
+createLogger(loggerOptionsFromEnv(env, { version: 'RELEASE' }))
+
+// Or derive it, e.g. from a `version_metadata` binding:
+createLogger(loggerOptionsFromEnv(env, { version: (e) => e.CF_VERSION_METADATA?.id }))
 ```
+
+The `EnvMapping<Env>` type describes the mapping.
 
 ---
 
@@ -271,13 +304,18 @@ export default tracedWorker(MySession)
 | `this.logger`                 | Request-scoped logger (must be called inside `traced()`)                                                       |
 | `this.env`                    | Worker env (bindings, vars) — for multi-hop RPC calls                                                          |
 
-### `tracedWorker(SessionClass)`
+### `tracedWorker(SessionClass, options?)`
 
-Creates a `WorkerEntrypoint` with a `session(init)` method that instantiates your session class. Zero boilerplate.
+Creates a `WorkerEntrypoint` with a `session(init)` method that instantiates your session class. Zero boilerplate. `options.env` is an env mapping (see [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)); the env type comes from your session class.
 
 ```ts
 // This is your entire worker export:
 export default tracedWorker(MySession)
+
+// Read other vars for the Root Logger:
+export default tracedWorker(MySession, {
+  env: { service: 'SERVICE_NAME', version: (env) => env.CF_VERSION_METADATA.id },
+})
 
 // Or extend it if you need scheduled(), queue(), etc:
 export default class extends tracedWorker(MySession) {
@@ -337,16 +375,25 @@ All workers in the chain share the same `traceId`.
 
 ### `TracedEntrypoint<Env>`
 
-Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Override `loggerOptions` to customize.
+Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Override the `envMapping` getter to read other vars (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)), or override `loggerOptions` to build the options yourself.
 
 ```ts
-import { TracedEntrypoint, TracedSession, type SessionInit } from 'loggercf/workers'
+import {
+  TracedEntrypoint,
+  TracedSession,
+  type EnvMapping,
+  type SessionInit,
+} from 'loggercf/workers'
 
 class MySession extends TracedSession<Env> {
   /* ... */
 }
 
 export default class extends TracedEntrypoint<Env> {
+  protected override get envMapping(): EnvMapping<Env> {
+    return { version: (env) => env.CF_VERSION_METADATA.id }
+  }
+
   session(init: SessionInit) {
     return new MySession(init, this.rootLogger, this.env)
   }

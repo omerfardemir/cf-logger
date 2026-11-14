@@ -12,9 +12,10 @@
       "head_sampling_rate": 1,
     },
   },
+  // `version` comes from this binding through tracedWorker's env mapping (src/index.ts).
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "vars": {
     "ENVIRONMENT": "development",
-    "VERSION": "1.0.0",
     "NAME": "math-test",
     "LOG_LEVEL": "debug",
   },
