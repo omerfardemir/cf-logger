@@ -85,7 +85,7 @@ app.use(useLogger((c) => createLogger(loggerOptionsFromEnv(c.env)))) // a new Ro
 
 ### Per-request data goes in Context Fields
 
-Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `runWithLogger`, or call `setLoggerContext({ ... })` inside the Logging Context. Every later line in that context carries them, including `useLogger`'s `request.end` and lines from code that calls `getLogger()`. `useLogger` already adds `requestId`.
+Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `runWithLogger`, or call `setLoggerContext({ ... })` inside the Logging Context. Every later line in that context carries them, including `useLogger`'s `request.end` and lines from code that calls `getLogger()`. `useLogger` already adds `requestId`, and `cfRay` when the request has a `cf-ray` header.
 
 ```ts
 import { Hono } from 'hono'
@@ -110,6 +110,30 @@ const log = rootLogger.child({ requestId }) // only this object carries it; getL
 ```
 
 Context Fields do not cross RPC on their own. To carry them to another Worker, pass them as the last argument of `withTrace` or `tracedSession`.
+
+### Request ID in Hono
+
+`useLogger` reuses an incoming `X-Request-Id` only when it is 1 to 128 characters of `A-Z a-z 0-9 _ - = : .`; otherwise it falls back to `c.var.requestId` set by an earlier middleware, then generates a UUID. The chosen ID is on every line, in `c.var.requestId`, and in the `X-Request-Id` response header. When the request has a `cf-ray` header, every line also gets `cfRay`. Configure it with the second argument, not with your own header parsing:
+
+```ts
+import { Hono } from 'hono'
+import { createLogger } from 'loggercf'
+import { useLogger } from 'loggercf/hono'
+
+const app = new Hono()
+app.use(
+  useLogger(createLogger({ service: 'api' }), {
+    requestId: {
+      from: ['cf-ray', 'x-request-id'], // header names or (c) => string | undefined, first valid wins
+      trustIncoming: true, // false: ignore `from`; c.var.requestId from your own middleware still applies
+      // validate: RegExp | (id, c) => boolean, replaces the default check and its 128 cap
+      // generate: (c) => string, used when no source is valid
+    },
+  }),
+)
+
+export default app
+```
 
 ### Context helpers need a Logging Context
 

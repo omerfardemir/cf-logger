@@ -15,7 +15,7 @@ pnpm add hono
 | Import             | Contents                                                                                                                           |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
 | `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
-| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware                                                                                        |
+| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware; `UseLoggerOptions`, `RequestIdOptions`, `RequestIdSource` types                       |
 | `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`                                                  |
 
 ## How Trace Propagation Works
@@ -193,13 +193,13 @@ const logger = createLogger(loggerOptionsFromEnv(env))
 
 ## Hono Middleware (`loggercf/hono`)
 
-### `useLogger(loggerOrFactory)`
+### `useLogger(loggerOrFactory, options?)`
 
 Creates a Hono middleware that:
 
-1. Reads `X-Request-Id` from the request or generates a new UUID
+1. Picks the request ID: a valid incoming one, otherwise a new UUID (see [Request ID](#request-id))
 2. Opens a Logging Context via `runWithLogger`, continuing `traceparent` / `tracestate` from the request
-3. Adds `requestId` to the Logging Context's fields so it appears on every log line
+3. Adds `requestId` (and `cfRay` when the request has a `cf-ray` header) to the Logging Context's fields so they appear on every log line
 4. Sets `c.var.logger`, `c.var.requestId`, and `c.var.traceId` for use in route handlers
 5. Sets response headers: `X-Request-Id`, `X-Trace-Id`, `traceparent` (and `tracestate` when present)
 6. Lets Hono own error responses, then logs `request.error` and `request.end` using the final `c.res.status`
@@ -224,6 +224,48 @@ app.get('/', (c) => {
   return c.text('ok')
 })
 ```
+
+#### Request ID
+
+Any client can send an `X-Request-Id`, so `useLogger` only reuses one that looks like an ID. The first valid value wins, in this order:
+
+1. Each source in `requestId.from`, in order. The default is `['x-request-id']`.
+2. `c.var.requestId`, when an earlier middleware set it (for example `generateId`).
+3. `requestId.generate(c)`, by default `crypto.randomUUID()`.
+
+Every value from steps 1 and 2 must pass `requestId.validate`. The default accepts 1 to 128 characters of `A-Z a-z 0-9 _ - = : .` (`/^[\w\-=:.]{1,128}$/`), which covers UUIDs and `cf-ray` values. A value that fails, such as a 100 KB string or one with spaces or quotes, is skipped, so the line, `c.var.requestId` and the `X-Request-Id` response header carry the next valid value or a generated one. The generated ID is not validated.
+
+```ts
+import { Hono } from 'hono'
+import { useLogger } from 'loggercf/hono'
+import { createLogger } from 'loggercf'
+
+const logger = createLogger({ service: 'api' })
+const app = new Hono()
+
+app.use(
+  useLogger(logger, {
+    requestId: {
+      // a source is a header name (case-insensitive) or a function (c) => string | undefined
+      from: ['cf-ray', 'x-request-id'], // prefer Cloudflare's Ray ID, then the client's header
+      trustIncoming: true, // false: ignore every source in `from`
+      validate: /^[\w\-=:.]{1,128}$/, // or (id, c) => boolean; replaces the default, length cap included
+      generate: () => crypto.randomUUID(),
+    },
+  }),
+)
+```
+
+| Option          | Default               | Effect                                                                                                                                |
+| --------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `from`          | `['x-request-id']`    | Sources to read, in order. `[]` reads none. `c.var.requestId` is always tried after them. An invalid header name throws.              |
+| `trustIncoming` | `true`                | `false` skips every source in `from`, so `useLogger` reads no request header for the ID. `c.var.requestId` is still used (see below). |
+| `validate`      | 1–128 of `\w - = : .` | A `RegExp` or `(id, c) => boolean`. Applies to `from` sources and `c.var.requestId`. Anchor a pattern and bound its length.           |
+| `generate`      | `crypto.randomUUID()` | `(c) => string`, called only when no source gives a valid ID.                                                                         |
+
+With `trustIncoming: false`, `c.var.requestId` is still read, because your own middleware set it. A middleware that copies a client header into it, such as `generateId({ contextKey: 'requestId', headerName: 'X-Request-Id' })`, therefore still lets the client choose the ID, subject to `validate`.
+
+When the request has a `cf-ray` header, its value is also recorded as `cfRay` on every line, whether or not it is the request ID and whatever `trustIncoming` says. Use it to look a request up in Cloudflare's own logs. It must pass the default format check above (a custom `validate` does not apply to it); otherwise `cfRay` is left out. Cloudflare sets `cf-ray` at its edge, so it is trustworthy on a deployed Worker; under `wrangler dev`, in tests or on Node.js a client can send any value.
 
 `useLogger()` does not catch, create, or replace error responses. It lets Hono run downstream handlers and app-level `onError()` normally, then checks `c.error` after `await next()`. Failed requests emit `request.error` with the final `c.res.status`; all requests emit `request.end` with the final `c.res.status`.
 
