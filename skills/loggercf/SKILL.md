@@ -253,9 +253,12 @@ export default withLogging(SearchWorker, { spans: true, session: true })
 ```
 
 - A direct call has no Trace Carrier, so it starts a new root trace. Callers that move to `withTrace(env.SVC, (s) => s.search(q))` continue their own trace instead; migrate them one at a time. Type the binding as `SearchService & TracedServiceBinding<SearchService>` while both styles are in use.
-- `withLogging` changes nothing a caller sees: same RPC methods, same return values, the same error thrown. It never retries or catches. `session: true` is the one addition: a `session(init)` method, which must not already exist on the class.
+- `withLogging` changes nothing a caller sees: same RPC methods, same return values, the same error thrown. It never retries or catches. `session: true` is the one addition: a `session(init)` method. The class must not already have a `session` method or getter, own or inherited.
 - `scheduled`, `queue` and `tail` are not wrapped. Open a Logging Context per unit of work yourself (`runWithLogger`, one per queue message).
-- It takes the same Env Mapping as `tracedWorker`: `withLogging(C, { env: { version: ... } })`.
+- Only method calls are wrapped. A getter read over RPC, and the body of an `async *` method (it runs on each `.next()`, after the call has returned), log outside the Logging Context. A sync method that returns an un-awaited `RpcPromise` gets a span that ends at once; make it `async` and `await` the call to time it.
+- A method that calls another public method (`this.search()`) stays in the caller's Logging Context: the child Span is `C.search`, but `rpcMethod` stays the caller's.
+- Wrap a class once. Wrapping the result again with the same options returns it; other options, or wrapping a subclass of it, throw.
+- It takes the same Env Mapping as `tracedWorker`: `withLogging(C, { env: { version: ... } })`. A `TracedEntrypoint` subclass keeps its own `envMapping` instead; passing `env` to it throws.
 
 ### Log call shape
 

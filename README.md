@@ -536,14 +536,17 @@ export default withLogging(SearchWorker, { spans: true })
 
 - Each RPC method call, and `fetch`, gets its own Logging Context from the isolate's Root Logger, built with `loggerOptionsFromEnv(this.env, options.env)` and shared with `TracedEntrypoint` and `tracedWorker`. Every line in it carries the Context Fields `rpcMethod` (the method name) and `entrypoint` (the class name).
 - A plain RPC call carries no Trace Carrier, so each call starts a new root trace. `fetch` continues an incoming `traceparent` header.
-- A public method called from another one (`this.normalize(q)`) stays in the caller's Logging Context, as a child Span when `spans` is on.
+- A public method called from another one (`this.normalize(q)`) stays in the caller's Logging Context, as a child Span when `spans` is on. Its lines keep the caller's `rpcMethod`: when `nested()` calls `this.search()`, the child Span is `X.search`, but every line in it says `rpcMethod: 'nested'`.
 - The class is wrapped, not changed: arguments, return values (sync or async, an `RpcTarget` or a stub included) and thrown errors pass through as they are. The returned class has exactly the RPC methods `Class` has. `scheduled`, `queue`, `tail` and the other handlers are inherited unchanged; they log through the [Default Logger](#setdefaultloggerlogger), which the constructor registers unless one is already set (first seen wins).
 - `entrypoint` is the class's `name`. A build that minifies class names changes it.
+- A `TracedEntrypoint` subclass keeps its own `rootLogger`, so its `envMapping` / `loggerOptions` overrides apply. Passing `env` as well throws; override `envMapping` instead.
+- Wrapping a class that `withLogging` returned gives back the same class when the options are the same, and throws when they differ. Wrapping a subclass of one throws too. This keeps each call to one `span.end`.
+- Only method calls are wrapped. These run outside the Logging Context: a getter read over RPC, and the body of an `async *` method, which runs on each `.next()`, after the call has returned. A sync method that returns an un-awaited `RpcPromise` gets a span that ends when the method returns, not when the promise settles (`spans` treats only a real `Promise` as async). Make the method `async` and `await` the call to time it.
 
 | Option    | Default | Description                                                                                                                                                                                              |
 | --------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `spans`   | `false` | Record each call as a [Span](#span-logging) named `<Class>.<method>`: one `span.end` with duration and status, at `ERROR` with `err` when the method throws or rejects. The error is rethrown unchanged. |
-| `session` | `false` | Add `session(init)`, which returns a Traced Session over the same methods (see below). Throws if the class already defines `session`.                                                                    |
+| `session` | `false` | Add `session(init)`, which returns a Traced Session over the same methods (see below). Throws if the class already has a `session` method or getter, own or inherited.                                   |
 | `env`     | `{}`    | [Env Mapping](#loggeroptionsfromenvenv-mapping) for the Root Logger.                                                                                                                                     |
 
 #### Migrating to Traced Sessions one caller at a time
