@@ -1039,7 +1039,9 @@ describe('useLogger fields and endFields', () => {
       return c.text('ok')
     })
     await app.request('/x')
-    expect(entries()).toHaveLength(3)
+    // request.start, the handler line, the WARN naming the dropped keys, request.end
+    expect(entries()).toHaveLength(4)
+    expect(entries().filter((e) => e.droppedKeys !== undefined)).toHaveLength(1)
     for (const entry of entries()) {
       expect(entry.tenant).toBe('t-1')
       expect(entry).not.toHaveProperty('cfRay')
@@ -1081,6 +1083,52 @@ describe('useLogger fields and endFields', () => {
     app.get('/x', (c) => c.text('ok'))
     await app.request('/x')
     expect(end()).toMatchObject({ userAgent: 'mine', cf: 'mine' })
+  })
+})
+
+describe('useLogger owned keys a hook returns', () => {
+  beforeEach(() => _reset())
+
+  it('warns once per hook, naming the dropped keys but never their values', async () => {
+    const { lines, entries, ends, app } = optionsApp({
+      fields: () => ({ tenant: 't-1', requestId: 'forged-secret-1' }),
+      endFields: () => ({ userId: 'u-1', statusCode: 'forged-secret-2', route: 'forged-secret-3' }),
+    })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    await app.request('/')
+    expect(ends()).toHaveLength(2)
+    const dropped = entries().filter((e) => e.droppedKeys !== undefined)
+    expect(dropped).toHaveLength(2)
+    expect(dropped[0]).toMatchObject({ level: 'WARN', hook: 'fields', droppedKeys: ['requestId'] })
+    expect(dropped[1]).toMatchObject({
+      level: 'WARN',
+      hook: 'endFields',
+      droppedKeys: ['route', 'statusCode'],
+    })
+    for (const line of lines) expect(line).not.toContain('forged-secret')
+  })
+
+  it('writes no dropped-keys WARN when a hook returns none of the owned keys', async () => {
+    const { entries, app } = optionsApp({
+      fields: () => ({ tenant: 't-1' }),
+      endFields: () => ({ userId: 'u-1' }),
+    })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    expect(entries().filter((e) => e.level === 'WARN')).toEqual([])
+  })
+
+  it('names userAgent and cf only when include turns them on', async () => {
+    const { entries, app } = optionsApp({
+      include: { userAgent: true },
+      endFields: () => ({ userAgent: 'mine', cf: 'mine' }),
+    })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    const dropped = entries().filter((e) => e.droppedKeys !== undefined)
+    expect(dropped).toHaveLength(1)
+    expect(dropped[0].droppedKeys).toEqual(['userAgent'])
   })
 })
 

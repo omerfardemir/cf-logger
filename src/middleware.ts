@@ -135,6 +135,13 @@ const HOOK_FAILURE: Record<Hook, string> = {
   level: 'useLogger: the level option failed; request.end uses the default level',
 }
 
+type FieldsHook = 'fields' | 'endFields'
+
+const DROPPED_KEYS: Record<FieldsHook, string> = {
+  fields: 'useLogger: the fields option returned keys useLogger owns; they were dropped',
+  endFields: 'useLogger: the endFields option returned keys useLogger owns; they were dropped',
+}
+
 /**
  * A "warn once" reporter, one per `useLogger()` call: the first call for each `key` writes one
  * WARN through the given logger, later calls for that key write nothing, so a callback that
@@ -505,6 +512,12 @@ export function useLogger<T extends LogFields = LogFields>(
   const keepFields = (value: LogFields | undefined) => withoutKeys(value, protectedKeys)
   const reportHookFailure = (logger: Logger, hook: Hook, failure: HookFailure) =>
     warn(logger, hook, HOOK_FAILURE[hook], { hook, ...failure })
+  // Owned keys are dropped from a fields/endFields result: one WARN per hook names them (key
+  // names only, never values), so the removal stays visible.
+  const reportDropped = (logger: Logger, hook: FieldsHook, result: HookFields | undefined) => {
+    if (!result?.dropped.length) return
+    warn(logger, `${hook}.dropped`, DROPPED_KEYS[hook], { hook, droppedKeys: result.dropped })
+  }
 
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
@@ -535,6 +548,7 @@ export function useLogger<T extends LogFields = LogFields>(
       c.set('traceId' as never, trace.traceId as never)
 
       if (appFields?.failure) reportHookFailure(logger, 'fields', appFields.failure)
+      reportDropped(logger, 'fields', appFields?.value)
       if (requestStart) {
         logger.info(
           { ...details, method, path, route: startRoute },
@@ -560,6 +574,7 @@ export function useLogger<T extends LogFields = LogFields>(
 
       const endExtra = endFields ? callHook(() => endFields(c), isFields, keepFields) : undefined
       if (endExtra?.failure) reportHookFailure(logger, 'endFields', endExtra.failure)
+      reportDropped(logger, 'endFields', endExtra?.value)
 
       let endLevel: LogLevel = 'error'
       if (!escaped) {
