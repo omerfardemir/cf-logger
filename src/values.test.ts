@@ -746,3 +746,45 @@ describe('repeated long strings count against the budget', () => {
     expect(parsed.l).toEqual([long, long, long])
   })
 })
+
+describe('boxed primitives are told by their brand, not their tag', () => {
+  class Money {
+    amount = 5
+    get [Symbol.toStringTag]() {
+      return 'Number'
+    }
+  }
+  class Throwing {
+    a = 1
+    get [Symbol.toStringTag](): string {
+      throw new Error('no tag')
+    }
+  }
+  const sh = { x: 1 }
+
+  const fakes = () => ({
+    m: new Money(),
+    t: new Throwing(),
+    n: Object.assign(Object.create(Number.prototype), { a: 2 }),
+    s: Object.create(Symbol.prototype),
+  })
+
+  it('an object with a fake tag or prototype is written as an object, on both paths', () => {
+    const expected = { m: { amount: 5 }, t: { a: 1 }, n: { a: 2 }, s: {} }
+    expect(JSON.parse(stringifyRecord(fakes()))).toEqual(expected)
+    expect(JSON.parse(stringifyRecord({ ...fakes(), p: sh, q: sh }))).toMatchObject(expected)
+  })
+
+  it('real boxed values are unwrapped the same way on both paths', () => {
+    const boxed = {
+      n: Object(1),
+      s: Object('s'),
+      b: Object(false),
+      big: Object(10n),
+      sym: Object(Symbol('d')),
+    }
+    const expected = { n: 1, s: 's', b: false, big: '10', sym: 'Symbol(d)' }
+    expect(JSON.parse(stringifyRecord({ ...boxed }))).toEqual(expected)
+    expect(JSON.parse(stringifyRecord({ ...boxed, p: sh, q: sh }))).toMatchObject(expected)
+  })
+})

@@ -580,7 +580,8 @@ function standIn(walk: Walk, text: string): string {
  * are written, `undefined` is left out of objects and `null` in arrays, boxed
  * primitives are unwrapped. Beyond JSON: a `Map` is an array of
  * `[key, value]` pairs, a `Set` an array; a `BigInt` is its digits, a
- * function `[Function: name]`, a symbol `Symbol(description)`; a real cycle is `"[Circular]"` (a `toJSON` result that refers back to
+ * function `[Function: name]`, a symbol `Symbol(description)` (boxed or
+ * not); a real cycle is `"[Circular]"` (a `toJSON` result that refers back to
  * its object included); a repeated object, or a repeated long string, is
  * written again within a budget per line (see `MAX_REWRITTEN_VALUES`), then
  * is `"[Repeated]"`; a getter or a `toJSON` that throws is `unserializable()`
@@ -657,8 +658,42 @@ function nonJSONText(value: unknown): string | undefined {
   return undefined
 }
 
-/** `Object.prototype.toString` of the boxed primitives JSON unwraps, and of a boxed `BigInt` (written as its digits). */
-const BOXED = new Set(['[object Number]', '[object String]', '[object Boolean]', '[object BigInt]'])
+/**
+ * Each primitive JSON unwraps when boxed, plus `BigInt` (written as its
+ * digits) and `Symbol` (written as `Symbol(description)`): its prototype, and
+ * its `valueOf`, which throws unless its `this` really is that boxed
+ * primitive, whatever its `Symbol.toStringTag` says, and never runs user code.
+ */
+const BOXES: readonly [object, (this: unknown) => unknown][] = [
+  [Number.prototype, Number.prototype.valueOf],
+  [String.prototype, String.prototype.valueOf],
+  [Boolean.prototype, Boolean.prototype.valueOf],
+  [BigInt.prototype, BigInt.prototype.valueOf],
+  [Symbol.prototype, Symbol.prototype.valueOf],
+]
+
+/**
+ * The primitive inside a boxed primitive (`new Number(1)`, `Object(1n)`),
+ * told by its brand, as `JSON.stringify` tells it. Only an object that
+ * inherits from that primitive's prototype is checked, since a failed check
+ * throws, which is slow; a boxed primitive moved to another prototype
+ * (`Object.setPrototypeOf`) is written as an object.
+ *
+ * @param {object} object - Any object that is not a plain object or an array.
+ * @returns {{ value: unknown } | undefined} The primitive, or `undefined` when `object` is not boxed.
+ * @throws When its prototype cannot be read (a `Proxy` whose `getPrototypeOf` throws).
+ */
+function unbox(object: object): { value: unknown } | undefined {
+  for (const [prototype, valueOf] of BOXES) {
+    if (!Object.prototype.isPrototypeOf.call(prototype, object)) continue
+    try {
+      return { value: valueOf.call(object) }
+    } catch {
+      return undefined // a fake: `Object.create(Number.prototype)`
+    }
+  }
+  return undefined
+}
 
 /**
  * The object part of `toJSONValue()`: its items or entries, each converted.
@@ -673,12 +708,11 @@ function objectToJSONValue(object: object, walk: Walk): unknown {
   let length = 0
   let boxed: { value: unknown } | undefined
   try {
-    if (!isPlainObject(object) && BOXED.has(Object.prototype.toString.call(object)))
-      boxed = { value: object.valueOf() } // `new Number(1)`, as JSON writes it
-    else if (object instanceof Map) items = Array.from(object)
+    if (object instanceof Map) items = Array.from(object)
     else if (object instanceof Set) items = Array.from(object)
     else if (Array.isArray(object)) items = object
-    else keys = Object.keys(object)
+    else if (!isPlainObject(object)) boxed = unbox(object) // `new Number(1)`, as JSON writes it
+    if (!items && !boxed) keys = Object.keys(object)
     length = items?.length ?? 0
   } catch (thrown) {
     return standIn(walk, unserializable(thrown))
@@ -743,8 +777,8 @@ const NEEDS_WALK = new Error('needs walk')
  * budget, which its message's placeholders may already have spent from.
  *
  * Most lines take a fast path: native `JSON.stringify`, which gives up on
- * the first object or long string seen twice (a repeat or a cycle), or
- * getter or `toJSON` that throws. Those lines are written again
+ * the first object or long string seen twice (a repeat or a cycle), boxed
+ * symbol, or getter or `toJSON` that throws. Those lines are written again
  * by the `toJSONValue()` walk, so a getter on them runs twice.
  *
  * @param {LogRecord} record - The record to serialize.
@@ -769,6 +803,7 @@ export function stringifyRecord(record: LogRecord): string {
         if (seen.has(value)) throw NEEDS_WALK
         seen.add(value)
         if (value instanceof Map || value instanceof Set) return Array.from(value)
+        if (Object.getPrototypeOf(value) === Symbol.prototype) throw NEEDS_WALK // a boxed symbol: JSON writes `{}`
         return value
       })
     } catch {
