@@ -68,23 +68,55 @@ export function functionText(fn: { name: string }): string {
   return `[Function: ${fn.name || 'anonymous'}]`
 }
 
-/** `JSON.stringify` for `%j`/`%o`/`%O`, never throwing. */
-function tryStringify(value: unknown): string {
-  try {
-    return String(JSON.stringify(value))
-  } catch {
-    return '"[Circular]"'
-  }
-}
-
 /** Sentinel: the placeholder could not render its argument. */
 const UNRENDERED = Symbol('unrendered')
 
 /**
+ * Whether `value` contains itself, as `JSON.stringify` sees it (own
+ * enumerable values). Shared references that are not ancestors are not cycles.
+ *
+ * @param {unknown} value - The value to walk.
+ * @param {object[]} [ancestors] - The objects on the path to `value`.
+ * @returns {boolean} `true` for a real cycle.
+ * @throws When reading a value throws (a getter): the caller handles it.
+ */
+function hasCycle(value: unknown, ancestors: object[] = []): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  if (ancestors.includes(value)) return true
+  ancestors.push(value)
+  try {
+    return Object.values(value).some((child) => hasCycle(child, ancestors))
+  } finally {
+    ancestors.pop()
+  }
+}
+
+/**
+ * `JSON.stringify` for `%j`/`%o`/`%O`, never throwing. A real cycle is
+ * `"[Circular]"`, as with pino. Anything else JSON cannot write (a `BigInt`,
+ * a `toJSON` that throws, a symbol) is `UNRENDERED`, so it is routed instead.
+ *
+ * @param {unknown} value - The placeholder's argument.
+ * @returns {string | typeof UNRENDERED} The JSON text, or `UNRENDERED`.
+ */
+function stringify(value: unknown): string | typeof UNRENDERED {
+  try {
+    return JSON.stringify(value) ?? UNRENDERED
+  } catch {
+    try {
+      return hasCycle(value) ? '"[Circular]"' : UNRENDERED
+    } catch {
+      return UNRENDERED // a getter that throws: routing reports it
+    }
+  }
+}
+
+/**
  * Render one argument for placeholder `code`, or `UNRENDERED` when the
  * placeholder would not print it. `%s %d %i %f` never render an object or an
- * array (`[object Object]`, `NaN` would hide its fields), so it is routed like
- * a trailing argument instead.
+ * array (`[object Object]`, `NaN` would hide its fields), and `%j %o %O` never
+ * render an `Error` (`{}` would hide its stack) or a value JSON cannot write,
+ * so it is routed like a trailing argument instead.
  */
 function render(code: string, value: unknown): string | typeof UNRENDERED {
   switch (code) {
@@ -98,10 +130,10 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
     case 'j':
     case 'o':
     case 'O':
-      if (value === undefined) return UNRENDERED
+      if (value === undefined || value instanceof Error) return UNRENDERED
       if (typeof value === 'string') return `'${value}'`
       if (typeof value === 'function') return value.name || '<anonymous>'
-      return tryStringify(value)
+      return stringify(value)
     case 's':
       if (typeof value === 'object' && value !== null) return UNRENDERED
       try {
@@ -119,7 +151,8 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
  *
  * Each `%` sequence takes the next argument in order. When it cannot print
  * that argument (`%d` with `null`, `%j` with `undefined`, `%s %d %i %f` with
- * an object or array, an unknown sequence such as `% ` or `%c`), the sequence
+ * an object or array, `%j %o %O` with an `Error` or a value JSON cannot write
+ * other than a cycle, an unknown sequence such as `% ` or `%c`), the sequence
  * stays in the text and the argument is returned in `unprinted` instead.
  * `%%` becomes `%` only when there are arguments, like `console.log`.
  *

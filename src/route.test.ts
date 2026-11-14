@@ -49,6 +49,37 @@ describe('formatMessage', () => {
     expect(formatMessage(template, args)).toEqual({ message, unprinted })
   })
 
+  it('%j %o %O do not print an Error; it is returned unprinted', () => {
+    const err = new Error('boom')
+    for (const code of ['j', 'o', 'O']) {
+      expect(formatMessage(`failed: %${code}`, [err])).toEqual({
+        message: `failed: %${code}`,
+        unprinted: [err],
+      })
+    }
+  })
+
+  it('%j %o %O keep a value JSON cannot write, unless it is a real cycle', () => {
+    const throwing = {
+      toJSON() {
+        throw new Error('nope')
+      },
+    }
+    const nested = { n: 10n }
+    const sym = Symbol('s')
+    for (const value of [10n, nested, throwing, sym]) {
+      expect(formatMessage('v=%j', [value])).toEqual({ message: 'v=%j', unprinted: [value] })
+    }
+    const cycle: Record<string, unknown> = { n: 10n }
+    cycle.self = cycle
+    expect(formatMessage('v=%o', [cycle])).toEqual({ message: 'v="[Circular]"', unprinted: [] })
+    const shared = { a: 1 }
+    expect(formatMessage('v=%j', [{ x: shared, y: shared }])).toEqual({
+      message: 'v={"x":{"a":1},"y":{"a":1}}',
+      unprinted: [],
+    })
+  })
+
   it('never throws on values that cannot be converted', () => {
     const sym = Symbol('s')
     const bare = Object.create(null) as object
@@ -339,6 +370,16 @@ describe('log call examples (issue #21), in both call styles', () => {
     expect(r).toMatchObject({ level: 'ERROR', message: 'failed id1' })
     expect(r).not.toHaveProperty('args')
     expect(r).not.toHaveProperty('err')
+  })
+
+  it('an Error under %o is err, not {}', () => {
+    const err = new Error('boom')
+    const r = record((l) => l.error('failed: %o', err))
+    expect(r).toMatchObject({ message: 'failed: %o', err: { message: 'boom', stack: err.stack } })
+  })
+
+  it('a BigInt under %j is a word, not "[Circular]"', () => {
+    expect(record((l) => l.info('v=%j', 10n))).toMatchObject({ message: 'v=%j 10' })
   })
 
   it('two errors: err and errors', () => {
