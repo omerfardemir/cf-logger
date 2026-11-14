@@ -97,6 +97,21 @@ Changes to Traced Sessions (`loggercf/workers`):
 - `traced` and `logger` are no longer RPC members of a Traced Session (a `TracedSession` subclass, `tracedWorker`'s, or `withLogging({ session: true })`'s). In 0.0.1 a caller holding a session stub could call `session.traced(...)` or read `session.logger`; now both fail as missing methods. `this.traced(fn, op)` and `this.logger` inside a subclass work as before.
 - They are now instance properties typed `protected readonly`, so a subclass can no longer override `traced()` or the `logger` getter (TypeScript reports it), and `super.traced(...)` no longer exists. Give such a helper another name and call `this.traced` from it. In plain JavaScript (or past a `@ts-expect-error`) a subclass member named `traced` or `logger` replaces the helper and is callable over RPC like any other method.
 
+Changes to `TracedEntrypoint` (`loggercf/workers`):
+
+- Its `envMapping`, `loggerOptions` and `rootLogger` getters are gone. They were on the prototype, so a Worker with a Service Binding to a `TracedEntrypoint` subclass or a `tracedWorker` entrypoint could read `loggerOptions` (values derived from the receiver's env), read `rootLogger`, and call the `envMapping` derive functions with input of its choice. Now all three fail as missing methods over RPC.
+- The hooks are now getters keyed by symbols, the statics `TracedEntrypoint.envMapping`, `TracedEntrypoint.loggerOptions` and `TracedEntrypoint.rootLogger` (JSRPC never exposes a symbol-keyed member). Rename each override and read:
+
+  | Before                                   | Now                                                         |
+  | ---------------------------------------- | ----------------------------------------------------------- |
+  | `protected override get envMapping()`    | `protected override get [TracedEntrypoint.envMapping]()`    |
+  | `protected override get loggerOptions()` | `protected override get [TracedEntrypoint.loggerOptions]()` |
+  | `protected override get rootLogger()`    | `protected override get [TracedEntrypoint.rootLogger]()`    |
+  | `this.rootLogger`                        | `this[TracedEntrypoint.rootLogger]`                         |
+  | `super.loggerOptions`                    | `super[TracedEntrypoint.loggerOptions]`                     |
+
+  A getter left under an old name is no longer called by `TracedEntrypoint`, and it is an RPC member like any getter your subclass declares. A getter marked `override` fails to compile, so TypeScript finds these for you; without `override`, or in plain JavaScript, find and rename them yourself. `tracedWorker(S, { env })` keeps its mapping behind the same hook, so nothing changes for its users.
+
 Changes to the Hono middleware (`useLogger`):
 
 - `request.error` lines are gone. A request that failed has one `request.end` with `err`. Move any alert or query on `request.error` to `request.end` with `err` present, or to its level.
@@ -158,7 +173,7 @@ getLogger().info('starting') // service, environment and version from env
 - Pass the Root Logger itself, not a logger taken from inside a Logging Context. A `.child({ ... })` of it is accepted, but the fields passed to `.child()` go on every line logged outside a context, so they must be per-process data too.
 - `setDefaultLogger` replaces the current default, including one registered automatically. Calling it again replaces it again. The one exception is a logger taken from `getLogger()` outside a Logging Context (see below).
 - The default is looked up when each line is written, not when `getLogger()` is called. A shared package that keeps `const log = getLogger()` at its top level (which runs before your app's module body) still logs with your `service` once the default is registered; only lines written before that say `service: 'unknown'`. `getLogger().child({...})` at module scope is fine too: the child follows the Default Logger as well. Registering a logger taken from `getLogger()` outside a Logging Context changes nothing: `setDefaultLogger(getLogger())` is a no-op. A `.child()` of it is ignored too while no default is set (its fields are dropped), so a later `useLogger`, `TracedEntrypoint` or `setDefaultLogger` call can still register your Root Logger; once a default is set, it registers a child of that default.
-- The logger you register or pass to `useLogger`, and a `TracedEntrypoint`'s `rootLogger` / `envMapping` / `loggerOptions` overrides, must not depend on the request or on `ctx.props`: the first one registered stays the default for the isolate.
+- The logger you register or pass to `useLogger`, and a `TracedEntrypoint`'s [hook](#tracedentrypointenv) overrides, must not depend on the request or on `ctx.props`: the first one registered stays the default for the isolate.
 - A Worker that exports several entrypoints with different services should register its default explicitly at module scope (`defaultLoggerFromEnv()` or `setDefaultLogger()`). Otherwise whichever entrypoint class is constructed first in an isolate wins.
 
 `useLogger(rootLogger)`, `TracedEntrypoint`, `tracedWorker`, `withLogging`, `withScheduled`, `withQueueMessage`, `withWorkflow` and `defaultLoggerFromEnv` register their Root Logger the first time they see one, unless a default is already set: first seen wins. On Workers, [`defaultLoggerFromEnv()`](#defaultloggerfromenvmapping) builds and registers one from `env` with no setup.
@@ -624,9 +639,20 @@ All workers in the chain share the same `traceId`.
 
 ### `TracedEntrypoint<Env>`
 
-Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Its constructor registers `this.rootLogger` as the [Default Logger](#setdefaultloggerlogger) unless one is already set, so `getLogger()` in `scheduled()`, `queue()` or a plain RPC method logs with its `service`; `tracedWorker()` does the same. Because the constructor reads `rootLogger` until a default is set, build `envMapping` / `loggerOptions` overrides from `this.env`, not from subclass instance fields. Override the `envMapping` getter to read other vars (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)), or override `loggerOptions` to build the options yourself.
+Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and has three hooks: protected getters keyed by the symbols `TracedEntrypoint.envMapping`, `TracedEntrypoint.loggerOptions` and `TracedEntrypoint.rootLogger`, the way `Symbol.iterator` keys an iterator.
+
+| Hook                                   | Default                                                             | Override it to                                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `this[TracedEntrypoint.envMapping]`    | `{}`, so `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` are read  | read other vars or derive fields (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)) |
+| `this[TracedEntrypoint.loggerOptions]` | `loggerOptionsFromEnv(this.env, this[TracedEntrypoint.envMapping])` | build the Logger Options yourself                                                                             |
+| `this[TracedEntrypoint.rootLogger]`    | the Root Logger for those options, built once per isolate           | supply the Root Logger yourself                                                                               |
+
+Hand `this[TracedEntrypoint.rootLogger]` to your Traced Sessions. The constructor registers it as the [Default Logger](#setdefaultloggerlogger) unless one is already set, so `getLogger()` in `scheduled()`, `queue()` or a plain RPC method logs with its `service`; `tracedWorker()` does the same. Because the constructor reads the Root Logger hook until a default is set, build hook overrides from `this.env`, not from subclass instance fields.
+
+**What callers can reach.** A caller holding a Service Binding to the entrypoint can call the methods and read the getters your subclass declares, and nothing else. The hooks are symbol-keyed, and JSRPC never exposes a symbol-keyed member: `env.BIND.loggerOptions` or `env.BIND.envMapping` fails with `The RPC receiver does not implement the method`. For the same reason, key any getter of your own that returns env-derived values with a symbol, or keep it `#private`.
 
 ```ts
+import type { LoggerOptions } from 'loggercf'
 import {
   TracedEntrypoint,
   TracedSession,
@@ -639,12 +665,17 @@ class MySession extends TracedSession<Env> {
 }
 
 export default class extends TracedEntrypoint<Env> {
-  protected override get envMapping(): EnvMapping<Env> {
+  protected override get [TracedEntrypoint.envMapping](): EnvMapping<Env> {
     return { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id }
   }
 
+  // Optional: start from the mapped options and change one.
+  protected override get [TracedEntrypoint.loggerOptions](): LoggerOptions {
+    return { ...super[TracedEntrypoint.loggerOptions], level: 'debug' }
+  }
+
   session(init: SessionInit) {
-    return new MySession(init, this.rootLogger, this.env)
+    return new MySession(init, this[TracedEntrypoint.rootLogger], this.env)
   }
 
   scheduled(controller: ScheduledController) {
@@ -702,7 +733,7 @@ export default withLogging(SearchWorker, { spans: true })
 - `entrypoint` is the class's `name`. A build that minifies class names changes it. An anonymous class (`withLogging(class extends WorkerEntrypoint { ... })`) gets no `entrypoint` field, and its Spans are named by the method alone.
 - Only the methods the class has when it is wrapped are wrapped. Put every RPC method on the class before wrapping it. A method added or overridden in a subclass of the wrapped class (`class Ext extends withLogging(A) { extra() {} }`) runs outside every Logging Context, so extend the wrapped class only to add handlers.
 - The class must extend `WorkerEntrypoint` or `DurableObject` (see [Durable Objects](#durable-objects)). Wrapping anything else throws.
-- A `TracedEntrypoint` subclass keeps its own `rootLogger`, so its `envMapping` / `loggerOptions` overrides apply. Passing `env` as well throws; override `envMapping` instead.
+- A `TracedEntrypoint` subclass keeps its own Root Logger hook, so its `[TracedEntrypoint.envMapping]` / `[TracedEntrypoint.loggerOptions]` overrides apply. Passing `env` as well throws; override `[TracedEntrypoint.envMapping]` instead.
 - Wrapping a class that `withLogging` returned gives back the same class when the options are the same (`spans`, `session`, `fetch` and `env`), and throws when they differ. Wrapping a subclass of one throws too. This keeps each call to one `span.end`.
 - With `session: true`, a field the caller passes named `rpcMethod` or `entrypoint` is replaced by the receiver's.
 - Only method calls are wrapped. A method named like a handler (`trace`, `test`, `email`, `connect`, `queue`, `tail` or `tailStream`) is never wrapped. These run outside the Logging Context: a getter read over RPC, and the body of an `async *` method, which runs on each `.next()`, after the call has returned. A sync method that returns an un-awaited `RpcPromise` gets a span that ends when the method returns, not when the promise settles (`spans` treats only a real `Promise` as async). Make the method `async` and `await` the call to time it.
