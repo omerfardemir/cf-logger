@@ -608,3 +608,85 @@ describe('functions whose name cannot be read', () => {
     expect(entries[0].args).toEqual([[1, '[Unserializable: Error: no item]', 3]])
   })
 })
+
+/** `levels` Errors deep, each with `width` own properties pointing at the next level. */
+function errorGraph(levels: number, width: number): Error {
+  let next: Error | undefined
+  for (let level = levels; level > 0; level--) {
+    const error = new Error(`level ${level}`) as Error & Record<string, unknown>
+    if (next) for (let i = 0; i < width; i++) error[`p${i}`] = next
+    next = error
+  }
+  return next!
+}
+
+describe('an Error is serialized once per line', () => {
+  beforeEach(() => _reset())
+
+  it('an Error graph 5 deep and 20 wide: well under 1 s, with a bounded line', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    const ms = elapsed(() => createLogger({ service: 'svc' }).error(errorGraph(5, 20), 'm'))
+    expect(ms).toBeLessThan(500)
+    expect(lines[0].length).toBeLessThan(1_000_000)
+    const line = JSON.parse(lines[0])
+    expect(line.logError).toBeUndefined()
+    expect(line.err.p0.message).toBe('level 2')
+    expect(line.err.p0.p0.p0.p0.message).toBe('level 5')
+  })
+
+  it('one large Error passed 2,000 times: the line is bounded', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    const big = new Error('x'.repeat(100_000))
+    createLogger({ service: 'svc' }).error('m', ...Array.from({ length: 2000 }, () => big))
+    expect(lines[0].length).toBeLessThan(1_000_000)
+    const line = JSON.parse(lines[0])
+    expect(line.err.message).toBe(big.message)
+    expect(line.errors).toHaveLength(1999)
+    expect(line.errors.at(-1)).toBe('[Repeated]')
+  })
+
+  it('an Error passed twice is written twice, while it fits the budget', () => {
+    const entries = _captureEntries()
+    const e = new Error('twice')
+    createLogger({ service: 'svc' }).error('m', e, e, [e])
+    expect(entries[0].err).toMatchObject({ type: 'Error', message: 'twice' })
+    expect(entries[0].errors).toEqual([entries[0].err])
+    expect(entries[0].args).toEqual([[entries[0].err]])
+  })
+
+  it('a cycle through an Error is still "[Circular]"', () => {
+    const entries = _captureEntries()
+    const a = new Error('a') as Error & { b?: Error }
+    const b = new Error('b', { cause: a })
+    a.b = b
+    createLogger({ service: 'svc' }).error(a, 'm', b)
+    expect(entries[0].err).toMatchObject({ message: 'a', b: { message: 'b', cause: '[Circular]' } })
+    expect(entries[0].errors).toEqual([expect.objectContaining({ message: 'b' })])
+  })
+
+  it('an AggregateError writes its errors, nested like cause', () => {
+    const entries = _captureEntries()
+    const agg = new AggregateError([new Error('e1'), new TypeError('e2'), 'plain'], 'agg')
+    createLogger({ service: 'svc' }).error(agg)
+    expect(entries[0].err).toMatchObject({
+      type: 'AggregateError',
+      message: 'agg',
+      errors: [{ type: 'Error', message: 'e1' }, { type: 'TypeError', message: 'e2' }, 'plain'],
+    })
+  })
+
+  it('an AggregateError holding one Error 2,000 times stays bounded', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    const big = new Error('x'.repeat(100_000))
+    const agg = new AggregateError(
+      Array.from({ length: 2000 }, () => big),
+      'agg',
+    )
+    createLogger({ service: 'svc' }).error(agg)
+    expect(lines[0].length).toBeLessThan(1_000_000)
+    expect(JSON.parse(lines[0]).err.errors.at(-1)).toBe('[Repeated]')
+  })
+})
