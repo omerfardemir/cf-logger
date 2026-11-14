@@ -23,6 +23,7 @@ Imports come from exactly three entry points:
 - **Span**: a named, timed sub-operation, logged once as `span.end` when the trace is sampled: at its `level` (default `info`), or at `WARN` once it reaches its Slow Threshold `slowMs` (at its `level` instead, when that is more severe). A Span that throws is always logged at `ERROR`: as its `span.end`, or for an unsampled trace as one `<operation> failed` line.
 - **Span Fields**: fields that go on one Span's `span.end` line only (`fields` option, `span.set()`), never on other lines or into the Logging Context.
 - **Traced Session**: the RPC target a service binding's `session()` returns. Every method on it continues the caller's trace.
+- **Protected Fields**: what `limits.maxRecordBytes` keeps whole while anything else on a line can be trimmed: `time`, `level`, `message`, the trace IDs, `service`, `environment`, `version`, `err.type` and `err.message`.
 
 ## Pick the API by unit of work
 
@@ -462,6 +463,29 @@ logger.info('loaded order %s', order) // message stays 'loaded order %s', order'
 
 `traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call's objects can't set them, or the other moved keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`, `err`): an object's values for those keys land in `args` instead. Logger bindings (`createLogger`, `.child()`) and Context Fields can't set `time`, `level`, `message`, `errors` or `args` either; their values for those keys land in `args` too. An object's `err`, and a string `message` when the call has no other message, are used while still unset. To read the trace IDs, call `getTraceContext()`.
 
+### Errors with user data, and line size
+
+By default an `Error` is written with every own property, and nothing is cut. Library errors often carry the request or response as own properties (the AI SDK's `APICallError` has `requestBodyValues`, the full prompt). In production, leave those keys out with `omitErrorKeys` and bound each line with `limits`; leave both off locally. loggercf has no key list of its own, so name the keys this app's errors carry.
+
+```ts
+import { createLogger, loggerOptionsFromEnv, omitErrorKeys } from 'loggercf'
+
+declare const env: { ENVIRONMENT?: string }
+
+const logger = createLogger({
+  ...loggerOptionsFromEnv(env),
+  ...(env.ENVIRONMENT === 'production' && {
+    serializeError: omitErrorKeys(['requestBodyValues', 'responseBody']),
+    limits: { maxStringLength: 8_192, maxRecordBytes: 200_000 },
+  }),
+})
+```
+
+- `serializeError(err, defaultSerialize)` writes every `Error` on the line, at any depth; `omitErrorKeys(keys, serializer?)` builds one, and lists what it left out as `omitted`. Don't strip keys from an `Error` before logging it, and don't log `err.message` instead of `err`: you lose the stack and `cause`.
+- A serializer that throws never breaks the log call: that `Error` is written the default way, with `serializeErrorFailed`.
+- `maxStringLength` cuts longer strings to that many characters plus `…[truncated from <n> chars]`. `maxRecordBytes` trims a larger line to fit, largest values first, keeping the Protected Fields. Workers Logs caps each log at 256 KB and truncates a larger one, which breaks its JSON; `200_000` leaves room.
+- The Workers helpers (`withLogging`, `withScheduled`, `withQueueMessage`, `withWorkflow`, `tracedWorker`, `defaultLoggerFromEnv`) read the limits from the vars `LOG_MAX_STRING_LENGTH` and `LOG_MAX_RECORD_BYTES`, and take `serializeError` as an option (`defaultLoggerFromEnv(mapping, { serializeError })`). Choose it at module scope from `env` (`import { env } from 'cloudflare:workers'`), once per Worker. A `TracedEntrypoint` sets both in its `[TracedEntrypoint.loggerOptions]` getter.
+
 ## Wrangler setup
 
 ```jsonc
@@ -481,7 +505,8 @@ logger.info('loaded order %s', order) // message stays 'loaded order %s', order'
 - `loggerOptionsFromEnv(env)`, `tracedWorker`, `withLogging` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'` for a missing one).
 - `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error`, `fatal` or `silent`. `silent` writes nothing at all. Any other value (including `DEBUG` and `SILENT`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value.
 - `LOG_SPAN_LEVEL` (a lowercase level, not `silent`) and `LOG_SPAN_SLOW_MS` (milliseconds, `0` or more) set the Root Logger's Span Defaults. Unset, Spans write at `info` with no Slow Threshold. An invalid value is ignored, with one `WARN` per isolate.
-- To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`, `spanLevel`, `spanSlowMs`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to a `[TracedEntrypoint.envMapping]` getter on a `TracedEntrypoint` subclass.
+- `LOG_MAX_STRING_LENGTH` (an integer, `1` or more) and `LOG_MAX_RECORD_BYTES` (an integer, `1024` or more) set the Root Logger's `limits`. Unset, nothing is cut: set them in the production environment's `vars` only. An invalid value is ignored, with one `WARN` per isolate.
+- To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`, `spanLevel`, `spanSlowMs`, `maxStringLength`, `maxRecordBytes`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to a `[TracedEntrypoint.envMapping]` getter on a `TracedEntrypoint` subclass.
 
 ```ts
 import { createLogger, loggerOptionsFromEnv } from 'loggercf'

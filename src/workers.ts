@@ -1,5 +1,13 @@
 import { DurableObject, RpcTarget, WorkerEntrypoint, env as workersEnv } from 'cloudflare:workers'
-import type { LogFields, Logger, LoggerOptions, Span, SpanOptions, TraceCarrier } from './types'
+import type {
+  ErrorSerializer,
+  LogFields,
+  Logger,
+  LoggerOptions,
+  Span,
+  SpanOptions,
+  TraceCarrier,
+} from './types'
 import {
   getLogger,
   getTraceCarrier,
@@ -20,6 +28,7 @@ import {
   registerRootLogger,
   runLogged,
   sameEnvMapping,
+  withSerializer,
   type Method,
 } from './workers-shared'
 
@@ -58,8 +67,12 @@ export type TracedServiceBinding<T> = {
  * and `tracedWorker`. It becomes the Default Logger unless one is already set
  * (first seen wins); `setDefaultLogger()` always replaces it.
  *
+ * `options.serializeError` is the Root Logger's `serializeError` (code, so it
+ * can't come from env): the same function gives the same Root Logger.
+ *
  * @template E - The worker environment type.
  * @param {EnvMapping<E>} [mapping] - Per-field var name or derive function.
+ * @param {{ serializeError?: ErrorSerializer }} [options] - The Root Logger's `serializeError`.
  * @returns {Logger} The Root Logger.
  *
  * @example
@@ -73,8 +86,11 @@ export type TracedServiceBinding<T> = {
  * getLogger().info('module scope') // service, environment, version from env
  * ```
  */
-export function defaultLoggerFromEnv<E = Cloudflare.Env>(mapping?: EnvMapping<E>): Logger {
-  const logger = envRootLogger(workersEnv, mapping)
+export function defaultLoggerFromEnv<E = Cloudflare.Env>(
+  mapping?: EnvMapping<E>,
+  options: { serializeError?: ErrorSerializer } = {},
+): Logger {
+  const logger = envRootLogger(workersEnv, mapping, options.serializeError)
   registerDefaultLogger(logger)
   return logger
 }
@@ -322,6 +338,11 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
 export interface TracedWorkerOptions<E = unknown> {
   /** Where the Root Logger's options come from in env (see `loggerOptionsFromEnv`). */
   env?: EnvMapping<E>
+  /**
+   * The Root Logger's `serializeError` (see `LoggerOptions`): code, so it can't come
+   * from env. The same function gives the same Root Logger.
+   */
+  serializeError?: ErrorSerializer
 }
 
 /**
@@ -376,10 +397,16 @@ export function tracedWorker<S extends TracedSession>(
   }
 } {
   const mapping: EnvMapping<SessionEnv<S>> = options.env ?? {}
+  const { serializeError } = options
   return class extends TracedEntrypoint<SessionEnv<S>> {
     /** The closed-over mapping, behind the symbol-keyed hook: not an RPC member. */
     protected override get [ENV_MAPPING](): EnvMapping<SessionEnv<S>> {
       return mapping
+    }
+
+    /** The options from env, with the closed-over `serializeError`. */
+    protected override get [LOGGER_OPTIONS](): LoggerOptions {
+      return withSerializer(super[LOGGER_OPTIONS], serializeError)
     }
 
     /**
@@ -479,6 +506,11 @@ export interface WithLoggingOptions<E = unknown> {
   fetch?: boolean
   /** Where the Root Logger's options come from in env (see `loggerOptionsFromEnv`). */
   env?: EnvMapping<E>
+  /**
+   * The Root Logger's `serializeError` (see `LoggerOptions`): code, so it can't come
+   * from env. The same function gives the same Root Logger.
+   */
+  serializeError?: ErrorSerializer
 }
 
 /** A `WorkerEntrypoint` subclass, as `withLogging()` accepts it. */
@@ -616,7 +648,8 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
     !!a.spans === !!b.spans &&
     !!a.session === !!b.session &&
     (a.fetch ?? true) === (b.fetch ?? true) &&
-    sameEnvMapping(a.env, b.env)
+    sameEnvMapping(a.env, b.env) &&
+    a.serializeError === b.serializeError
   )
 }
 
@@ -720,7 +753,13 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
   Class: C,
   options: WithLoggingOptions<EntrypointEnv<C>> = {},
 ): C {
-  const { spans = false, session = false, fetch: wrapFetch = true, env: mapping } = options
+  const {
+    spans = false,
+    session = false,
+    fetch: wrapFetch = true,
+    env: mapping,
+    serializeError,
+  } = options
   const entrypoint = Class.name
   const where = `withLogging(${entrypoint})`
 
@@ -748,6 +787,11 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
       `${where}: ${entrypoint} is a TracedEntrypoint; override its [TracedEntrypoint.envMapping] getter instead of passing env`,
     )
   }
+  if (isTracedEntrypoint && serializeError) {
+    throw new TypeError(
+      `${where}: ${entrypoint} is a TracedEntrypoint; override its [TracedEntrypoint.loggerOptions] getter instead of passing serializeError`,
+    )
+  }
 
   /**
    * The Root Logger for one wrapped instance (an entrypoint or a Durable Object): its own
@@ -760,7 +804,7 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
   const instanceRootLogger = (target: object): Logger =>
     isTracedEntrypoint
       ? (target as unknown as { [ROOT_LOGGER]: Logger })[ROOT_LOGGER]
-      : envRootLogger((target as { env: unknown }).env, mapping)
+      : envRootLogger((target as { env: unknown }).env, mapping, serializeError)
 
   /** Each instance's own Context Fields (a Durable Object's `objectId`), read in its constructor. */
   const instanceFields = new WeakMap<object, LogFields>()
@@ -900,6 +944,6 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
     defineMethod(Logged.prototype, 'session', sessionOf)
   }
 
-  loggedClasses.set(Logged, { spans, session, fetch: wrapFetch, env: mapping })
+  loggedClasses.set(Logged, { spans, session, fetch: wrapFetch, env: mapping, serializeError })
   return Logged as unknown as C
 }

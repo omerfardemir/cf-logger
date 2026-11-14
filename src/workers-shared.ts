@@ -1,7 +1,14 @@
 // Internals shared by the Workers helpers (`workers.ts`, `handlers.ts`).
 // Not an entry point: nothing here is exported from the package.
 
-import type { Logger, LoggerOptions, Span, SpanOptions, TraceCarrier } from './types'
+import type {
+  ErrorSerializer,
+  Logger,
+  LoggerOptions,
+  Span,
+  SpanOptions,
+  TraceCarrier,
+} from './types'
 import {
   createLogger,
   hasDefaultLogger,
@@ -20,6 +27,28 @@ import { loggerOptionsFromEnv, type EnvMapping } from './env'
  */
 const rootLoggers = new Map<string, Logger>()
 
+/** A number for each `serializeError` a Root Logger was built with, so it can be part of the cache key. */
+const serializerIds = new WeakMap<ErrorSerializer, number>()
+
+/** The last number `serializerId()` gave. */
+let lastSerializerId = 0
+
+/**
+ * The cache key part for a `serializeError`: its identity.
+ *
+ * @param {ErrorSerializer} [serializeError] - The option.
+ * @returns {number} `0` without one, or its number.
+ */
+function serializerId(serializeError: ErrorSerializer | undefined): number {
+  if (typeof serializeError !== 'function') return 0
+  let id = serializerIds.get(serializeError)
+  if (id === undefined) {
+    id = ++lastSerializerId
+    serializerIds.set(serializeError, id)
+  }
+  return id
+}
+
 /**
  * Get the isolate's Root Logger for these Logger Options, creating it once.
  *
@@ -27,8 +56,18 @@ const rootLoggers = new Map<string, Logger>()
  * @returns {Logger} The cached Root Logger.
  */
 export function cachedRootLogger(options: LoggerOptions): Logger {
-  const { service, level, environment, version, spans } = options
-  const key = JSON.stringify([service, level, environment, version, spans?.level, spans?.slowMs])
+  const { service, level, environment, version, spans, limits, serializeError } = options
+  const key = JSON.stringify([
+    service,
+    level,
+    environment,
+    version,
+    spans?.level,
+    spans?.slowMs,
+    limits?.maxStringLength,
+    limits?.maxRecordBytes,
+    serializerId(serializeError),
+  ])
   let logger = rootLoggers.get(key)
   if (!logger) {
     logger = createLogger(options)
@@ -38,14 +77,34 @@ export function cachedRootLogger(options: LoggerOptions): Logger {
 }
 
 /**
- * The isolate's cached Root Logger for a Worker env read through an Env Mapping.
+ * The isolate's cached Root Logger for a Worker env read through an Env Mapping,
+ * with the `serializeError` a helper was given in code.
  *
  * @param {unknown} env - The Worker's env.
  * @param {EnvMapping} [mapping] - The Env Mapping.
+ * @param {ErrorSerializer} [serializeError] - The helper's `serializeError` option.
  * @returns {Logger} The cached Root Logger.
  */
-export function envRootLogger(env: unknown, mapping: EnvMapping<any> | undefined): Logger {
-  return cachedRootLogger(loggerOptionsFromEnv(env, mapping))
+export function envRootLogger(
+  env: unknown,
+  mapping: EnvMapping<any> | undefined,
+  serializeError?: ErrorSerializer,
+): Logger {
+  return cachedRootLogger(withSerializer(loggerOptionsFromEnv(env, mapping), serializeError))
+}
+
+/**
+ * Logger Options with a helper's `serializeError` added, when it has one.
+ *
+ * @param {LoggerOptions} options - The Logger Options.
+ * @param {ErrorSerializer} [serializeError] - The helper's `serializeError` option.
+ * @returns {LoggerOptions} `options`, or a copy with `serializeError`.
+ */
+export function withSerializer(
+  options: LoggerOptions,
+  serializeError: ErrorSerializer | undefined,
+): LoggerOptions {
+  return serializeError === undefined ? options : { ...options, serializeError }
 }
 
 /**
