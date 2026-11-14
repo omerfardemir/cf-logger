@@ -64,7 +64,7 @@ Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 | `ENVIRONMENT` | `environment` | left off every log line |
 | `VERSION`     | `version`     | left off every log line |
 
-`LOG_LEVEL` must be one of `trace`, `debug`, `info`, `warn`, `error` or `fatal` (lowercase). Any other value falls back to `'info'` and writes one `WARN` per isolate with `invalidLevel` and `validLevels`.
+`LOG_LEVEL` must be one of `trace`, `debug`, `info`, `warn`, `error` or `fatal` (lowercase). A missing or empty value means `'info'`. Any other value falls back to `'info'` and writes one `WARN` per isolate with `invalidLevel` and `validLevels`.
 
 Using other var names, or deriving a field from a binding, takes a mapping (see [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)). To use Cloudflare's [version metadata](https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/) as `version`, add the binding under a name of your choice and map it with a function:
 
@@ -80,9 +80,17 @@ export default tracedWorker(MySession, {
 })
 ```
 
-Use this exact form. `tag` is `""` for an upload without `wrangler versions upload --tag` and in local dev, and an empty string counts as absent, so `.tag` alone would silently drop `version`; `.id` is always set on a deployed Worker. Keep the `?.`: without it, a missing binding throws inside the Root Logger getter and every RPC call on the entrypoint fails.
+Use this exact form. `tag` is `""` for an upload without `wrangler versions upload --tag` and in local dev, and an empty string counts as absent, so `.tag` alone would silently drop `version`; `.id` is always set. Keep the `?.`: without it, a missing binding throws inside the Root Logger getter, so every `session()` call on the entrypoint fails. Note that `version` is then a tag on tagged deploys and a version UUID on untagged ones, and under `wrangler dev` the ID is a new random UUID on every start; tag every deploy if you query by `version`.
 
-Changes from 0.0.1: an absent `ENVIRONMENT` or `VERSION` used to be logged as `'unknown'` and is now left off (update any query or alert on `version = "unknown"`), and an invalid `LOG_LEVEL` used to throw and now falls back to `'info'` with a `WARN`. `LOG_LEVEL: "silent"` is no longer accepted: it falls back to `'info'` like any other invalid value. To mute logs, use `LOG_LEVEL: "fatal"`.
+### Upgrading from 0.0.1
+
+Notable changes to the Logger Options read from env:
+
+- An absent or empty `ENVIRONMENT` or `VERSION` is left off every line. 0.0.1 logged an absent one as `'unknown'` and an empty one as `""`. Update any query or alert on `environment = "unknown"` or `version = "unknown"`.
+- An empty `NAME` gives `service: 'unknown'` (0.0.1: `service: ""`).
+- A numeric `VERSION` is logged as a string (`2` becomes `"2"`).
+- An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw. An empty `LOG_LEVEL` means `'info'`; 0.0.1 threw.
+- `LOG_LEVEL: "silent"` is no longer accepted. In 0.0.1 it muted all logs; now it falls back to `'info'` with a `WARN`, so **a Worker that had `"silent"` starts writing info-level logs**. Change it before upgrading. The quietest level is `fatal`: only `logger.fatal()` lines are written. There is no off switch.
 
 ## Core API (`loggercf`)
 

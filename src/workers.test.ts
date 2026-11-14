@@ -508,11 +508,20 @@ describe('TracedEntrypoint', () => {
   })
 
   it('loggerOptions reads NAME, LOG_LEVEL, ENVIRONMENT and VERSION from env by default', () => {
-    const entrypoint = new TracedEntrypoint({} as any, { NAME: 'my-svc', LOG_LEVEL: 'warn' })
+    const entrypoint = new TracedEntrypoint({} as any, {
+      NAME: 'my-svc',
+      LOG_LEVEL: 'warn',
+      ENVIRONMENT: 'staging',
+      VERSION: '1.2.3',
+    })
 
     const opts = (entrypoint as any).loggerOptions
-    expect(opts.service).toBe('my-svc')
-    expect(opts.level).toBe('warn')
+    expect(opts).toEqual({
+      service: 'my-svc',
+      level: 'warn',
+      environment: 'staging',
+      version: '1.2.3',
+    })
   })
 
   it('loggerOptions defaults when env vars missing', () => {
@@ -680,7 +689,7 @@ describe('tracedWorker', () => {
     })
   })
 
-  it('the documented version_metadata recipe falls back to id when tag is empty', () => {
+  it('the documented version_metadata recipe falls back to id when tag is empty, and tolerates a missing binding', () => {
     const entries = _captureEntries()
 
     interface Env {
