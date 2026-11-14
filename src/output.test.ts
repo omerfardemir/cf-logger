@@ -217,8 +217,9 @@ const normalizeAll = (line: string) =>
     .replace(/"duration":\d+/g, '"duration":0')
 
 /**
- * Lines written by loggercf 0.0.1 (on pino 10) for the scenario below, captured
- * before pino was replaced. Key order included: the internal core must match.
+ * Lines written for the scenario below by the pino-based logger (main at
+ * 15a214a, pino 10), captured by running the same calls against that build.
+ * Key order included: the internal core must match.
  */
 const PINO_LINES = [
   String.raw`{"time":"<t>","level":"INFO","service":"svc","environment":"test","version":"1.0.0","region":"eu","message":"outside"}`,

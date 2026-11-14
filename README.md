@@ -554,7 +554,7 @@ In a `catch`, where the error is `unknown`, use `logger.error({ err }, 'msg')` o
 | **Later**: anything else (array, class instance, `Date`, function, symbol)            | `args`                                                                           |
 | A placeholder that can't print its argument (`%d` with `null`, `%j` with `undefined`) | the placeholder stays in the text; the argument is routed like a later one       |
 
-`args` (the overflow) is an array in call order, present only when something went there. An object can't overwrite loggercf's own keys: `time`, `level`, `message`, `service`, `environment`, `version`, `traceId`, `spanId`, `parentSpanId`, `errors`, `args`, and `err` once it is set. Those keys of an object move to `args`, as one object per argument:
+`args` (the overflow) is an array in call order, present only when something went there. An object can't overwrite loggercf's own keys: `time`, `level`, `message`, `service`, `environment`, `version`, `traceId`, `spanId`, `parentSpanId`, `errors` and `args`. Those keys of an object move to `args`, as one object per argument. Two keys are taken from an object while they are still unset: `err`, and a string `message` when the call gives no other message (`logger.info({ message: 'hi' })`).
 
 ```ts
 logger.info('x', { level: 'custom', traceId: 'mine', a: 1 })

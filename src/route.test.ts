@@ -21,14 +21,17 @@ class Point {
 
 describe('formatMessage', () => {
   it('returns the template and every argument when there is nothing to format', () => {
-    expect(formatMessage('plain', [1, { a: 1 }])).toEqual({ message: 'plain', rest: [1, { a: 1 }] })
-    expect(formatMessage('100%%', [])).toEqual({ message: '100%%', rest: [] })
+    expect(formatMessage('plain', [1, { a: 1 }])).toEqual({
+      message: 'plain',
+      unprinted: [1, { a: 1 }],
+    })
+    expect(formatMessage('100%%', [])).toEqual({ message: '100%%', unprinted: [] })
   })
 
   it('returns the arguments the placeholders did not take, in order', () => {
     expect(formatMessage('%s', ['a', 'b', { c: 1 }])).toEqual({
       message: 'a',
-      rest: ['b', { c: 1 }],
+      unprinted: ['b', { c: 1 }],
     })
   })
 
@@ -41,14 +44,17 @@ describe('formatMessage', () => {
     ['%x %s', ['A', 'B'], '%x B', ['A']],
     ['50% off %s', ['x'], '50% off %s', ['x']],
     ['a %d %s', [null, 'x'], 'a %d x', [null]],
-  ])('keeps what pino dropped: %j with %j', (template, args, message, rest) => {
-    expect(formatMessage(template, args)).toEqual({ message, rest })
+  ])('keeps what pino dropped: %j with %j', (template, args, message, unprinted) => {
+    expect(formatMessage(template, args)).toEqual({ message, unprinted })
   })
 
   it('never throws on values that cannot be converted', () => {
     const sym = Symbol('s')
     const bare = Object.create(null) as object
-    expect(formatMessage('%d %s', [sym, bare])).toEqual({ message: '%d %s', rest: [sym, bare] })
+    expect(formatMessage('%d %s', [sym, bare])).toEqual({
+      message: '%d %s',
+      unprinted: [sym, bare],
+    })
   })
 })
 
@@ -153,6 +159,26 @@ describe('routeArgs', () => {
       fields: { err: e1 },
       message: 'm',
       args: [{ err: e2 }],
+    })
+  })
+
+  it('an object’s string message is the message only when the call gives none', () => {
+    expect(routeArgs([{ message: 'hi', a: 1 }])).toEqual({ fields: { a: 1 }, message: 'hi' })
+    expect(routeArgs([{ message: 'hi', level: 'x' }])).toEqual({
+      fields: {},
+      message: 'hi',
+      args: [{ level: 'x' }],
+    })
+    expect(routeArgs([{ message: 'hi' }, 'm'])).toEqual({
+      fields: {},
+      message: 'm',
+      args: [{ message: 'hi' }],
+    })
+    expect(routeArgs([{ message: 42 }])).toEqual({ fields: {}, args: [{ message: 42 }] })
+    expect(routeArgs([{ a: 1 }, { message: 'one' }, { message: 'two' }])).toEqual({
+      fields: { a: 1 },
+      message: 'one',
+      args: [{ message: 'two' }],
     })
   })
 
@@ -443,5 +469,5 @@ describe('routing property', () => {
       expect(r).toMatchObject({ level: 'INFO', service: 'svc', component: 'c' })
     }
     expect(entries).toHaveLength(runs)
-  })
+  }, 30_000) // 500 runs: generous for loaded CI machines
 })

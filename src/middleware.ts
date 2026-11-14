@@ -261,6 +261,8 @@ export function useLogger<T extends LogFields = LogFields>(
       },
     }
     await runWithLogger(contextOptions, async () => {
+      // Untyped on purpose: these internal lines don't use T, and `Logger<T>`'s
+      // structured overload can't be checked against a generic T.
       const logger = getLogger()
       const trace = getTraceContext()!
       c.set('logger' as never, logger as never)

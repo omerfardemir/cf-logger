@@ -49,7 +49,8 @@ const LEVEL_VALUES: Record<LogLevel, number> = {
 const LEVELS = Object.keys(LEVEL_VALUES) as LogLevel[]
 
 /**
- * The numeric minimum for a level name. `'silent'` writes nothing.
+ * The numeric minimum for a level name. `'silent'` (not a `LogLevel`, but
+ * accepted by pino) still writes nothing, so existing configs keep working.
  *
  * @param {string} level - A level name.
  * @returns {number} Its severity.
@@ -68,6 +69,10 @@ const noop = () => {}
  * hand it to `buildRecord()` and the current sink.
  *
  * Order of keys: `time`, `level`, bindings, call fields, `message`, `errors`, `args`.
+ *
+ * @param {string} label - The upper-case level written as `level`.
+ * @param {LogRecord} bindings - The logger's bindings (`createLogger` / `.child()`).
+ * @param {unknown[]} input - The arguments the log method received.
  */
 function write(label: string, bindings: LogRecord, input: unknown[]): void {
   const { fields, message, errors, args } = routeArgs(input)

@@ -236,7 +236,7 @@ logger.info('loaded order %s', order) // prints [object Object]; use logger.info
 logger.error(e) // in a catch, e is unknown and does not compile; use logger.error({ err: e }, 'msg')
 ```
 
-`traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call can't overwrite them, or loggercf's other own keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`, and `err` once set): an object's values for those keys land in `args` instead. To read the trace IDs, call `getTraceContext()`.
+`traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call can't overwrite them, or loggercf's other own keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`): an object's values for those keys land in `args` instead. An object's `err`, and a string `message` when the call has no other message, are used while still unset. To read the trace IDs, call `getTraceContext()`.
 
 ## Wrangler setup
 

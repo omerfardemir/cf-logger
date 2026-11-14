@@ -3,8 +3,9 @@ import type { LogRecord } from './output'
 /**
  * Record keys a log call's object arguments cannot set: their values for these
  * keys move to `args` instead, so a call can never overwrite loggercf's own
- * fields and nothing is dropped. `err` is the exception while it is unset:
- * `logger.error({ err }, 'msg')` is how a structured call passes an error.
+ * fields and nothing is dropped. `err` and `message` are the exceptions while
+ * they are unset (see `routeArgs()`): `logger.error({ err }, 'msg')` is how a
+ * structured call passes an error.
  */
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   'time',
@@ -104,7 +105,7 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
  * Each `%` sequence takes the next argument in order, as in pino. Where pino
  * then dropped that argument without printing it (`%d` with `null`, `%j` with
  * `undefined`, an unknown sequence such as `% ` or `%c`), the sequence stays
- * in the text and the argument is returned in `rest` instead. `%%` becomes `%`
+ * in the text and the argument is returned in `unprinted` instead. `%%` becomes `%`
  * only when there are arguments, like `console.log`.
  *
  * @param {string} template - The message template.
@@ -114,8 +115,9 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
 export function formatMessage(
   template: string,
   args: readonly unknown[],
-): { message: string; rest: unknown[] } {
-  if (args.length === 0 || !template.includes('%')) return { message: template, rest: [...args] }
+): { message: string; unprinted: unknown[] } {
+  if (args.length === 0 || !template.includes('%'))
+    return { message: template, unprinted: [...args] }
 
   const kept: unknown[] = []
   let message = ''
@@ -142,7 +144,7 @@ export function formatMessage(
     i++
   }
   message += template.slice(last)
-  return { message, rest: [...kept, ...args.slice(next)] }
+  return { message, unprinted: [...kept, ...args.slice(next)] }
 }
 
 /**
@@ -166,6 +168,8 @@ export function formatMessage(
  * objects winning. `err` is set only when still unset. The other
  * `RESERVED_KEYS`, and an `err` that is already set, move to `args` as one
  * object per argument, so a call can never overwrite loggercf's own fields.
+ * The exception is `message`: when the call gives no other message, the first
+ * object's string `message` becomes the message (`logger.info({ message })`).
  *
  * @param {readonly unknown[]} input - The arguments the log method received.
  * @returns {RoutedArgs} Where each argument goes.
@@ -177,29 +181,44 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
   const words: string[] = []
   let message: string | undefined
   let template: string | undefined
-  let rest = input.slice(1)
+  let remaining = input.slice(1)
 
   if (input.length === 0) return { fields }
 
+  /** An object's string `message`, used only if the call ends up with no other message. */
+  let objectMessage: { value: string; holder: Record<string, unknown> } | undefined
+
+  /** Set `err` if it is still unset. Returns whether it was set. */
+  const setErr = (value: unknown) => {
+    if (fields.err !== undefined) return false
+    fields.err = value
+    return true
+  }
   const merge = (object: Record<string, unknown>) => {
     let reserved: Record<string, unknown> | undefined
     for (const [key, value] of Object.entries(object)) {
-      if (key === 'err' && fields.err === undefined) fields.err = value
-      else if (RESERVED_KEYS.has(key)) (reserved ??= {})[key] = value
-      else fields[key] = value
+      if (key === 'err' && setErr(value)) continue
+      if (!RESERVED_KEYS.has(key)) {
+        fields[key] = value
+        continue
+      }
+      reserved ??= {}
+      reserved[key] = value
+      if (key === 'message' && typeof value === 'string')
+        objectMessage ??= { value, holder: reserved }
     }
     if (reserved) overflow.push(reserved)
   }
   const takeTemplate = () => {
-    if (typeof rest[0] === 'string') template = rest.shift() as string
-    else if (rest.length > 0 && rest[0] === undefined) rest.shift()
+    if (typeof remaining[0] === 'string') template = remaining.shift() as string
+    else if (remaining.length > 0 && remaining[0] === undefined) remaining.shift()
   }
 
   const first = input[0]
   if (typeof first === 'string') {
     template = first
   } else if (first instanceof Error) {
-    fields.err = first
+    setErr(first)
     takeTemplate()
     if (template === undefined) message = first.message
   } else if (isPlainObject(first)) {
@@ -214,15 +233,14 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
   }
 
   if (template !== undefined) {
-    const formatted = formatMessage(template, rest)
+    const formatted = formatMessage(template, remaining)
     message = formatted.message
-    rest = formatted.rest
+    remaining = formatted.unprinted
   }
 
-  for (const value of rest) {
+  for (const value of remaining) {
     if (value instanceof Error) {
-      if (fields.err === undefined) fields.err = value
-      else errors.push(value)
+      if (!setErr(value)) errors.push(value)
     } else if (isPlainObject(value)) {
       merge(value)
     } else if (isPrimitive(value)) {
@@ -234,6 +252,13 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
 
   if (words.length > 0)
     message = message === undefined ? words.join(' ') : [message, ...words].join(' ')
+
+  if (message === undefined && objectMessage) {
+    const { value, holder } = objectMessage
+    message = value
+    delete holder.message
+    if (Object.keys(holder).length === 0) overflow.splice(overflow.indexOf(holder), 1)
+  }
 
   const routed: RoutedArgs = { fields }
   if (message !== undefined) routed.message = message
