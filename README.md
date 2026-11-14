@@ -110,7 +110,7 @@ Changes to `TracedEntrypoint` (`loggercf/workers`):
   | `this.rootLogger`                        | `this[TracedEntrypoint.rootLogger]`                         |
   | `super.loggerOptions`                    | `super[TracedEntrypoint.loggerOptions]`                     |
 
-  A getter left under an old name is no longer called by `TracedEntrypoint`, and it is an RPC member like any getter your subclass declares. A getter marked `override` fails to compile, so TypeScript finds these for you; without `override`, or in plain JavaScript, find and rename them yourself. `tracedWorker(S, { env })` keeps its mapping behind the same hook, so nothing changes for its users.
+  A getter left under an old name is no longer called by `TracedEntrypoint`, and it is an RPC member like any getter your subclass declares. In TypeScript a getter under an old name fails to compile, `override` or not, so TypeScript finds these for you; in plain JavaScript, find and rename them yourself. `tracedWorker(S, { env })` keeps its mapping behind the same hook, so nothing changes for its users.
 
 Changes to the Hono middleware (`useLogger`):
 

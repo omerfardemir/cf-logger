@@ -43,7 +43,8 @@ _Avoid_: env config, var map
 
 **Entrypoint Hook**:
 One of the three getters a `TracedEntrypoint` subclass overrides to supply its Env Mapping, Logger Options or Root Logger, keyed by the symbols `TracedEntrypoint.envMapping`, `.loggerOptions` and `.rootLogger`. Symbol-keyed so they stay off the entrypoint's RPC surface: a caller holding its Service Binding reaches only the string-keyed methods and getters the subclass declares.
-_Avoid_: override, config getter
+_Avoid_: config getter
+Not to be confused with the Hono middleware's `fields` / `endFields` hooks.
 
 ### Tracing
 

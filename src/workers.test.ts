@@ -528,7 +528,7 @@ describe('TracedEntrypoint', () => {
     _reset()
   })
 
-  it('loggerOptions reads NAME, LOG_LEVEL, ENVIRONMENT and VERSION from env by default', () => {
+  it('the Logger Options hook reads NAME, LOG_LEVEL, ENVIRONMENT and VERSION from env by default', () => {
     const entrypoint = new TracedEntrypoint({} as any, {
       NAME: 'my-svc',
       LOG_LEVEL: 'warn',
@@ -545,7 +545,7 @@ describe('TracedEntrypoint', () => {
     })
   })
 
-  it('loggerOptions defaults when env vars missing', () => {
+  it('the Logger Options hook defaults when env vars missing', () => {
     const entrypoint = new TracedEntrypoint({} as any, {})
 
     expect((entrypoint as any)[TracedEntrypoint.loggerOptions]).toStrictEqual({
@@ -558,7 +558,7 @@ describe('TracedEntrypoint', () => {
     expect(loggerOptionsFromEnv({ NAME: 'api' })).toStrictEqual({ service: 'api', level: 'info' })
   })
 
-  it('envMapping override maps fields by name and by function', () => {
+  it('an Env Mapping hook override maps fields by name and by function', () => {
     interface Env {
       SERVICE: string
       RELEASE: string
@@ -584,7 +584,7 @@ describe('TracedEntrypoint', () => {
     })
   })
 
-  it('a loggerOptions override still wins over envMapping', () => {
+  it('a Logger Options hook override still wins over the Env Mapping hook', () => {
     class Entrypoint extends TracedEntrypoint {
       protected override get [TracedEntrypoint.envMapping](): EnvMapping {
         return { service: 'SERVICE' }
@@ -877,7 +877,7 @@ describe('Default Logger from the Workers helpers', () => {
     for (const key of Object.keys(workersEnv)) delete workersEnv[key]
   })
 
-  it('a TracedEntrypoint whose rootLogger returns getLogger() does not loop', () => {
+  it('a TracedEntrypoint whose Root Logger hook returns getLogger() does not loop', () => {
     const entries = _captureEntries()
     class Forwarding extends TracedEntrypoint {
       protected override get [TracedEntrypoint.rootLogger]() {
@@ -891,7 +891,7 @@ describe('Default Logger from the Workers helpers', () => {
     expect(entries.at(-1)).toMatchObject({ service: 'unknown', message: 'x' })
   })
 
-  it('a TracedEntrypoint whose rootLogger is a child of getLogger() does not lock in unknown', () => {
+  it('a TracedEntrypoint whose Root Logger hook is a child of getLogger() does not lock in unknown', () => {
     const entries = _captureEntries()
     class ForwardingChild extends TracedEntrypoint {
       protected override get [TracedEntrypoint.rootLogger]() {
@@ -989,7 +989,7 @@ describe('Default Logger from the Workers helpers', () => {
     expect(entries[0]).not.toHaveProperty('traceId')
   })
 
-  it('TracedEntrypoint registers an overridden rootLogger', () => {
+  it('TracedEntrypoint registers an overridden Root Logger hook', () => {
     const custom = createLogger({ service: 'custom-root' })
 
     class Entrypoint extends TracedEntrypoint {
@@ -1566,7 +1566,7 @@ describe('withLogging', () => {
     ])
   })
 
-  it('wrapping a TracedEntrypoint subclass uses its rootLogger (its envMapping)', () => {
+  it('wrapping a TracedEntrypoint subclass uses its Root Logger hook (its Env Mapping hook)', () => {
     const entries = _captureEntries()
     interface Env {
       NAME: string

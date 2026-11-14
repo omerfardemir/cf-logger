@@ -202,9 +202,11 @@ export class TracedSession<E = unknown> extends RpcTarget {
   }
 }
 
-// The keys of TracedEntrypoint's hooks, public as its statics (`TracedEntrypoint.envMapping`, ...).
-// Symbols, so the hooks are not RPC members: JSRPC exposes an entrypoint's string-keyed
-// methods and getters, never its symbol-keyed ones, and never its constructor's statics.
+/**
+ * The keys of TracedEntrypoint's hooks, public as its statics (`TracedEntrypoint.envMapping`, ...).
+ * Symbols, so the hooks are not RPC members: JSRPC exposes an entrypoint's string-keyed
+ * methods and getters, never its symbol-keyed ones, and never its constructor's statics.
+ */
 const ENV_MAPPING: unique symbol = Symbol('loggercf.envMapping')
 const LOGGER_OPTIONS: unique symbol = Symbol('loggercf.loggerOptions')
 const ROOT_LOGGER: unique symbol = Symbol('loggercf.rootLogger')
@@ -253,6 +255,16 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
   static readonly loggerOptions: typeof LOGGER_OPTIONS = LOGGER_OPTIONS
   /** The key of the Root Logger hook: the isolate's Root Logger. */
   static readonly rootLogger: typeof ROOT_LOGGER = ROOT_LOGGER
+
+  // Type-only guards (`declare` emits nothing, so the RPC surface stays empty): a subclass
+  // that still declares a hook under its old string name, `override` or not, fails to
+  // compile instead of being silently ignored and exposed over RPC.
+  /** Not a hook: override `[TracedEntrypoint.envMapping]` instead. */
+  declare protected readonly envMapping?: never
+  /** Not a hook: override `[TracedEntrypoint.loggerOptions]` instead. */
+  declare protected readonly loggerOptions?: never
+  /** Not a hook: override `[TracedEntrypoint.rootLogger]` instead. */
+  declare protected readonly rootLogger?: never
 
   /**
    * @param {ExecutionContext} ctx - The execution context.
@@ -354,7 +366,7 @@ export function tracedWorker<S extends TracedSession>(
 } {
   const mapping: EnvMapping<SessionEnv<S>> = options.env ?? {}
   return class extends TracedEntrypoint<SessionEnv<S>> {
-    // The closed-over mapping, behind the symbol-keyed hook: not an RPC member.
+    /** The closed-over mapping, behind the symbol-keyed hook: not an RPC member. */
     protected override get [ENV_MAPPING](): EnvMapping<SessionEnv<S>> {
       return mapping
     }
