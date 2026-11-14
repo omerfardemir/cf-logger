@@ -533,28 +533,30 @@ logger.info('items', [1, 2, 3]) // {"message":"items","args":[[1,2,3]]}
 logger.error('two failures', e1, e2) // {"err":{...e1},"errors":[{...e2}],...}
 ```
 
-The message supports `printf` placeholders: `%s` (string), `%d` / `%f` (number), `%i` (integer), `%j` / `%o` / `%O` (JSON), `%%` (a literal `%`, when there are arguments). Each placeholder takes the next argument. `%s` turns an object into `[object Object]`, so pass objects as fields or use `%j`. Any other `%` sequence takes an argument too (as `50% off %s` does), and that argument is routed like a later one: write `50%% off %s`.
+The message supports `printf` placeholders: `%s` (string), `%d` / `%f` (number), `%i` (integer), `%j` / `%o` / `%O` (JSON), `%%` (a literal `%`, when there are arguments). Each placeholder takes the next argument. `%s`, `%d`, `%i` and `%f` don't print an object or an array (an `Error` or a `Date` included): the placeholder stays in the text and the value is routed like a later argument, so its fields are kept (`logger.info('n=%d', { a: 1 })` → `{"message":"n=%d","a":1}`). Use `%j` to print an object inline. Primitives print exactly as with `printf`. Any other `%` sequence takes an argument too (as `50% off %s` does), and that argument is routed like a later one: write `50%% off %s`.
 
-In a `catch`, where the error is `unknown`, use `logger.error({ err }, 'msg')` or `logger.error('msg', err)`: the first argument must be a string, an `Error` or an object.
+In a `catch`, where the error is `unknown`, `logger.error(e)`, `logger.error(e, 'msg')`, `logger.error({ err: e }, 'msg')` and `logger.error('msg', e)` all compile. Otherwise the first argument must be a string, an `Error` (a `string | Error` or `Error | undefined` union is fine) or an object: `logger.info(42)` does not compile.
+
+A `Logger<T>` whose `T` is still a type parameter (inside a function generic over `T`) can't take a structured call: the fields can't be checked against an unresolved `T`. Console-style and `Error`-first calls still work; for fields, use `Logger` or a concrete `Logger<AppFields>`.
 
 ### Where each argument goes
 
-| Argument                                                                              | Goes to                                                                          |
-| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **First**: a string                                                                   | the message (with placeholders)                                                  |
-| **First**: an `Error`                                                                 | `err`; the message defaults to `err.message`                                     |
-| **First**: a plain object                                                             | its keys, at the top level                                                       |
-| **First**: a number, boolean, `null`, `undefined`                                     | `args`, and `String(value)` is the message                                       |
-| **First**: anything else (array, class instance, ...)                                 | `args`                                                                           |
-| **Second**, after an `Error` or object: a string                                      | the message (with placeholders); `undefined` means no message                    |
-| **Any later argument** a placeholder takes                                            | the message                                                                      |
-| **Later**: an `Error`                                                                 | `err` if not set yet, otherwise `errors: [...]`                                  |
-| **Later**: a plain object                                                             | its keys, at the top level (a later object wins over an earlier one)             |
-| **Later**: a string, number, boolean, `null`, `undefined`, `BigInt`                   | appended to the message after a space, like `console.log('a', 'b', 3)` → `a b 3` |
-| **Later**: anything else (array, class instance, `Date`, function, symbol)            | `args`                                                                           |
-| A placeholder that can't print its argument (`%d` with `null`, `%j` with `undefined`) | the placeholder stays in the text; the argument is routed like a later one       |
+| Argument                                                                                                                                 | Goes to                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **First**: a string                                                                                                                      | the message (with placeholders)                                                  |
+| **First**: an `Error`                                                                                                                    | `err`; the message defaults to `err.message`                                     |
+| **First**: a plain object                                                                                                                | its keys, at the top level                                                       |
+| **First**: a number, boolean, `null`, `undefined`                                                                                        | `args`, and `String(value)` is the message                                       |
+| **First**: anything else (array, class instance, ...)                                                                                    | `args`                                                                           |
+| **Second**, after an `Error` or object: a string                                                                                         | the message (with placeholders); `undefined` means no message                    |
+| **Any later argument** a placeholder takes                                                                                               | the message                                                                      |
+| **Later**: an `Error`                                                                                                                    | `err` if not set yet, otherwise `errors: [...]`                                  |
+| **Later**: a plain object                                                                                                                | its keys, at the top level (a later object wins over an earlier one)             |
+| **Later**: a string, number, boolean, `null`, `undefined`, `BigInt`                                                                      | appended to the message after a space, like `console.log('a', 'b', 3)` → `a b 3` |
+| **Later**: anything else (array, class instance, `Date`, function, symbol)                                                               | `args`                                                                           |
+| A placeholder that can't print its argument (`%d` with `null`, `%j` with `undefined`, `%s` / `%d` / `%i` / `%f` with an object or array) | the placeholder stays in the text; the argument is routed like a later one       |
 
-`args` (the overflow) is an array in call order, present only when something went there. An object can't overwrite loggercf's own keys: `time`, `level`, `message`, `service`, `environment`, `version`, `traceId`, `spanId`, `parentSpanId`, `errors` and `args`. Those keys of an object move to `args`, as one object per argument. Two keys are taken from an object while they are still unset: `err`, and a string `message` when the call gives no other message (`logger.info({ message: 'hi' })`).
+`args` (the overflow) is an array in call order, present only when something went there. An object can't overwrite loggercf's own keys: `time`, `level`, `message`, `service`, `environment`, `version`, `traceId`, `spanId`, `parentSpanId`, `errors` and `args`. Those keys of an object move to `args`, as one object per argument. Two keys are taken from an object while they are still unset: `err`, and a string `message` when the call gives no other message (`logger.info({ message: 'hi' })`). An own `__proto__` key (as `JSON.parse` creates) and a `toJSON` method also move to `args`, the method as `"[Function: toJSON]"`, so neither can change or replace the line.
 
 ```ts
 logger.info('x', { level: 'custom', traceId: 'mine', a: 1 })
@@ -568,7 +570,8 @@ Every runtime builds the same JSON line, one per log call (covered by a test tha
 - Starts with `time` (ISO 8601) and `level` (`TRACE` … `FATAL`); no `pid` or `hostname`.
 - When keys collide, strongest first: trace IDs (`traceId`, `spanId`, `parentSpanId`) and the other keys above, which a log call can't set → fields passed to the log call → logger fields (`createLogger` / `.child()`) → Context Fields.
 - Errors become `{ type, message, stack, ...own fields (e.g. code), cause }`, with `cause` nested the same way: at the top level, in `errors`, and inside `args` items (e.g. `args: [{ err }]`).
-- Circular references are written as `"[Circular]"`, `BigInt` as a string, a function as `"[Function: name]"` and a symbol as `"Symbol(description)"`; logging never throws.
+- Circular references are written as `"[Circular]"`, `BigInt` as a string, a function as `"[Function: name]"` and a symbol as `"Symbol(description)"`.
+- A log call never throws. If a value can't be read or serialized (a getter or a `toJSON` that throws), a minimal line is written instead: `time`, `level`, the trace IDs, the logger fields, the message template as given, and `logError` describing the failure.
 
 Only the final write differs, detected at startup:
 

@@ -225,15 +225,14 @@ logger.info('charged %s', 'o-1', { amount: 42 })
 try {
   throw new Error('declined')
 } catch (e) {
-  logger.error({ err: e }, 'charge failed') // e is unknown: pass it as { err } or after the message
+  logger.error(e, 'charge failed') // e is unknown: also fine as { err: e } or after the message
 }
 ```
 
-An `Error` is serialized with type, message, stack, own fields and `cause`. `printf` placeholders (`%s %d %i %f %j %o %O %%`) take arguments in order. `%s` prints an object as `[object Object]`:
+An `Error` is serialized with type, message, stack, own fields and `cause`. `printf` placeholders (`%s %d %i %f %j %o %O %%`) take arguments in order. `%s %d %i %f` don't print an object: the placeholder stays in the text and the object is routed like a later argument:
 
 ```ts wrong
-logger.info('loaded order %s', order) // prints [object Object]; use logger.info({ order }, 'loaded order')
-logger.error(e) // in a catch, e is unknown and does not compile; use logger.error({ err: e }, 'msg')
+logger.info('loaded order %s', order) // message stays 'loaded order %s', order's keys spill onto the line; use logger.info({ order }, 'loaded order')
 ```
 
 `traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call can't overwrite them, or loggercf's other own keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`): an object's values for those keys land in `args` instead. An object's `err`, and a string `message` when the call has no other message, are used while still unset. To read the trace IDs, call `getTraceContext()`.
