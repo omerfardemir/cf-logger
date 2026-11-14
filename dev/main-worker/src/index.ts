@@ -9,6 +9,9 @@ import {
 } from 'loggercf'
 import { withTrace } from 'loggercf/workers'
 import type { BindService, LoggedMathService, ServiceSession } from './types'
+import { queue, scheduled, units, type Job } from './units'
+
+export { Report, Room } from './units'
 
 type Context = {
   Bindings: {
@@ -138,6 +141,9 @@ app.get('/logged', async (c) => {
   return c.json({ direct, traced, pong, error, traceId: trace?.traceId, spanId: trace?.spanId })
 })
 
+// GET /durable-object, /queue, /workflow: start each unit of work (src/units.ts).
+app.route('/', units)
+
 /** GET /trace Shows current trace context */
 app.get('/trace', async (c) => {
   const trace = getTraceContext()
@@ -180,4 +186,8 @@ app.post('/fetcher-forward', async (c) => {
   return c.json({ traceId: getTraceContext()?.traceId, downstream: await res.json() })
 })
 
-export default app
+export default {
+  fetch: app.fetch,
+  scheduled,
+  queue,
+} satisfies ExportedHandler<Env, Job>

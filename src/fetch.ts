@@ -13,7 +13,8 @@ export interface TracedFetchOptions {
    * error is logged as it is: if its message quotes the URL (e.g. `Failed to parse URL from
    * /x?token=abc`), so does the line. Any response, 5xx included, is a completed call: the
    * Span's status is `OK` and `statusCode` says what came back. Written only inside a Logging
-   * Context, when the trace is sampled.
+   * Context: `span.end fetch` when the trace is sampled; for an unsampled trace only a
+   * failure is written, as one `fetch failed` line at `ERROR`.
    */
   spans?: boolean
   /**

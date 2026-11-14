@@ -13,6 +13,15 @@ vi.mock('cloudflare:workers', () => ({
       this.env = env
     }
   },
+  DurableObject: class DurableObject {
+    ctx: unknown
+    env: unknown
+    constructor(ctx?: unknown, env?: unknown) {
+      this.ctx = ctx
+      this.env = env
+    }
+  },
+  WorkflowEntrypoint: class WorkflowEntrypoint {},
 }))
 
 import {
@@ -25,7 +34,7 @@ import {
   defaultLoggerFromEnv,
   withLogging,
 } from './workers'
-import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
+import { DurableObject, RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
 import type { EnvMapping, SessionInit, TracedServiceBinding } from './workers'
 import {
   runWithLogger,
@@ -1023,6 +1032,14 @@ describe('Default Logger from the Workers helpers', () => {
 })
 
 const ownNames = (o: object) => new Set(Object.getOwnPropertyNames(o))
+/** Lines whose message is `message`. */
+const linesOf = (entries: Record<string, unknown>[], message: string) =>
+  entries.filter((e) => e.message === message)
+/** A Durable Object's `ctx`, with an ID that has `name` when given. */
+const state = (name?: string) =>
+  ({
+    id: { toString: () => 'a'.repeat(64), ...(name ? { name } : {}) },
+  }) as unknown as DurableObjectState
 const spanEnds = (entries: Record<string, unknown>[]) =>
   entries.filter((e) => String(e.message).startsWith('span.end '))
 
@@ -1033,7 +1050,8 @@ describe('withLogging', () => {
   })
 
   const ENV = { NAME: 'search', ENVIRONMENT: 'staging', VERSION: '1.2.3' }
-  const CALLER_TRACEPARENT = '00-11111111111111111111111111111111-2222222222222222-01'
+  const CALLER_TRACEPARENT_BASE = '00-11111111111111111111111111111111-2222222222222222'
+  const CALLER_TRACEPARENT = `${CALLER_TRACEPARENT_BASE}-01`
   const RPC_METHODS = new Set([
     'constructor',
     'search',
@@ -1197,6 +1215,89 @@ describe('withLogging', () => {
     expect(() => worker.fail()).toThrow(failure)
 
     expect(spanEnds(entries)).toHaveLength(0)
+  })
+
+  it('without spans, a throw writes one ERROR line with err and rpcMethod, then is rethrown', async () => {
+    const entries = _captureEntries()
+    const thrown = new Error('fetch failed')
+    class WithFetch extends SearchWorker {
+      fetch(_request: Request): Response {
+        throw thrown
+      }
+    }
+    const worker = new (withLogging(WithFetch))({} as any, ENV)
+
+    expect(() => worker.fail()).toThrow(failure)
+    await expect(worker.failAsync()).rejects.toBe(failure)
+    expect(() => worker.fetch(new Request('https://svc/x'))).toThrow(thrown)
+    worker.search('cats')
+
+    expect(entries.filter((e) => e.level === 'ERROR')).toEqual([
+      expect.objectContaining({
+        message: 'WithFetch.fail failed',
+        span: expect.objectContaining({ operation: 'WithFetch.fail', status: 'ERROR' }),
+        rpcMethod: 'fail',
+        entrypoint: 'WithFetch',
+        service: 'search',
+        err: expect.objectContaining({ message: 'search failed' }),
+      }),
+      expect.objectContaining({ message: 'WithFetch.failAsync failed', rpcMethod: 'failAsync' }),
+      expect.objectContaining({
+        message: 'WithFetch.fetch failed',
+        rpcMethod: 'fetch',
+        err: expect.objectContaining({ message: 'fetch failed' }),
+      }),
+    ])
+    expect(spanEnds(entries)).toHaveLength(0)
+  })
+
+  it('without spans, a throw through a nested call or a session is logged once', async () => {
+    const entries = _captureEntries()
+    class Nesting extends SearchWorker {
+      outer() {
+        return this.fail()
+      }
+    }
+    const worker = new (withLogging(Nesting, { session: true }))({} as any, ENV)
+
+    expect(() => worker.outer()).toThrow(failure)
+    expect(() => tracedSession(worker).fail()).toThrow(failure)
+
+    expect(entries.filter((e) => e.level === 'ERROR')).toEqual([
+      expect.objectContaining({ message: 'Nesting.outer failed', rpcMethod: 'outer' }),
+      expect.objectContaining({ message: 'Nesting.fail failed', rpcMethod: 'fail' }),
+    ])
+  })
+
+  it('with spans, a throw writes only the span.end at ERROR; unsampled, one failed line', async () => {
+    const entries = _captureEntries()
+    class WithFetch extends WorkerEntrypoint<typeof ENV> {
+      fetch(_request: Request): Response {
+        throw failure
+      }
+    }
+    const worker = new (withLogging(WithFetch, { spans: true }))({} as any, ENV)
+    const sampled = new Request('https://svc/x', { headers: { traceparent: CALLER_TRACEPARENT } })
+    const unsampled = new Request('https://svc/x', {
+      headers: { traceparent: `${CALLER_TRACEPARENT_BASE}-00` },
+    })
+
+    expect(() => worker.fetch(sampled)).toThrow(failure)
+    expect(entries.filter((e) => e.level === 'ERROR').map((e) => e.message)).toEqual([
+      'span.end WithFetch.fetch',
+    ])
+
+    entries.length = 0
+    expect(() => worker.fetch(unsampled)).toThrow(failure)
+    expect(entries).toEqual([
+      expect.objectContaining({
+        level: 'ERROR',
+        message: 'WithFetch.fetch failed',
+        span: expect.objectContaining({ operation: 'WithFetch.fetch', status: 'ERROR' }),
+        rpcMethod: 'fetch',
+        traceId: '11111111111111111111111111111111',
+      }),
+    ])
   })
 
   it('a public method called from another one stays in the same trace', () => {
@@ -1641,5 +1742,203 @@ describe('withLogging', () => {
     const NoFetch = withLogging(SearchWorker, { fetch: false })
     expect(withLogging(NoFetch, { fetch: false })).toBe(NoFetch)
     expect(() => withLogging(NoFetch)).toThrow(/already wrapped with other options/)
+  })
+})
+
+describe('withLogging(DurableObject)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+  })
+
+  const ENV = { NAME: 'jobs', ENVIRONMENT: 'staging', VERSION: '2.0.0' }
+  const CALLER_TRACEPARENT = '00-11111111111111111111111111111111-2222222222222222-01'
+  const failure = new Error('room failed')
+
+  class Room extends DurableObject<typeof ENV> {
+    async join(user: string) {
+      getLogger().info({ user }, 'joined')
+      return { user, trace: getTraceContext() }
+    }
+
+    async fail(): Promise<never> {
+      throw failure
+    }
+
+    fetch(request: Request) {
+      getLogger().info('room fetch')
+      return new Response(String(getTraceContext()?.traceId ?? ''), {
+        headers: { path: new URL(request.url).pathname },
+      })
+    }
+
+    alarm() {
+      getLogger().info('alarm')
+    }
+
+    webSocketMessage(_ws: WebSocket, message: string | ArrayBuffer) {
+      getLogger().info({ message: String(message) }, 'ws message')
+    }
+
+    webSocketClose(_ws: WebSocket, code: number) {
+      getLogger().info({ code }, 'ws close')
+    }
+
+    webSocketError(_ws: WebSocket, error: unknown) {
+      getLogger().info({ error: String(error) }, 'ws error')
+    }
+
+    connect() {
+      getLogger().info('connect')
+    }
+  }
+
+  it('fetch, RPC methods, alarm and webSocket* each run in a Logging Context', async () => {
+    const entries = _captureEntries()
+    const Logged = withLogging(Room)
+    const room = new Logged(state('lobby'), ENV)
+
+    const { trace } = await room.join('ada')
+    await room.fetch(new Request('https://room/x'))
+    await room.alarm()
+    await room.webSocketMessage({} as WebSocket, 'hi')
+    await room.webSocketClose({} as WebSocket, 1000)
+    await room.webSocketError({} as WebSocket, 'boom')
+
+    const common = {
+      service: 'jobs',
+      environment: 'staging',
+      durableObject: 'Room',
+      objectId: 'a'.repeat(64),
+      objectName: 'lobby',
+    }
+    expect(linesOf(entries, 'joined')[0]).toMatchObject({
+      ...common,
+      rpcMethod: 'join',
+      traceId: trace!.traceId,
+    })
+    for (const [message, rpcMethod] of [
+      ['room fetch', 'fetch'],
+      ['alarm', 'alarm'],
+      ['ws message', 'webSocketMessage'],
+      ['ws close', 'webSocketClose'],
+      ['ws error', 'webSocketError'],
+    ]) {
+      const line = linesOf(entries, message)[0]
+      expect(line).toMatchObject({ ...common, rpcMethod })
+      expect(line!.traceId).toMatch(/^[0-9a-f]{32}$/)
+    }
+  })
+
+  it('has objectId alone when the id has no name', async () => {
+    const entries = _captureEntries()
+    const room = new (withLogging(Room))(state(), ENV)
+    await room.join('bob')
+    const line = linesOf(entries, 'joined')[0]
+    expect(line).toMatchObject({ durableObject: 'Room', objectId: 'a'.repeat(64) })
+    expect(line).not.toHaveProperty('objectName')
+  })
+
+  it('fetch continues a traceparent header; fetch: false leaves it unwrapped', async () => {
+    const room = new (withLogging(Room))(state('lobby'), ENV)
+    const res = await room.fetch(
+      new Request('https://room/x', { headers: { traceparent: CALLER_TRACEPARENT } }),
+    )
+    expect(await res.text()).toBe('11111111111111111111111111111111')
+
+    const Unwrapped = withLogging(class Plain extends Room {}, { fetch: false })
+    const plain = new Unwrapped(state('lobby'), ENV)
+    expect(await (await plain.fetch(new Request('https://room/x'))).text()).toBe('')
+  })
+
+  it('values pass through; a throw is logged in a Span at ERROR and rethrown unchanged', async () => {
+    const entries = _captureEntries()
+    const room = new (withLogging(Room, { spans: true }))(state('lobby'), ENV)
+
+    expect((await room.join('ada')).user).toBe('ada')
+    await expect(room.fail()).rejects.toBe(failure)
+
+    expect(linesOf(entries, 'span.end Room.join')[0]).toMatchObject({
+      level: 'INFO',
+      durableObject: 'Room',
+      objectName: 'lobby',
+    })
+    expect(linesOf(entries, 'span.end Room.fail')[0]).toMatchObject({
+      level: 'ERROR',
+      rpcMethod: 'fail',
+      span: { status: 'ERROR', error: 'room failed' },
+      err: { message: 'room failed' },
+    })
+  })
+
+  it('without spans, a throw in alarm, fetch or an RPC method writes one ERROR line', async () => {
+    const entries = _captureEntries()
+    const alarmFailure = new Error('alarm failed')
+    class Failing extends Room {
+      override alarm() {
+        throw alarmFailure
+      }
+
+      override fetch(_request: Request): Response {
+        throw failure
+      }
+    }
+    const room = new (withLogging(Failing))(state('lobby'), ENV)
+
+    expect(() => room.alarm()).toThrow(alarmFailure)
+    expect(() => room.fetch(new Request('https://room/x'))).toThrow(failure)
+    await expect(room.fail()).rejects.toBe(failure)
+
+    const common = { level: 'ERROR', durableObject: 'Failing', objectId: 'a'.repeat(64) }
+    expect(entries).toEqual([
+      expect.objectContaining({
+        ...common,
+        message: 'Failing.alarm failed',
+        rpcMethod: 'alarm',
+        err: expect.objectContaining({ message: 'alarm failed' }),
+      }),
+      expect.objectContaining({ ...common, message: 'Failing.fetch failed', rpcMethod: 'fetch' }),
+      expect.objectContaining({
+        ...common,
+        message: 'Failing.fail failed',
+        rpcMethod: 'fail',
+        err: expect.objectContaining({ message: 'room failed' }),
+      }),
+    ])
+  })
+
+  it('adds no RPC methods, leaves connect unwrapped, and rejects session', () => {
+    const Logged = withLogging(Room)
+    expect(ownNames(Logged.prototype)).toEqual(
+      new Set([
+        'alarm',
+        'constructor',
+        'fail',
+        'fetch',
+        'join',
+        'webSocketClose',
+        'webSocketError',
+        'webSocketMessage',
+      ]),
+    )
+    expect(() => withLogging(class Other extends Room {}, { session: true } as any)).toThrow(
+      /session/,
+    )
+  })
+
+  it('honours the Env Mapping and registers the Default Logger in the constructor', async () => {
+    const entries = _captureEntries()
+    const Logged = withLogging(class Mapped extends Room {}, { env: { service: 'NAME' } })
+    expect(new Logged(state('lobby'), { NAME: 'rooms' } as typeof ENV)).toBeInstanceOf(Logged)
+
+    getLogger().info('outside')
+    expect(linesOf(entries, 'outside')[0]).toMatchObject({ service: 'rooms' })
+  })
+
+  it('still throws for a class that is neither a WorkerEntrypoint nor a DurableObject', () => {
+    class Plain {
+      method() {}
+    }
+    expect(() => withLogging(Plain as any)).toThrow(/WorkerEntrypoint or DurableObject/)
   })
 })

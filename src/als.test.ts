@@ -508,6 +508,45 @@ describe('withSpan', () => {
     expect(inner!.parentSpanId).toBe(outer!.spanId)
   })
 
+  it('for an unsampled trace, a throw still writes one ERROR line with err, and is rethrown', async () => {
+    const entries = _captureEntries()
+    const failure = new Error('disk full')
+
+    await runWithLogger(
+      { logger: createLogger({ service: 'svc' }), traceparent: UNSAMPLED },
+      async () => {
+        expect(() =>
+          withSpan('db.read', () => {
+            throw failure
+          }),
+        ).toThrow(failure)
+        await expect(
+          withSpan('db.write', async () => {
+            throw failure
+          }),
+        ).rejects.toBe(failure)
+        await expect(withSpan('db.ok', async () => 1)).resolves.toBe(1)
+      },
+    )
+
+    expect(entries.find(isSpanEnd)).toBeUndefined()
+    expect(entries).toHaveLength(2)
+    for (const [entry, operation] of [
+      [entries[0], 'db.read'],
+      [entries[1], 'db.write'],
+    ] as const) {
+      expect(entry).toMatchObject({
+        level: 'ERROR',
+        message: `${operation} failed`,
+        span: { operation, status: 'ERROR', error: 'disk full' },
+        err: { message: 'disk full' },
+        traceId: '0af7651916cd43dd8448eb211c80319c',
+      })
+      // No timing on an unsampled trace: only the failure is recorded.
+      expect(entry.span).not.toHaveProperty('duration')
+    }
+  })
+
   it('copies Context Fields in; fields set inside stay inside', () => {
     const entries = _captureEntries()
     const context = { logger: createLogger({ service: 'svc' }), fields: { requestId: 'req-1' } }

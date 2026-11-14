@@ -18,6 +18,9 @@
 //     root trace without a carrier, the caller's trace through session(), and Spans.
 //   - Request lines: one request.end per request (no request.error), INFO for 200 and ERROR
 //     for 500, with the matched route and the main Worker's include / endFields options.
+//   - Units of work outside HTTP (dev/main-worker/src/units.ts): a cron run, a queue message
+//     continuing the producer's trace, a Workflow step re-entering run's Logging Context, and a
+//     Durable Object's RPC methods, fetch and alarm, each with their Context Fields.
 //
 // Runs on Linux, macOS and Windows.
 //
@@ -508,6 +511,109 @@ function checkWithLogging(results, failures) {
   }
 }
 
+/** Context Fields and trace for each unit of work in dev/main-worker/src/units.ts. */
+function checkUnits(results, failures) {
+  const body = (path) => results.find((r) => r.path === path)?.body ?? {}
+  const records = readLogRecords().map(({ record }) => record)
+  const line = (message, where = () => true) =>
+    records.find((r) => r.message === message && where(r))
+  const isRoot = (r) =>
+    /^[0-9a-f]{32}$/.test(r?.traceId ?? '') && r.traceId !== TRACE_ID && !('parentSpanId' in r)
+  const expectFields = (label, record, fields) => {
+    const wrong = Object.entries(fields).filter(([key, value]) => record?.[key] !== value)
+    if (!record || wrong.length > 0)
+      failures.push(`logs: ${label} lacks ${JSON.stringify(fields)}: ${show(record)}`)
+  }
+
+  // Cron: a new root trace with cron and scheduledTime, and one span.end scheduled.
+  const tick = line('cron tick', (r) => r.cron === '* * * * *')
+  expectFields('cron tick', tick, { service: 'pino-log-test', worker: 'pino-log-test' })
+  if (!isRoot(tick) || typeof tick?.scheduledTime !== 'number')
+    failures.push(`logs: cron tick is not a root trace with scheduledTime: ${show(tick)}`)
+  const cronSpan = line('span.end scheduled', (r) => r.traceId === tick?.traceId)
+  if (cronSpan?.span?.status !== 'OK' || cronSpan.cron !== '* * * * *')
+    failures.push(`logs: no OK span.end scheduled for the cron run: ${show(cronSpan)}`)
+
+  // Queue: the consumer continues the producer's span from the `trace` carrier in the body.
+  const job = line('queue job processed')
+  expectFields('queue job processed', job, {
+    queue: 'loggercf-dev-jobs',
+    attempts: 1,
+    traceId: TRACE_ID,
+    parentSpanId: body('/queue').spanId,
+  })
+  if (typeof job?.messageId !== 'string' || job.messageId === '')
+    failures.push(`logs: queue job processed has no messageId: ${show(job)}`)
+  const queueSpan = line('span.end queue.message', (r) => r.spanId === job?.spanId)
+  if (queueSpan?.span?.status !== 'OK') failures.push('logs: no OK span.end queue.message')
+
+  // Workflow: run continues the creator's trace; the step callback, which arrives over RPC,
+  // runs in run's Logging Context with step and attempt, one Span per attempt.
+  const { instanceId } = body('/workflow')
+  const run = line('Report run', (r) => r.workflowInstanceId === instanceId)
+  expectFields('Report run', run, {
+    workflowInstanceId: instanceId,
+    traceId: TRACE_ID,
+    parentSpanId: body('/workflow').spanId,
+  })
+  for (const attempt of [1, 2]) {
+    expectFields(
+      `Report doubling attempt ${attempt}`,
+      line('Report doubling', (r) => r.workflowInstanceId === instanceId && r.attempt === attempt),
+      { step: 'double', traceId: TRACE_ID, parentSpanId: run?.spanId },
+    )
+  }
+  const stepSpans = records.filter(
+    (r) => r.message === 'span.end double' && r.workflowInstanceId === instanceId,
+  )
+  const failedStep = stepSpans.find((r) => r.attempt === 1)
+  const okStep = stepSpans.find((r) => r.attempt === 2)
+  if (
+    stepSpans.length !== 2 ||
+    failedStep?.level !== 'ERROR' ||
+    failedStep.err?.message !== 'Report flaky' ||
+    okStep?.span?.status !== 'OK'
+  )
+    failures.push(`logs: span.end double is not ERROR then OK per attempt: ${show(stepSpans)}`)
+  expectFields(
+    'Report done',
+    line('Report done', (r) => r.workflowInstanceId === instanceId),
+    { doubled: 42, traceId: TRACE_ID },
+  )
+
+  // Durable Object: RPC methods and alarm start a root trace; fetch continues the caller's.
+  const room = { durableObject: 'Room', objectName: 'e2e-room', service: 'pino-log-test' }
+  const joined = line('Room join')
+  expectFields('Room join', joined, { ...room, rpcMethod: 'join' })
+  if (!isRoot(joined)) failures.push(`logs: Room join is not a root trace: ${show(joined)}`)
+  if (!/^[0-9a-f]{64}$/.test(joined?.objectId ?? ''))
+    failures.push(`logs: Room join has no objectId beside objectName: ${show(joined)}`)
+  expectFields('Room fetch', line('Room fetch'), {
+    ...room,
+    rpcMethod: 'fetch',
+    traceId: TRACE_ID,
+    parentSpanId: body('/durable-object').spanId,
+  })
+  expectFields('Room alarm', line('Room alarm'), { ...room, rpcMethod: 'alarm' })
+  const roomFail = line('span.end Room.fail')
+  if (
+    roomFail?.level !== 'ERROR' ||
+    roomFail.err?.message !== 'Room failure' ||
+    roomFail.durableObject !== 'Room'
+  )
+    failures.push(`logs: span.end Room.fail is not one ERROR line with err: ${show(roomFail)}`)
+}
+
+/** Wait until wrangler's output has every marker (lines logged after the response), or time out. */
+async function waitForOutput(server, markers, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const out = stripVTControlCharacters(server.readStdout())
+    if (markers.every((marker) => out.includes(marker))) return
+    await sleep(250)
+  }
+}
+
 function checkLogs(failures, results) {
   checkDefaultLogger(failures)
   const lines = readLogRecords().filter(({ record }) => record.traceId === TRACE_ID)
@@ -622,6 +728,9 @@ async function main() {
       ['/error', 500],
       ['/fetcher', 200],
       ['/logged', 200],
+      ['/durable-object', 200],
+      ['/queue', 200],
+      ['/workflow', 200],
     ]) {
       results.push(await probe(base, path, status))
     }
@@ -631,12 +740,21 @@ async function main() {
     const failures = []
     await checkInvalidRequestId(base, failures)
 
+    // Cron runs through wrangler's scheduled endpoint, not the fetch handler.
+    const cron = await fetch(`${base}/cdn-cgi/handler/scheduled?cron=*+*+*+*+*`)
+    await cron.arrayBuffer()
+    if (cron.status !== 200)
+      failures.push(`/cdn-cgi/handler/scheduled status ${cron.status}, expected 200`)
+
+    // The queue consumer, the Workflow and the alarm log after their requests return.
+    await waitForOutput(server, ['"queue job processed"', '"Report done"', '"Room alarm"'])
     await sleep(1000) // let wrangler flush the Workers' log output
     await server.flush()
 
     checkResponses(results, failures)
     checkLogs(failures, results)
     checkWithLogging(results, failures)
+    checkUnits(results, failures)
     checkForwards(forwards, base, failures)
 
     if (failures.length > 0) {
