@@ -8,7 +8,6 @@ import {
   type Logger,
 } from 'loggercf'
 import { withTrace } from 'loggercf/workers'
-import { getClientDetails } from './network'
 import type { BindService, ServiceSession } from './types'
 
 type Context = {
@@ -28,18 +27,14 @@ type Context = {
 
 const app = new Hono<Context>()
 
-app.use(useLogger(logger)).use('*', async (c, next) => {
-  // Enrich all logs with connection metadata
-  const conn = getClientDetails(c)
-  const fields: Record<string, string> = {
-    method: conn.method,
-    path: conn.path,
-  }
-  if (conn.country) fields.country = conn.country
-  if (conn.user_agent) fields.user_agent = conn.user_agent
-  setLoggerContext(fields)
-  await next()
-})
+app.use(
+  useLogger(logger, {
+    // request.start / request.end get userAgent and cf: { colo, country, asn }
+    include: { userAgent: true, cf: true },
+    // on request.end only, computed after the route handler ran
+    endFields: (c) => ({ contentType: c.res.headers.get('content-type') ?? undefined }),
+  }),
+)
 
 /** GET / Simple: log levels demo + single-hop RPC */
 app.get('/', async (c) => {

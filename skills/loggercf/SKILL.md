@@ -109,7 +109,7 @@ On Node.js, or to choose the logger yourself, call `setDefaultLogger(rootLogger)
 
 ### Per-request data goes in Context Fields
 
-Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `runWithLogger`, or call `setLoggerContext({ ... })` inside the Logging Context. Every later line in that context carries them, including `useLogger`'s `request.end` and lines from code that calls `getLogger()`. `useLogger` already adds `requestId`, and `cfRay` when the request has a `cf-ray` header.
+Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `runWithLogger`, or call `setLoggerContext({ ... })` inside the Logging Context. Every later line in that context carries them, including `useLogger`'s `request.end` and lines from code that calls `getLogger()`. `useLogger` already adds `requestId`, and `cfRay` when the request has a `cf-ray` header. In Hono, data known from the request alone can come from `useLogger`'s `fields` option, so `request.start` has it too (see [Request lines in Hono](#request-lines-in-hono)).
 
 ```ts
 import { Hono } from 'hono'
@@ -158,6 +158,38 @@ app.use(
 
 export default app
 ```
+
+### Request lines in Hono
+
+`useLogger` writes `request.start` and one `request.end` per request. `request.end` has `method`, `path` (never the query string), `route` (the matched pattern, such as `/users/:id`; group by it, not by `path`), `statusCode`, `duration`, and `err` when Hono caught an error. A throw that escapes `useLogger` (a non-`Error` value, or an `onError` that throws) is rethrown unchanged after a `request.end` at `error` with `statusCode: 500` and `statusCodeAssumed: true`: that 500 is a guess, because an outer middleware or the runtime sends the real response, and Hono hands an `Error` thrown by `onError` back to `onError` (an `HTTPException(502)` it throws becomes a 502). Don't read `statusCode` as the sent status on a line with `statusCodeAssumed`. There is no `request.error` line: find failed requests by `err` or by the level of `request.end`. That level is by default `error` for a caught error or a 5xx, `warn` for a 4xx and `info` otherwise; the `level` option changes it, so check the app's `useLogger` options before relying on it. Use the options instead of logging your own per-request summary line:
+
+```ts
+import { Hono } from 'hono'
+import { createLogger } from 'loggercf'
+import { useLogger } from 'loggercf/hono'
+
+const app = new Hono<{ Variables: { userId?: string } }>()
+app.use(
+  useLogger(createLogger({ service: 'api' }), {
+    requestStart: false, // default true; false: request.end only
+    fields: (c) => ({ tenant: c.req.header('x-tenant-id') }), // Context Fields: every line
+    endFields: (c) => ({ userId: c.get('userId') }), // request.end only, after the handlers
+    include: { userAgent: true, cf: true }, // userAgent and cf: { colo, country, asn }; off by default
+    // level: (status, err, c) => LogLevel, for request.end
+  }),
+)
+
+export default app
+```
+
+```ts wrong
+app.use(async (c, next) => {
+  await next()
+  c.var.logger.info({ status: c.res.status, url: c.req.url }, 'request done') // duplicates request.end, and logs the query string
+})
+```
+
+`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, returns a Promise or an unknown level, or returns an object that throws when read) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`. Keys `useLogger` owns, its Owned Keys (`requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration`, `err`, ...) are dropped from a `fields`/`endFields` result, with one WARN listing them in `droppedKeys`: pick other names. For a streamed body, `request.end` is written when the handler returns the `Response`, so `duration` leaves out the streaming and an error while streaming is not on it: log that from the stream's error callback.
 
 ### Context helpers need a Logging Context
 
