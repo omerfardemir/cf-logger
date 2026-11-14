@@ -12,11 +12,11 @@ pnpm add hono
 
 ## Entry Points
 
-| Import             | Contents                                                                                                                                               |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setDefaultLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
-| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware; `UseLoggerOptions`, `RequestIdOptions`, `RequestIdSource` types                                           |
-| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withLogging`, `withTrace`, `tracedSession`, `defaultLoggerFromEnv`                               |
+| Import             | Contents                                                                                                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setDefaultLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types                                      |
+| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware; `UseLoggerOptions`, `RequestIdOptions`, `RequestIdSource` types                                                                                |
+| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withLogging`, `withTrace`, `tracedSession`, `defaultLoggerFromEnv`, `withScheduled`, `withQueueMessage`, `withWorkflow`, `tracedStep` |
 
 ## How Trace Propagation Works
 
@@ -173,29 +173,25 @@ Outside a Logging Context the fields are **ignored**, and one `WARN` line naming
 
 ### `runWithLogger(options, fn)`
 
-Open a **Logging Context**: the single way to scope logging to one unit of work (HTTP request, RPC call, queue message, cron run). `useLogger` and `TracedSession` use it under the hood.
+Open a **Logging Context**: the single way to scope logging to one unit of work (HTTP request, RPC call, queue message, cron run). `useLogger`, `TracedSession` and the Workers helpers use it under the hood. On Workers, prefer the helper for the unit of work: [`withScheduled`](#withscheduledhandler-options) for cron, [`withQueueMessage`](#withqueuemessagebatch-message-fn-options) for queue messages, [`withWorkflow`](#withworkflowclass-options-and-tracedstepstep-name-) for Workflows and [`withLogging`](#withloggingclass-options) for RPC entrypoints and Durable Objects. Use `runWithLogger` for any other work, such as a Node.js job.
 
 ```ts
 import { runWithLogger, createLogger, getLogger } from 'loggercf'
 
-const logger = createLogger({ service: 'queue-handler' }) // Root Logger, created once
+const logger = createLogger({ service: 'billing-jobs' }) // Root Logger, created once
 
-export default {
-  async queue(batch) {
-    for (const msg of batch.messages) {
-      await runWithLogger(
-        {
-          logger,
-          traceparent: msg.body.traceparent, // optional: continue a trace
-          tracestate: msg.body.tracestate, // optional
-          fields: { messageId: msg.id }, // optional: per-unit-of-work fields
-        },
-        async () => {
-          getLogger().info('processing') // has traceId, spanId, messageId
-        },
-      )
-    }
-  },
+for (const job of await loadJobs()) {
+  await runWithLogger(
+    {
+      logger,
+      traceparent: job.trace?.traceparent, // optional: continue a trace
+      tracestate: job.trace?.tracestate, // optional
+      fields: { jobId: job.id }, // optional: per-unit-of-work fields
+    },
+    async () => {
+      getLogger().info('processing') // has traceId, spanId, jobId
+    },
+  )
 }
 ```
 
@@ -235,13 +231,13 @@ import { getTraceCarrier, runWithLogger } from 'loggercf'
 // Producer: put the carrier in the message
 await env.QUEUE.send({ ...payload, trace: getTraceCarrier() })
 
-// Consumer: continue the same trace
+// Any other consumer: continue the same trace
 await runWithLogger({ logger, ...msg.body.trace }, async () => {
   /* ... */
 })
 ```
 
-`useLogger` (HTTP headers), `tracedFetch` (outgoing requests) and `tracedSession` / `withTrace` (RPC) do this for you.
+`useLogger` (HTTP headers), `tracedFetch` (outgoing requests) and `tracedSession` / `withTrace` (RPC) do this for you. So do [`withQueueMessage`](#withqueuemessagebatch-message-fn-options) and [`withWorkflow`](#withworkflowclass-options-and-tracedstepstep-name-), which read the carrier from the body's or payload's `trace` key.
 
 ### `loggerOptionsFromEnv(env, mapping?)`
 
@@ -495,10 +491,14 @@ export default tracedWorker(MySession, {
   },
 })
 
-// Or extend it if you need scheduled(), queue(), etc:
+// Or extend it if you need scheduled(), queue(), etc. (see withScheduled):
+const nightly = withScheduled(async (controller, env: Env) => {
+  /* ... */
+})
+
 export default class extends tracedWorker(MySession) {
-  async scheduled(event: ScheduledEvent) {
-    /* ... */
+  scheduled(controller: ScheduledController) {
+    return nightly(controller, this.env, this.ctx)
   }
 }
 ```
@@ -576,8 +576,8 @@ export default class extends TracedEntrypoint<Env> {
     return new MySession(init, this.rootLogger, this.env)
   }
 
-  async scheduled(event: ScheduledEvent) {
-    /* ... */
+  scheduled(controller: ScheduledController) {
+    return nightly(controller, this.env, this.ctx) // a withScheduled() handler
   }
 }
 ```
@@ -605,7 +605,7 @@ The Root Logger is created once per Logger Options and is the same instance `Tra
 
 ### `withLogging(Class, options?)`
 
-Opens a Logging Context around every public method of an existing `WorkerEntrypoint`, without changing its callers. Use it for RPC Workers that have not moved to Traced Sessions yet: without it, their methods run outside every Logging Context, so their lines have no `traceId`, no Context Fields, and `setLoggerContext` is ignored.
+Opens a Logging Context around every public method of an existing `WorkerEntrypoint`, without changing its callers. Use it for RPC Workers that have not moved to Traced Sessions yet: without it, their methods run outside every Logging Context, so their lines have no `traceId`, no Context Fields, and `setLoggerContext` is ignored. It wraps [Durable Objects](#durable-objects) too.
 
 ```ts
 import { WorkerEntrypoint } from 'cloudflare:workers'
@@ -629,7 +629,7 @@ export default withLogging(SearchWorker, { spans: true })
 - The class is wrapped, not changed: arguments, return values (sync or async, an `RpcTarget` or a stub included) and thrown errors pass through as they are. The returned class has exactly the RPC methods `Class` has. `scheduled`, `queue`, `tail` and the other handlers are inherited unchanged; they log through the [Default Logger](#setdefaultloggerlogger), which the constructor registers unless one is already set (first seen wins).
 - `entrypoint` is the class's `name`. A build that minifies class names changes it. An anonymous class (`withLogging(class extends WorkerEntrypoint { ... })`) gets no `entrypoint` field, and its Spans are named by the method alone.
 - Only the methods the class has when it is wrapped are wrapped. Put every RPC method on the class before wrapping it. A method added or overridden in a subclass of the wrapped class (`class Ext extends withLogging(A) { extra() {} }`) runs outside every Logging Context, so extend the wrapped class only to add handlers.
-- The class must extend `WorkerEntrypoint`. Wrapping anything else throws, a Durable Object class included: its `alarm` and `webSocket*` handlers would be wrapped as RPC methods.
+- The class must extend `WorkerEntrypoint` or `DurableObject` (see [Durable Objects](#durable-objects)). Wrapping anything else throws.
 - A `TracedEntrypoint` subclass keeps its own `rootLogger`, so its `envMapping` / `loggerOptions` overrides apply. Passing `env` as well throws; override `envMapping` instead.
 - Wrapping a class that `withLogging` returned gives back the same class when the options are the same (`spans`, `session`, `fetch` and `env`), and throws when they differ. Wrapping a subclass of one throws too. This keeps each call to one `span.end`.
 - With `session: true`, a field the caller passes named `rpcMethod` or `entrypoint` is replaced by the receiver's.
@@ -641,6 +641,34 @@ export default withLogging(SearchWorker, { spans: true })
 | `session` | `false` | Add `session(init)`, which returns a Traced Session over the same methods (see below). Throws if the class already has a `session` method or getter, own or inherited.                                   |
 | `fetch`   | `true`  | Wrap `fetch` in its own Logging Context. Pass `false` when `fetch` hands the request to a Hono app that uses `useLogger`, which opens one itself.                                                        |
 | `env`     | `{}`    | [Env Mapping](#loggeroptionsfromenvenv-mapping) for the Root Logger.                                                                                                                                     |
+
+#### Durable Objects
+
+`withLogging` takes a `DurableObject` subclass too. `fetch`, every RPC method, `alarm`, `webSocketMessage`, `webSocketClose` and `webSocketError` each run in their own Logging Context, with the Context Fields `rpcMethod` (the method or handler name), `durableObject` (the class name) and `objectName` (`ctx.id.name`, for an object reached with `getByName` / `idFromName`) or, without a name, `objectId` (`ctx.id.toString()`).
+
+```ts
+import { DurableObject } from 'cloudflare:workers'
+import { getLogger } from 'loggercf'
+import { withLogging } from 'loggercf/workers'
+
+class Room extends DurableObject<Env> {
+  async join(user: string) {
+    getLogger().info({ user }, 'joined') // ..., rpcMethod, durableObject: 'Room', objectName
+  }
+
+  async alarm() {
+    getLogger().info('alarm') // its own Logging Context, rpcMethod: 'alarm'
+  }
+}
+
+const LoggedRoom = withLogging(Room, { spans: true })
+export { LoggedRoom as Room } // the class_name in wrangler.jsonc
+```
+
+- A call on a stub carries no Trace Carrier, so RPC methods, `alarm` and the WebSocket handlers start a new root trace. `fetch` continues an incoming `traceparent` header (pass it from the caller, as in the `/durable-object` route of `dev/main-worker`); `fetch: false` leaves it unwrapped, as for an entrypoint.
+- `spans`, `fetch` and `env` work as above. `session` is not available: the object gets no RPC method it did not have. `connect` is inherited unchanged.
+- The constructor, and code it runs in `blockConcurrencyWhile`, runs outside every Logging Context and logs through the Default Logger.
+- `wrangler types` refers to the export as a type (`DurableObjectNamespace<import('./src/index').Room>`), and a `const` holding the wrapped class is only a value. Write `export const Room = withLogging(class Room extends DurableObject<Env> { ... })` and `export type Room = InstanceType<typeof Room>`: the named class expression keeps `durableObject: 'Room'`, and the type alias gives `wrangler types` its type (see `dev/main-worker/src/units.ts`).
 
 #### Migrating to Traced Sessions one caller at a time
 
@@ -670,6 +698,103 @@ async function lookup(env: Env) {
 ```
 
 Once every caller uses a Traced Session, you can stay on `withLogging`, or move the methods into a `TracedSession` subclass with `tracedWorker()` to name each Span yourself with `this.traced(fn, 'op')`. Callers do not change again.
+
+### `withScheduled(handler, options?)`
+
+Runs a `scheduled` (cron) handler in a Logging Context. Each run starts a new root trace, carries the Context Fields `cron` and `scheduledTime` (ms since the epoch), and is recorded as one Span, `span.end scheduled`: `INFO` with its duration, or `ERROR` with `err` when the handler throws or rejects.
+
+```ts
+import { getLogger } from 'loggercf'
+import { withScheduled } from 'loggercf/workers'
+
+export default {
+  fetch: app.fetch,
+  scheduled: withScheduled(async (controller, env: Env) => {
+    getLogger().info('nightly cleanup') // service, traceId, cron, scheduledTime
+  }),
+} satisfies ExportedHandler<Env>
+```
+
+- The Root Logger comes from the handler's `env` through `loggerOptionsFromEnv(env, options.env)`, cached per isolate and registered as the [Default Logger](#setdefaultloggerlogger) unless one is already set (first seen wins).
+- The handler gets the same arguments; its return value is returned and a throw rethrown unchanged. It never calls `controller.noRetry()`.
+- On a class entrypoint (`WorkerEntrypoint`, `TracedEntrypoint`, `tracedWorker(...)`, `withLogging(...)`), wrap the handler once at module scope and call it from the method with `this.env` and `this.ctx`:
+
+```ts
+const nightly = withScheduled(async (controller, env: Env) => {
+  /* ... */
+})
+
+export default class extends WorkerEntrypoint<Env> {
+  scheduled(controller: ScheduledController) {
+    return nightly(controller, this.env, this.ctx)
+  }
+}
+```
+
+Locally, `wrangler dev` runs it on `GET /cdn-cgi/handler/scheduled?cron=*+*+*+*+*`.
+
+### `withQueueMessage(batch, message, fn, options?)`
+
+Runs the work for one queue message in its own Logging Context. Call it inside your own loop: it never iterates the batch and never calls `ack`, `retry`, `ackAll` or `retryAll`. Your code decides those.
+
+```ts
+import { getLogger, getTraceCarrier } from 'loggercf'
+import { withQueueMessage } from 'loggercf/workers'
+
+// Producer, inside a Logging Context: put the Trace Carrier under `trace`
+await env.ORDERS.send({ ...order, trace: getTraceCarrier() })
+
+// Consumer
+export default {
+  async queue(batch, env) {
+    for (const message of batch.messages) {
+      await withQueueMessage(batch, message, async () => {
+        getLogger().info('processing') // ..., traceId, queue, messageId, attempts
+        message.ack()
+      })
+    }
+  },
+} satisfies ExportedHandler<Env, Order>
+```
+
+- Context Fields: `queue` (the batch's queue name), `messageId` and `attempts`.
+- When the body has a Trace Carrier under `trace`, the message continues the producer's trace (its `parentSpanId` is the producer's span). Otherwise it starts a new root trace. The body is never changed.
+- Each call is one Span, `span.end queue.message`: `INFO` with its duration, `ERROR` with `err` when `fn` throws or rejects. `fn`'s value is returned and a throw rethrown unchanged, so a message you neither `ack` nor `retry` follows the queue's own rules.
+- It takes the batch because a message does not know its queue's name. Spans are written only for a sampled trace (`traceFlags` `01`, which a new root trace always is).
+- The Root Logger is built from the Worker's env (`import { env } from 'cloudflare:workers'`, as [`defaultLoggerFromEnv`](#defaultloggerfromenvmapping) reads it) with `options.env` as the Env Mapping, and registered as the Default Logger unless one is already set.
+
+### `withWorkflow(Class, options?)` and `tracedStep(step, name, ...)`
+
+`withWorkflow` returns a subclass of a `WorkflowEntrypoint` whose `run(event, step)` runs in a Logging Context with the Context Field `workflowInstanceId`. `tracedStep(step, name, [config], callback, [rollbackOptions])` calls `step.do` with the same arguments and records each attempt as a Span named after the step, with the Context Fields `step` and `attempt`.
+
+```ts
+import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers'
+import { getLogger, getTraceCarrier } from 'loggercf'
+import { tracedStep, withWorkflow } from 'loggercf/workers'
+
+class Report extends WorkflowEntrypoint<Env, Params> {
+  async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
+    const rows = await tracedStep(step, 'fetch rows', async () => fetchRows(event.payload))
+    await tracedStep(step, 'send', { retries: { limit: 3, delay: '5 seconds' } }, async (ctx) => {
+      getLogger().info({ rows: rows.length }, 'sending') // workflowInstanceId, step, attempt
+    })
+  }
+}
+
+const LoggedReport = withWorkflow(Report)
+export { LoggedReport as Report } // the class_name in wrangler.jsonc
+
+// Creator, to continue its trace in the Workflow:
+await env.REPORT.create({ params: { ...params, trace: getTraceCarrier() } })
+```
+
+- The engine calls a step's callback back over RPC, outside the Logging Context `run` opened. `tracedStep` re-enters it, so lines in the callback carry `workflowInstanceId` and the run's trace, and the step's Span is a child of the run's span. A plain `step.do` callback logs outside every Logging Context.
+- Each attempt writes its own `span.end <step>`: `ERROR` with `err` for an attempt that throws (the error is rethrown so the engine retries), `INFO` for the one that succeeds. A step the engine already has a result for (on a replay) runs no callback and writes nothing.
+- Replay and determinism are kept: `step.do` is called once per `tracedStep`, with the same name, config and rollback options, and the callback's value or error passes through unchanged. No step is added, and nothing random reaches a step's name or config.
+- When the payload has a Trace Carrier under `trace`, `run` continues it, so every replay of one instance shares the creator's `traceId`. Without one, each execution of `run` (every replay after a sleep, wait or restart) starts a new root trace.
+- `run` itself writes no Span: it is replayed from the top after every sleep and wait, and a pause or termination surfaces in it as a throw. Lines logged in `run` outside a step repeat on each replay.
+- `run` must be a method, not a class field. The Root Logger comes from the Workflow's `env` with `options.env`, registered as the Default Logger in the constructor unless one is already set. Wrapping the result again with the same options returns it; a subclass of it throws. As for Durable Objects, add `export type Report = InstanceType<typeof Report>` if `wrangler types` refers to the export as a type.
+- Outside a Logging Context (a class not wrapped with `withWorkflow`), `tracedStep` calls `step.do` with the arguments untouched and logs nothing.
 
 ### Service Type Convention
 

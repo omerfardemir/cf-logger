@@ -7,7 +7,7 @@ Structured logging and distributed trace propagation for Cloudflare Workers (and
 ### Logging
 
 **Logging Context**:
-The per-unit-of-work scope (an HTTP request, an RPC call, a queue message, a cron run) that carries one Trace Context, the Context Fields, and the logger every log line in that work is written through.
+The per-unit-of-work scope (an HTTP request, an RPC call, a queue message, a cron run, a Workflow run, a Durable Object call or alarm) that carries one Trace Context, the Context Fields, and the logger every log line in that work is written through.
 _Avoid_: Request Scope, ALS context, store. Not to be confused with Hono's `Context` (`c`).
 
 **Context Fields**:
@@ -31,7 +31,7 @@ The logger built once per process or isolate from Logger Options, carrying only 
 _Avoid_: base logger, factory
 
 **Default Logger**:
-The Root Logger (or a `.child()` of one with per-process fields only) an isolate registers for code that runs outside every Logging Context (module scope, plain RPC methods, `scheduled`, shared packages); `getLogger()` writes through it there. Set with `setDefaultLogger`, or registered by `useLogger`, `TracedEntrypoint`, `tracedWorker`, `withLogging` or `defaultLoggerFromEnv` the first time they see a Root Logger, unless one is already set. It carries no Context Fields, so no unit of work's data reaches another through it. `getLogger()` outside a Logging Context resolves it when each line is written, so a logger kept at module scope before registration still uses it.
+The Root Logger (or a `.child()` of one with per-process fields only) an isolate registers for code that runs outside every Logging Context (module scope, plain RPC methods, `scheduled`, shared packages); `getLogger()` writes through it there. Set with `setDefaultLogger`, or registered by `useLogger`, `TracedEntrypoint`, `tracedWorker`, `withLogging`, `withScheduled`, `withQueueMessage`, `withWorkflow` or `defaultLoggerFromEnv` the first time they see a Root Logger, unless one is already set. It carries no Context Fields, so no unit of work's data reaches another through it. `getLogger()` outside a Logging Context resolves it when each line is written, so a logger kept at module scope before registration still uses it.
 _Avoid_: global logger, fallback logger
 
 **Logger Options**:
@@ -48,7 +48,7 @@ The W3C identity of the current work: trace ID, current span ID, optional parent
 _Avoid_: trace, traceparent (that is only its wire form)
 
 **Trace Carrier**:
-The wire form of a Trace Context: a `traceparent` value plus an optional `tracestate`, as it travels in HTTP headers, an RPC `session()` call, or a queue message.
+The wire form of a Trace Context: a `traceparent` value plus an optional `tracestate`, as it travels in HTTP headers, an RPC `session()` call, or a queue message body or Workflow payload (under the key `trace`, where `withQueueMessage` and `withWorkflow` read it).
 _Avoid_: trace headers, propagation context
 
 **Span**:
