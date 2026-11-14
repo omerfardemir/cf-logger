@@ -9,8 +9,8 @@ import {
   setLoggerContext,
   _reset,
   _captureEntries,
-  tracedFetch,
 } from './logger'
+import { tracedFetch } from './fetch'
 import { buildTraceparent } from './trace'
 
 describe('getLogger outside ALS context', () => {

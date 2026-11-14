@@ -2,6 +2,7 @@ import pino from 'pino/browser.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type {
   LogFields,
+  LogValue,
   LoggerOptions,
   Logger,
   TraceCarrier,
@@ -9,7 +10,7 @@ import type {
   ALSStore,
   SpanContext,
 } from './types'
-import { resolveTrace, generateSpanId, injectCarrier, toCarrier } from './trace'
+import { resolveTrace, generateSpanId, toCarrier } from './trace'
 import {
   buildRecord,
   nodeSink,
@@ -526,22 +527,14 @@ export function getTraceCarrier(): TraceCarrier {
 }
 
 /**
- * A `fetch` wrapper that sends the current Trace Carrier as
- * `traceparent` / `tracestate` headers.
+ * Read one Context Field of the current Logging Context.
  *
- * Outside a Logging Context, behaves like regular `fetch()`.
- *
- * @param {RequestInfo | URL} input - The fetch URL or Request.
- * @param {RequestInit} [init] - Optional fetch init options. Never mutated.
- * @returns {Promise<Response>} The fetch response.
+ * @internal Not exported from the package entry points.
+ * @param {string} key - The field name (e.g. `'requestId'`).
+ * @returns {LogValue | undefined} The value, or `undefined` outside a Logging Context.
  */
-export function tracedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-  const carrier = getTraceCarrier()
-  if (!carrier.traceparent) return fetch(input, init)
-
-  const headers = new Headers(init?.headers)
-  injectCarrier(carrier, (name, value) => headers.set(name, value))
-  return fetch(input, { ...init, headers })
+export function getContextField(key: string): LogValue | undefined {
+  return als.getStore()?.fields[key]
 }
 
 /**
