@@ -82,24 +82,27 @@ export interface UseLoggerOptions {
    * Picks the level of `request.end` from the final status and the error Hono caught
    * (`c.error`), if any. Defaults to `defaultRequestEndLevel`: `error` for an error or a 5xx,
    * `warn` for a 4xx, `info` otherwise. When it throws or returns an unknown level, the default
-   * is used and one WARN is written.
+   * is used and one WARN is written. It is not called for a throw that escapes `useLogger` (see
+   * `useLogger`): that `request.end` is always at `error`, because its status is only assumed.
    */
   level?: (statusCode: number, err: Error | undefined, c: Context) => LogLevel
   /**
    * Context Fields to add at the start of the request, so they are on every line of it,
    * `request.start` included. Runs before the handlers, so it sees the request but not what
    * later middleware sets. Must be synchronous. It cannot set the keys `useLogger` owns:
-   * `requestId`, `requestIdRejected`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration`, `err`, and
-   * `userAgent` / `cf` when `include` turns them on; those keys are dropped from its result.
-   * When it throws or returns anything but a plain object or `undefined` (a Promise, for
-   * example), the request is logged without these fields and one WARN is written.
+   * `requestId`, `requestIdRejected`, `cfRay`, `method`, `path`, `route`, `statusCode`,
+   * `statusCodeAssumed`, `duration`, `err`, `originalErr`, and `userAgent` / `cf` when `include`
+   * turns them on. Those keys are dropped from its result, and one WARN names them (never their
+   * values). When it throws, returns anything but a plain object or `undefined` (a Promise, for
+   * example), or its result throws while it is read (a getter, a Proxy), the request is logged
+   * without these fields and one WARN is written.
    */
   fields?: (c: Context) => LogFields | undefined
   /**
    * Fields to add to `request.end` only. Runs after the handlers, so it sees `c.var` values
    * they set (an authenticated user ID, for example). Must be synchronous. It cannot set the
-   * same keys `fields` cannot. When it throws or returns anything but a plain object or
-   * `undefined`, `request.end` is written without these fields and one WARN is written.
+   * same keys `fields` cannot, and the same WARN names the ones it returned. When it fails the
+   * way `fields` can, `request.end` is written without these fields and one WARN is written.
    */
   endFields?: (c: Context) => LogFields | undefined
   /** Request details to add to `request.start` and `request.end`. All off by default. */
@@ -232,8 +235,10 @@ const OWN_KEYS = [
   'path',
   'route',
   'statusCode',
+  'statusCodeAssumed',
   'duration',
   'err',
+  'originalErr',
 ]
 
 function ownKeys(include: RequestDetailsOptions): readonly string[] {
@@ -479,9 +484,15 @@ function requestIdPicker(
  * and never drops `request.end`: the line is written without that hook's result, and one WARN
  * per hook per `useLogger()` call names it.
  *
- * A throw Hono does not turn into a response (a non-`Error` value, or an `onError` that
- * throws) still gets a `request.end` at `error`, with `statusCode: 500` and `err`, and is
- * then rethrown unchanged. No response headers are set then: there is no response yet.
+ * A throw that escapes `useLogger` (a non-`Error` value, or an `onError` that throws) still
+ * gets a `request.end` at `error`, with `err`, and is then rethrown unchanged. `useLogger`
+ * cannot see the response that follows, so `statusCode: 500` there is an assumption, marked by
+ * `statusCodeAssumed: true`: what an outer middleware or the runtime sends decides the real
+ * status. Hono catches an `Error` thrown by `onError` one level up and calls `onError` again
+ * with it, so an `onError` that throws `new HTTPException(502)` and answers an
+ * `HTTPException` with `getResponse()` sends a 502. When `onError` threw, `err` is its error
+ * and `originalErr` the handler's error that `onError` was handling. No response headers are
+ * set: there is no response yet.
  *
  * @template T - The type of user-defined log fields.
  * @param {Logger<T> | ((c: Context) => Logger<T>)} loggerOrFactory - A logger instance or a per-request factory.
@@ -568,9 +579,14 @@ export function useLogger<T extends LogFields = LogFields>(
       }
 
       const duration = Date.now() - start
-      // A runtime answers an exception that escapes the app with a 500.
+      // useLogger cannot see the response to a throw that escapes it. 500 is what a runtime
+      // answers an uncaught exception with, but the real status is decided above useLogger: by
+      // an outer middleware, or by Hono, which hands an Error thrown by onError back to onError
+      // and sends whatever it returns. So the line says the status is assumed.
       const statusCode = escaped ? 500 : c.res.status
       const err = escaped ? thrownErr(escaped.thrown) : c.error
+      // When onError throws, c.error still holds the handler's error, which led to it.
+      const originalErr = escaped && c.error !== escaped.thrown ? c.error : undefined
 
       const endExtra = endFields ? callHook(() => endFields(c), isFields, keepFields) : undefined
       if (endExtra?.failure) reportHookFailure(logger, 'endFields', endExtra.failure)
@@ -599,8 +615,10 @@ export function useLogger<T extends LogFields = LogFields>(
           path,
           route: answeredRoute(c, startRoute),
           statusCode,
+          ...(escaped && { statusCodeAssumed: true }),
           duration,
           ...(err !== undefined && { err }),
+          ...(originalErr !== undefined && { originalErr }),
         },
         `request.end ${method} ${path}`,
       )

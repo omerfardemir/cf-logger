@@ -1450,8 +1450,82 @@ describe('useLogger throws that escape Hono', () => {
     expect(ends).toHaveLength(1)
     expect(ends[0]).toMatchObject({
       level: 'ERROR',
+      statusCode: 500,
+      statusCodeAssumed: true,
       err: { type: 'object', message: '{"code":42}' },
     })
+    expect(ends[0]).not.toHaveProperty('originalErr')
+  })
+
+  it('assumes 500 when onError throws, though Hono may answer with another status', async () => {
+    // Hono catches onError's throw at useLogger's own level and calls onError again with it,
+    // so the response is whatever onError returns for the second error: here, a 502.
+    const { end, app } = optionsApp({ level: () => 'info' })
+    app.onError((err) => {
+      if (err instanceof HTTPException) return err.getResponse()
+      throw new HTTPException(502, { message: 'bad gateway' })
+    })
+    app.get('/x', () => {
+      throw new Error('handler broke')
+    })
+    const res = await app.request('/x')
+    expect(res.status).toBe(502)
+    expect(end()).toMatchObject({
+      level: 'ERROR',
+      statusCode: 500,
+      statusCodeAssumed: true,
+      err: expect.objectContaining({ type: 'HTTPException', message: 'bad gateway' }),
+      originalErr: expect.objectContaining({ type: 'Error', message: 'handler broke' }),
+    })
+  })
+
+  it('logs ERROR 500 for a throw an outer middleware turns into a 200, marked as assumed', async () => {
+    const lines = _captureLines()
+    const app = new Hono()
+    app.use(async (c, next) => {
+      try {
+        await next()
+      } catch {
+        c.res = new Response('recovered', { status: 200 })
+      }
+    })
+    app.use(useLogger(createLogger({ service: 'test-mw' })))
+    app.get('/x', () => {
+      throw 'x'
+    })
+    const res = await app.request('/x')
+    expect(res.status).toBe(200)
+    const end = lines
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find(messageStartsWith('request.end'))
+    expect(end).toMatchObject({ level: 'ERROR', statusCode: 500, statusCodeAssumed: true })
+  })
+
+  it('does not mark a status Hono answered with as assumed', async () => {
+    const { ends, app } = optionsApp()
+    app.get('/ok', (c) => c.text('ok'))
+    app.get('/boom', () => {
+      throw new Error('kaboom')
+    })
+    await app.request('/ok')
+    await app.request('/boom')
+    expect(ends()).toHaveLength(2)
+    for (const e of ends()) {
+      expect(e).not.toHaveProperty('statusCodeAssumed')
+      expect(e).not.toHaveProperty('originalErr')
+    }
+  })
+
+  it('does not let a hook set statusCodeAssumed or originalErr', async () => {
+    const forged = () => ({ statusCodeAssumed: 'forged', originalErr: 'forged' })
+    const { entries, app } = optionsApp({ fields: forged, endFields: forged })
+    app.get('/x', (c) => c.text('ok'))
+    await app.request('/x')
+    expect(entries().length).toBeGreaterThan(0)
+    for (const entry of entries()) {
+      expect(entry).not.toHaveProperty('statusCodeAssumed')
+      expect(entry).not.toHaveProperty('originalErr')
+    }
   })
 })
 
