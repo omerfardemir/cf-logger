@@ -19,7 +19,7 @@ import {
   tracedWorker,
   loggerOptionsFromEnv,
 } from './workers'
-import type { SessionInit, TracedServiceBinding } from './workers'
+import type { EnvMapping, SessionInit, TracedServiceBinding } from './workers'
 import {
   runWithLogger,
   getTraceContext,
@@ -92,31 +92,6 @@ describe('Session Factory trace propagation', () => {
       tracestate: 'vendor=value',
     })
     expect(entries.find((e) => e.message === 'working')).toMatchObject({ requestId: 'req-1' })
-  })
-
-  it('loggerOptionsFromEnv maps Cloudflare env conventions', () => {
-    expect(
-      loggerOptionsFromEnv({
-        NAME: 'api',
-        LOG_LEVEL: 'debug',
-        ENVIRONMENT: 'production',
-        VERSION: '1.2.3',
-      }),
-    ).toEqual({
-      service: 'api',
-      level: 'debug',
-      environment: 'production',
-      version: '1.2.3',
-    })
-  })
-
-  it('loggerOptionsFromEnv has safe defaults', () => {
-    expect(loggerOptionsFromEnv({})).toEqual({
-      service: 'unknown',
-      level: 'info',
-      environment: 'unknown',
-      version: 'unknown',
-    })
   })
 
   it('TracedSession.traced() sets up ALS with correct trace context', () => {
@@ -543,9 +518,52 @@ describe('TracedEntrypoint', () => {
   it('loggerOptions defaults when env vars missing', () => {
     const entrypoint = new TracedEntrypoint({} as any, {})
 
-    const opts = (entrypoint as any).loggerOptions
-    expect(opts.service).toBe('unknown')
-    expect(opts.level).toBe('info')
+    expect((entrypoint as any).loggerOptions).toStrictEqual({ service: 'unknown', level: 'info' })
+  })
+
+  it('re-exports loggerOptionsFromEnv', () => {
+    expect(loggerOptionsFromEnv({ NAME: 'api' })).toStrictEqual({ service: 'api', level: 'info' })
+  })
+
+  it('envMapping override maps fields by name and by function', () => {
+    interface Env {
+      SERVICE: string
+      RELEASE: string
+      CF_VERSION_METADATA: { id: string }
+    }
+
+    class Entrypoint extends TracedEntrypoint<Env> {
+      protected override get envMapping(): EnvMapping<Env> {
+        return { service: 'SERVICE', version: (e) => e.CF_VERSION_METADATA.id }
+      }
+    }
+
+    const entrypoint = new Entrypoint({} as any, {
+      SERVICE: 'mapped-svc',
+      RELEASE: 'unused',
+      CF_VERSION_METADATA: { id: 'version-id' },
+    })
+
+    expect((entrypoint as any).loggerOptions).toStrictEqual({
+      service: 'mapped-svc',
+      level: 'info',
+      version: 'version-id',
+    })
+  })
+
+  it('a loggerOptions override still wins over envMapping', () => {
+    class Entrypoint extends TracedEntrypoint {
+      protected override get envMapping(): EnvMapping {
+        return { service: 'SERVICE' }
+      }
+      protected override get loggerOptions() {
+        return { service: 'custom', level: 'debug' as const }
+      }
+    }
+
+    const entrypoint = new Entrypoint({} as any, { SERVICE: 'mapped' })
+    expect((entrypoint as any).rootLogger).toBeDefined()
+    expect((entrypoint as any).loggerOptions).toStrictEqual({ service: 'custom', level: 'debug' })
   })
 
   it('shares one Root Logger per isolate for the same Logger Options', () => {
@@ -627,6 +645,55 @@ describe('tracedWorker', () => {
     )
 
     expect(result).toBe(7)
+  })
+
+  it('tracedWorker(SessionClass, { env }) maps fields by name and by function', () => {
+    const entries = _captureEntries()
+
+    interface Env {
+      NAME: string
+      RELEASE: string
+      CF_VERSION_METADATA: { id: string; tag: string }
+    }
+
+    class TestSession extends TracedSession<Env> {
+      hello() {
+        return this.traced(() => this.logger.info('hello'))
+      }
+    }
+
+    const Worker = tracedWorker(TestSession, {
+      env: { environment: 'RELEASE', version: (e) => e.CF_VERSION_METADATA.tag },
+    })
+    const instance = new Worker(undefined, {
+      NAME: 'mapped-worker',
+      RELEASE: 'canary',
+      VERSION: 'ignored',
+      CF_VERSION_METADATA: { id: 'id-1', tag: 'tag-1' },
+    })
+    instance.session({}).hello()
+
+    expect(entries[0]).toMatchObject({
+      service: 'mapped-worker',
+      environment: 'canary',
+      version: 'tag-1',
+    })
+  })
+
+  it('tracedWorker() without options reads the default vars', () => {
+    const entries = _captureEntries()
+
+    class TestSession extends TracedSession {
+      hello() {
+        return this.traced(() => this.logger.info('hello'))
+      }
+    }
+
+    const instance = new (tracedWorker(TestSession))(undefined, { NAME: 'plain', VERSION: '3.0.0' })
+    instance.session({}).hello()
+
+    expect(entries[0]).toMatchObject({ service: 'plain', version: '3.0.0' })
+    expect(entries[0]).not.toHaveProperty('environment')
   })
 
   it('session receives env and can access it for multi-hop RPC', () => {
