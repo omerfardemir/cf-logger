@@ -1,5 +1,12 @@
 import { WorkerEntrypoint } from 'cloudflare:workers'
-import { TracedSession, tracedWorker, withLogging } from 'loggercf/workers'
+import {
+  TracedEntrypoint,
+  TracedSession,
+  tracedWorker,
+  withLogging,
+  type EnvMapping,
+  type SessionInit,
+} from 'loggercf/workers'
 import { getLogger, type LogLevel } from 'loggercf'
 import type { LoggedMathService, MathService } from '../../services'
 
@@ -68,3 +75,34 @@ const LoggedMathEntrypoint = withLogging(LoggedMath, {
   env: envMapping,
 })
 export { LoggedMathEntrypoint as LoggedMath }
+
+/** TracedMath's session: one method, its own Span name, so main's span checks stay unambiguous. */
+class TracedMathSession extends TracedSession<Env> {
+  async cube(n: number): Promise<number> {
+    return this.traced(() => {
+      const result = n * n * n
+      this.logger.info({ n, result }, 'Cubed %d = %d', n, result)
+      return result
+    }, 'tracedMath.cube')
+  }
+}
+
+/**
+ * A hand-written TracedEntrypoint whose Env Mapping hook derives `version` from env. Its
+ * hooks are keyed by symbols (`TracedEntrypoint.envMapping` and the rest), so a caller
+ * holding the binding (main's TRACED) cannot read them or run the derive function.
+ * Bound in dev/main-worker/wrangler.jsonc with `"entrypoint": "TracedMath"`.
+ */
+export class TracedMath extends TracedEntrypoint<Env> {
+  protected override get [TracedEntrypoint.envMapping](): EnvMapping<Env> {
+    return { version: (env) => `traced-${env.CF_VERSION_METADATA?.id}` }
+  }
+
+  fetch(): Response {
+    return new Response(null, { status: 404 })
+  }
+
+  session(init: SessionInit): TracedMathSession {
+    return new TracedMathSession(init, this[TracedEntrypoint.rootLogger], this.env)
+  }
+}

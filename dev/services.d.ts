@@ -22,3 +22,8 @@ export interface LoggedMathService {
   square(n: number): Promise<number>
   fail(): Promise<never>
 }
+
+/** math-worker's TracedMath entrypoint: a hand-written TracedEntrypoint subclass */
+export interface TracedMathService {
+  cube(n: number): Promise<number>
+}
