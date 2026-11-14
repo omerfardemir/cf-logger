@@ -1,5 +1,5 @@
 import type { Context, MiddlewareHandler } from 'hono'
-import { routePath } from 'hono/route'
+import { matchedRoutes, routePath } from 'hono/route'
 import type { LogFields, LogLevel, Logger } from './types'
 import { extractCarrier, injectCarrier } from './trace'
 import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './logger'
@@ -138,6 +138,22 @@ function attempt<R>(fn: () => R): Attempt<R> {
   }
 }
 
+/**
+ * The pattern of the endpoint a request was routed to, read when `useLogger` runs.
+ *
+ * Of the routes matched after `useLogger` itself, the first one registered for a method
+ * (`app.get`, `app.post`, `app.on`, ...; `app.use` and `app.all` register for every method) is
+ * the endpoint. A catch-all registered after it does not replace it, and a middleware that
+ * answers before it runs (an auth check returning 401) does not either. When no such route
+ * matched, the last matched route's pattern is used: an `app.all` handler's, or a middleware's
+ * (`/*`) for a request no handler matched.
+ */
+function routeOf(c: Context): string {
+  const routes = matchedRoutes(c).slice(c.req.routeIndex + 1)
+  const route = routes.find((r) => r.method !== 'ALL') ?? routes.at(-1)
+  return route?.path ?? routePath(c)
+}
+
 /** The `include` details of a request; a detail the request does not have is left out. */
 function requestDetails(c: Context, include: RequestDetailsOptions): LogFields {
   const details: LogFields = {}
@@ -267,8 +283,8 @@ export function useLogger<T extends LogFields = LogFields>(
     const method = c.req.method
     // The pathname only: a query string often carries tokens and personal data.
     const path = new URL(c.req.url).pathname
-    // The last matched route is the handler's pattern, already known before the handler runs.
-    const route = routePath(c, -1)
+    // Known before the handler runs, so request.start has it too.
+    const route = routeOf(c)
     const details = requestDetails(c, include)
     const appFields = fields && attempt(() => fields(c))
 

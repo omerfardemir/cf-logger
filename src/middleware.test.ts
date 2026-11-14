@@ -665,6 +665,30 @@ describe('useLogger route', () => {
     expect(end()).toMatchObject({ statusCode: 401, route: '/admin/users/:id' })
   })
 
+  it('ignores a catch-all handler registered after the one that answered', async () => {
+    const { start, end, app } = optionsApp()
+    app.get('/users/:id', (c) => c.text('ok'))
+    app.get('*', (c) => c.text('fallback'))
+    await app.request('/users/1')
+    expect(start().route).toBe('/users/:id')
+    expect(end().route).toBe('/users/:id')
+  })
+
+  it('uses the wildcard pattern when only a wildcard handler matches', async () => {
+    const { end, app } = optionsApp()
+    app.get('/users/:id', (c) => c.text('ok'))
+    app.get('/files/*', (c) => c.text('fallback'))
+    await app.request('/files/a/b')
+    expect(end().route).toBe('/files/*')
+  })
+
+  it('logs the pattern of an app.all handler', async () => {
+    const { end, app } = optionsApp()
+    app.all('/any/:x', (c) => c.text('ok'))
+    await app.request('/any/1', { method: 'DELETE' })
+    expect(end().route).toBe('/any/:x')
+  })
+
   it("uses the last matching middleware's pattern when no handler matches", async () => {
     const { end, app } = optionsApp()
     app.get('/known', (c) => c.text('ok'))
