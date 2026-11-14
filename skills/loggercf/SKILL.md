@@ -137,7 +137,7 @@ export default app
 
 ### Request lines in Hono
 
-`useLogger` writes `request.start` and one `request.end` per request. `request.end` has `method`, `path` (never the query string), `route` (the matched pattern, such as `/users/:id`; group by it, not by `path`), `statusCode`, `duration`, and `err` when Hono caught an error. There is no `request.error` line: find failed requests by the level of `request.end` (`error` for a caught error or a 5xx, `warn` for a 4xx, `info` otherwise) or by `err`. Use the options instead of logging your own per-request summary line:
+`useLogger` writes `request.start` and one `request.end` per request. `request.end` has `method`, `path` (never the query string), `route` (the matched pattern, such as `/users/:id`; group by it, not by `path`), `statusCode`, `duration`, and `err` when Hono caught an error. There is no `request.error` line: find failed requests by `err` or by the level of `request.end`. That level is by default `error` for a caught error or a 5xx, `warn` for a 4xx and `info` otherwise; the `level` option changes it, so check the app's `useLogger` options before relying on it. Use the options instead of logging your own per-request summary line:
 
 ```ts
 import { Hono } from 'hono'

@@ -346,7 +346,9 @@ app.use(
 | `endFields`    | none                     | `(c) => fields`, synchronous, called after the handlers, so it sees `c.var` values they set. Added to `request.end` only.                                             |
 | `include`      | `{}`                     | `{ userAgent?: boolean, cf?: boolean }`. Adds the `User-Agent` header and Cloudflare's `request.cf` `colo`, `country` and `asn` to `request.start` and `request.end`. |
 
-Neither `fields` nor `endFields` can replace the fields `useLogger` sets itself: `requestId` and `cfRay` on every line, and `method`, `path`, `route`, `statusCode`, `duration` and `err` on `request.end`. For app data such as a user or tenant ID, use these hooks; for the request details Cloudflare provides, use `include`.
+Neither `fields` nor `endFields` can set the keys `useLogger` owns: `requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration` and `err`, plus `userAgent` and `cf` when `include` turns them on. Those keys are dropped from the hooks' results, even when the request has no value for them (no `cf-ray` header, no error). For app data such as a user or tenant ID, use these hooks; for the request details Cloudflare provides, use `include`.
+
+A hook result that sets `level`, `time` or `message` currently overrides that key of the record, on every line for `fields` and on `request.end` for `endFields`. Avoid those names until [#21](https://github.com/omerfardemir/loggercf/issues/21) settles how such keys are routed.
 
 A throwing `HTTPException` sets `c.error`, so with the default `level` a `throw new HTTPException(401)` is logged at `error`. The example above logs those at `warn`.
 
@@ -358,9 +360,13 @@ A throwing `HTTPException` sets `c.error`, so with the default `level` a `throw 
 
 The two lines differ only when a method-registered middleware runs before the handler: `request.start` can only expect that middleware's pattern. Group by `route` on `request.end`.
 
+So a cache-style `app.get('*', cache(...))` that answers a hit itself logs `route: '/*'` on that `request.end`, while a miss, answered by the handler, logs the handler's pattern. Register such a middleware with `app.use` if hits should be grouped under the handler's pattern too.
+
 **When an option fails**, `useLogger` does not let the error reach your app and does not drop a line. A `fields` that throws, or returns anything but a plain object or `undefined` (a Promise from an `async` function, a string, an array), leaves its fields off the request's lines; such an `endFields` leaves its fields off `request.end`; a `level` that throws or returns an unknown level uses the default level. Each option's first failure is reported in one WARN per `useLogger()` call, with `hook` naming the option and `err` (what it threw) or `returned` (what it returned, such as `Promise`); later failures of the same option are not repeated.
 
 `useLogger()` does not catch, create, or replace error responses. It lets Hono run downstream handlers and app-level `onError()` normally, then reads `c.error` and the final `c.res.status` after `await next()`.
+
+Hono turns a thrown `Error` into a response. A throw it does not handle (a non-`Error` value such as `throw 'boom'`, or an `onError()` that throws) makes `await next()` reject: `useLogger` still writes `request.end` at `error`, with `statusCode: 500` (what a runtime answers an uncaught exception with) and `err` (an `Error` as usual, any other value as `{ type, message }`), then rethrows the same value unchanged. The `level` option is not called for it, and no response headers are set, because there is no response yet.
 
 ---
 
