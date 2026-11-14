@@ -25,23 +25,23 @@ Imports come from exactly three entry points:
 
 ## Pick the API by unit of work
 
-| Situation                                      | Use                                                                                                           |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| HTTP in a Hono app                             | `app.use(useLogger(rootLogger))`                                                                              |
-| Receiving Worker-to-Worker RPC                 | `class S extends TracedSession<Env>`, each method body in `this.traced(fn, 'svc.op')`, `tracedWorker(S)`      |
-| Plain `WorkerEntrypoint` RPC, not yet migrated | `export default withLogging(C, { spans: true, session: true })`, then move callers to `withTrace` one by one  |
-| Durable Object                                 | `withLogging(DO)`: `fetch`, RPC methods, `alarm` and `webSocket*` each get a Logging Context                  |
-| Calling another Worker over RPC                | `withTrace(env.SVC, (s) => s.op())`, or `tracedSession(env.SVC)` for several calls                            |
-| Cron (`scheduled`)                             | `scheduled: withScheduled(async (controller, env) => { ... })`                                                |
-| Queue consumer                                 | your own loop over `batch.messages`, each message's work in `withQueueMessage(batch, message, fn)`            |
-| Workflow                                       | `withWorkflow(W)` on the `WorkflowEntrypoint` class, each step as `tracedStep(step, 'name', fn)`              |
-| Passing a trace over a queue or to a Workflow  | sender puts `trace: getTraceCarrier()` in the body or params; `withQueueMessage` / `withWorkflow` continue it |
-| Node job, any other work                       | `runWithLogger({ logger: rootLogger, ...carrier, fields }, fn)`                                               |
-| Outbound HTTP                                  | `tracedFetch(url, init)` in place of `fetch`                                                                  |
-| Calling another Worker over HTTP (binding)     | `tracedFetcher(env.SVC).fetch(request)` in place of `env.SVC.fetch(request)`                                  |
-| Timing a sub-operation                         | `withSpan('db.getUser', fn)`                                                                                  |
-| Logging from code that receives no logger      | `getLogger()`, which returns the Logging Context's logger, or the Default Logger outside one                  |
-| Code outside every Logging Context             | register a Default Logger: `defaultLoggerFromEnv()` on Workers, `setDefaultLogger(rootLogger)` elsewhere      |
+| Situation                                      | Use                                                                                                                                                      |
+| ---------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| HTTP in a Hono app                             | `app.use(useLogger(rootLogger))`                                                                                                                         |
+| Receiving Worker-to-Worker RPC                 | `class S extends TracedSession<Env>`, each method body in `this.traced(fn, 'svc.op')`, `tracedWorker(S)`                                                 |
+| Plain `WorkerEntrypoint` RPC, not yet migrated | `export default withLogging(C, { spans: true, session: true })`, then move callers to `withTrace` one by one                                             |
+| Durable Object                                 | `withLogging(DO, { spans: true })`: `fetch`, RPC methods, `alarm` and `webSocket*` each get a Logging Context; without `spans` only failures are written |
+| Calling another Worker over RPC                | `withTrace(env.SVC, (s) => s.op())`, or `tracedSession(env.SVC)` for several calls                                                                       |
+| Cron (`scheduled`)                             | `scheduled: withScheduled(async (controller, env) => { ... })`                                                                                           |
+| Queue consumer                                 | your own loop over `batch.messages`, each message's work in `withQueueMessage(batch, message, fn)`                                                       |
+| Workflow                                       | `withWorkflow(W)` on the `WorkflowEntrypoint` class, each step as `tracedStep(step, 'name', fn)`                                                         |
+| Passing a trace over a queue or to a Workflow  | sender puts `trace: getTraceCarrier()` in the body or params; `withQueueMessage` / `withWorkflow` continue it                                            |
+| Node job, any other work                       | `runWithLogger({ logger: rootLogger, ...carrier, fields }, fn)`                                                                                          |
+| Outbound HTTP                                  | `tracedFetch(url, init)` in place of `fetch`                                                                                                             |
+| Calling another Worker over HTTP (binding)     | `tracedFetcher(env.SVC).fetch(request)` in place of `env.SVC.fetch(request)`                                                                             |
+| Timing a sub-operation                         | `withSpan('db.getUser', fn)`                                                                                                                             |
+| Logging from code that receives no logger      | `getLogger()`, which returns the Logging Context's logger, or the Default Logger outside one                                                             |
+| Code outside every Logging Context             | register a Default Logger: `defaultLoggerFromEnv()` on Workers, `setDefaultLogger(rootLogger)` elsewhere                                                 |
 
 Queue consumer continuing a producer's trace:
 

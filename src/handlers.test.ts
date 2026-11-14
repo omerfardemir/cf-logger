@@ -439,7 +439,7 @@ describe('withQueueMessage', () => {
     expect(entries[0]).toMatchObject({
       level: 'ERROR',
       message: 'queue.message failed',
-      operation: 'queue.message',
+      span: { operation: 'queue.message', status: 'ERROR' },
       queue: 'orders',
       messageId: 'x',
       attempts: 2,
@@ -680,7 +680,7 @@ describe('withWorkflow and tracedStep', () => {
     expect(failed.map((e) => e.attempt)).toEqual([1, 2])
     expect(failed[0]).toMatchObject({
       level: 'ERROR',
-      operation: 'charge',
+      span: { operation: 'charge', status: 'ERROR' },
       step: 'charge',
       workflowInstanceId: 'inst-1',
       traceId: '11111111111111111111111111111111',
@@ -762,6 +762,23 @@ describe('withWorkflow and tracedStep', () => {
         fakeStep(2) as any,
       ),
     ).rejects.toBe(failure)
+  })
+
+  it('a run that throws outside every step is rethrown unchanged and writes no ERROR line', async () => {
+    const entries = _captureEntries()
+    const failure = new Error('bad input')
+    class Report extends WorkflowEntrypoint<typeof ENV> {
+      async run(_event: unknown, _step: unknown) {
+        throw failure
+      }
+    }
+    await expect(
+      new (withWorkflow(Report))({} as ExecutionContext, ENV).run(
+        event() as any,
+        fakeStep() as any,
+      ),
+    ).rejects.toBe(failure)
+    expect(entries.filter((e) => e.level === 'ERROR')).toHaveLength(0)
   })
 
   it('tracedStep outside a Logging Context calls step.do unchanged and logs nothing', async () => {

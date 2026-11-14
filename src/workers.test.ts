@@ -1235,7 +1235,7 @@ describe('withLogging', () => {
     expect(entries.filter((e) => e.level === 'ERROR')).toEqual([
       expect.objectContaining({
         message: 'WithFetch.fail failed',
-        operation: 'WithFetch.fail',
+        span: expect.objectContaining({ operation: 'WithFetch.fail', status: 'ERROR' }),
         rpcMethod: 'fail',
         entrypoint: 'WithFetch',
         service: 'search',
@@ -1293,7 +1293,7 @@ describe('withLogging', () => {
       expect.objectContaining({
         level: 'ERROR',
         message: 'WithFetch.fetch failed',
-        operation: 'WithFetch.fetch',
+        span: expect.objectContaining({ operation: 'WithFetch.fetch', status: 'ERROR' }),
         rpcMethod: 'fetch',
         traceId: '11111111111111111111111111111111',
       }),

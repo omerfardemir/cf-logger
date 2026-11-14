@@ -538,11 +538,12 @@ describe('withSpan', () => {
       expect(entry).toMatchObject({
         level: 'ERROR',
         message: `${operation} failed`,
-        operation,
+        span: { operation, status: 'ERROR', error: 'disk full' },
         err: { message: 'disk full' },
         traceId: '0af7651916cd43dd8448eb211c80319c',
       })
-      expect(entry).not.toHaveProperty('span')
+      // No timing on an unsampled trace: only the failure is recorded.
+      expect(entry.span).not.toHaveProperty('duration')
     }
   })
 

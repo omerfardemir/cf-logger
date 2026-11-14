@@ -125,7 +125,8 @@ export class TracedSession<E = unknown> extends RpcTarget {
    *
    * Each call gets its own span ID whose parent is the caller's span. When
    * `operation` is provided, the call is reported as a Span (`span.end` with
-   * timing and status) if the trace is sampled.
+   * timing and status) if the trace is sampled; for an unsampled trace a throw is
+   * still logged, as one `<operation> failed` line at `ERROR`.
    *
    * @template R - The return type of `fn`.
    * @param {() => R} fn - The function to execute inside the Logging Context.
@@ -551,7 +552,7 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
  *
  * A call that throws or rejects is always logged at `ERROR` with `err`, then rethrown
  * unchanged: with `spans`, as its `span.end` line; without, as one
- * `<Class>.<method> failed` line with `operation` and `err`, written by the call that
+ * `<Class>.<method> failed` line with `err` and a `span` object without timing, written by the call that
  * opened the Logging Context (a nested call leaves it to that one, so the error is
  * logged once). For an unsampled trace, `spans` writes only that `failed` line too.
  *
@@ -660,10 +661,11 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
   }
 
   /**
-   * The Root Logger for one entrypoint instance: its own `rootLogger` for a
-   * `TracedEntrypoint`, otherwise the cached one for its env and the Env Mapping.
+   * The Root Logger for one wrapped instance (an entrypoint or a Durable Object): its own
+   * `rootLogger` for a `TracedEntrypoint`, otherwise the cached one for its env and the
+   * Env Mapping.
    *
-   * @param {object} target - The entrypoint instance.
+   * @param {object} target - The wrapped instance.
    * @returns {Logger} The Root Logger.
    */
   const instanceRootLogger = (target: object): Logger =>
@@ -710,7 +712,8 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
   Object.defineProperty(Logged, 'name', { value: entrypoint, configurable: true })
 
   /**
-   * Wrap one entrypoint method: a new Logging Context, or a child Span of the current one.
+   * Wrap one method of an entrypoint or Durable Object: a new Logging Context, or a child
+   * Span of the current one.
    *
    * @param {string} name - The method name.
    * @param {Method} method - The class's implementation.

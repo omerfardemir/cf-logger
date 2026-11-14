@@ -199,7 +199,7 @@ Without a valid `traceparent` a new root trace starts. Either way the context ge
 
 ### `withSpan(operation, fn)`
 
-Time a sub-operation as a **Span** nested in the current Logging Context: new `spanId`, `parentSpanId` = the current span, same `traceId`. Works sync or async; errors are logged and rethrown. Logs `span.end` only when the trace is sampled; for an unsampled trace a throw still writes one `<operation> failed` line at `ERROR` with `operation` and `err`. Outside a Logging Context it just runs `fn`.
+Time a sub-operation as a **Span** nested in the current Logging Context: new `spanId`, `parentSpanId` = the current span, same `traceId`. Works sync or async; errors are logged and rethrown. Logs `span.end` only when the trace is sampled; for an unsampled trace a throw still writes one `<operation> failed` line at `ERROR` with `err` and a `span` object without timing (`operation`, `status: 'ERROR'`, `error`), so a query on `span.status = 'ERROR'` finds both. An error the app catches inside the Span still counts: the Span threw, so it is an `ERROR` line. Outside a Logging Context it just runs `fn`.
 
 ```ts
 import { withSpan } from 'loggercf'
@@ -822,7 +822,7 @@ export default {
 - When the body has a Trace Carrier under `trace`, the message continues the producer's trace (its `parentSpanId` is the producer's span). Otherwise it starts a new root trace. The body is never changed.
 - Each call is one Span, `span.end queue.message`: `INFO` with its duration, `ERROR` with `err` when `fn` throws or rejects. `fn`'s value is returned and a throw rethrown unchanged, so a message you neither `ack` nor `retry` follows the queue's own rules.
 - It takes the batch because a message does not know its queue's name.
-- For an unsampled trace (`traceFlags` `00`) the `span.end` timing line is skipped, but a throw is still logged: one `queue.message failed` line at `ERROR` with `operation` and `err`. A new root trace is always sampled.
+- For an unsampled trace (`traceFlags` `00`) the `span.end` timing line is skipped, but a throw is still logged: one `queue.message failed` line at `ERROR` with `err` and a `span` object without timing (`operation`, `status: 'ERROR'`, `error`). A new root trace is always sampled.
 - `await` (or return) every call. The batch is acked implicitly when `queue` returns, so with a missing `await` the handler can return, and the batch be acked, while the work is still running, and its throw is lost.
 - Running the messages concurrently is safe: `await Promise.all(batch.messages.map((m) => withQueueMessage(batch, m, () => handle(m))))`. Each call has its own Logging Context, so Context Fields and traces never mix between messages.
 - The Root Logger is built from the Worker's env (`import { env } from 'cloudflare:workers'`, as [`defaultLoggerFromEnv`](#defaultloggerfromenvmapping) reads it) with `options.env` as the Env Mapping, and registered as the Default Logger unless one is already set.
@@ -836,24 +836,24 @@ import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloud
 import { getLogger, getTraceCarrier } from 'loggercf'
 import { tracedStep, withWorkflow } from 'loggercf/workers'
 
-class Report extends WorkflowEntrypoint<Env, Params> {
-  async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
-    const rows = await tracedStep(step, 'fetch rows', async () => fetchRows(event.payload))
-    await tracedStep(step, 'send', { retries: { limit: 3, delay: '5 seconds' } }, async (ctx) => {
-      getLogger().info({ rows: rows.length }, 'sending') // workflowInstanceId, step, stepCount, attempt
-    })
-  }
-}
-
-const LoggedReport = withWorkflow(Report)
-export { LoggedReport as Report } // the class_name in wrangler.jsonc
+export const Report = withWorkflow(
+  class Report extends WorkflowEntrypoint<Env, Params> {
+    async run(event: WorkflowEvent<Params>, step: WorkflowStep) {
+      const rows = await tracedStep(step, 'fetch rows', async () => fetchRows(event.payload))
+      await tracedStep(step, 'send', { retries: { limit: 3, delay: '5 seconds' } }, async (ctx) => {
+        getLogger().info({ rows: rows.length }, 'sending') // workflowInstanceId, step, stepCount, attempt
+      })
+    }
+  },
+) // the class_name in wrangler.jsonc
+export type Report = InstanceType<typeof Report> // for `wrangler types`
 
 // Creator, to continue its trace in the Workflow:
 await env.REPORT.create({ params: { ...params, trace: getTraceCarrier() } })
 ```
 
 - The engine calls a step's callback back over RPC, outside the Logging Context `run` opened. `tracedStep` re-enters it, so lines in the callback carry `workflowInstanceId` and the run's trace, and the step's Span is a child of the run's span. A plain `step.do` callback logs outside every Logging Context.
-- Each attempt writes its own `span.end <step>`: `ERROR` with `err` for an attempt that throws (the error is rethrown so the engine retries), `INFO` for the one that succeeds. For an unsampled trace (`traceFlags` `00`) the `span.end` timing line is skipped, but a throw is still logged: one `<step> failed` line at `ERROR` with `operation` and `err`. A step the engine already has a result for (on a replay) runs no callback and writes nothing.
+- Each attempt writes its own `span.end <step>`: `ERROR` with `err` for an attempt that throws (the error is rethrown so the engine retries), `INFO` for the one that succeeds. For an unsampled trace (`traceFlags` `00`) the `span.end` timing line is skipped, but a throw is still logged: one `<step> failed` line at `ERROR` with `err` and a `span` object without timing (`operation`, `status: 'ERROR'`, `error`). A step the engine already has a result for (on a replay) runs no callback and writes nothing.
 - A rollback handler (`rollbackOptions.rollback`) also arrives over RPC; `tracedStep` re-enters the run's Logging Context for it as a Span `rollback <step>`, with `step`, `stepCount` and `rollback: true`. A function-valued `retries.delay` is not wrapped: it runs outside every Logging Context (its lines carry no trace), so keep it a pure computation of the delay.
 - Replay and determinism are kept: `step.do` is called once per `tracedStep`, with the same name and the same config object, and the callback's value or error passes through unchanged. The rollback options are passed as a copy with the handler wrapped (the same `rollbackConfig` object); your object is not changed. No step is added, and nothing random reaches a step's name or config.
 - When the payload has a Trace Carrier under `trace`, `run` continues it, so every replay of one instance shares the creator's `traceId`. Without one, each execution of `run` (every replay after a sleep, wait or restart) starts a new root trace, so one instance's lines span several `traceId`s: join them on `workflowInstanceId`, or pass `trace: getTraceCarrier()` to `create()`.
@@ -922,7 +922,7 @@ The span object intentionally does **not** duplicate `traceId`/`spanId`/`parentS
 
 Outgoing HTTP calls can be Spans too: pass `spans: true` to `tracedFetch` or `tracedFetcher` (see [Outgoing request options](#outgoing-request-options)).
 
-Span logging is **optional**. Without an operation name, `traced()` only opens the Logging Context. `span.end` lines are skipped when the trace is unsampled (`traceFlags` bit 0 unset), but a throw never is: for an unsampled trace a Span that throws writes one `<operation> failed` line at `ERROR`, with `operation` and `err` and no `span` object.
+Span logging is **optional**. Without an operation name, `traced()` only opens the Logging Context. `span.end` lines are skipped when the trace is unsampled (`traceFlags` bit 0 unset), but a throw never is: for an unsampled trace a Span that throws writes one `<operation> failed` line at `ERROR`, with `err` and a `span` object without timing (`operation`, `status: 'ERROR'`, `error`).
 
 ```json
 {
