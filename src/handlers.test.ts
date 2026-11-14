@@ -360,6 +360,15 @@ describe('withQueueMessage', () => {
     }
   })
 
+  it("drops a carrier's tracestate when its traceparent is invalid", async () => {
+    const m = queueMessage({
+      trace: { traceparent: 'garbage', tracestate: 'v='.padEnd(4096, 'x') },
+    })
+    const carrier = await withQueueMessage(batch(m), m, () => getTraceCarrier())
+    expect(carrier.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+    expect(carrier).not.toHaveProperty('tracestate')
+  })
+
   it('never acks or retries: the app decides, and the value passes through', async () => {
     const m = queueMessage({ n: 1 })
     const b = batch(m)
