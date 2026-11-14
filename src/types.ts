@@ -187,8 +187,9 @@ export interface ALSStore<T extends LogFields = LogFields> {
  *
  * A line logged while it runs (its own code logs), through any logger, writes
  * each `Error` as only `{ type, message, serializeErrorFailed: 'logged from
- * inside serializeError' }`, so it can't call itself again or write what it
- * leaves out.
+ * inside serializeError' }`, so a synchronous serializer can't call itself
+ * again or write what it leaves out (an `Error` nested two or more levels deep
+ * whose class has its own `toJSON` is still written by that `toJSON`).
  *
  * `defaultSerialize(e)` gives `e`'s default shape, with the values inside it
  * (`cause`, an `Error`-valued property, `errors`) kept as they are: loggercf

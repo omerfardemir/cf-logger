@@ -521,6 +521,8 @@ export function invalidResult(result: unknown): string | undefined {
   if (result === null) return 'serializeError returned null'
   if (typeof result === 'object') {
     if (typeof (result as { then?: unknown }).then !== 'function') return undefined
+    // A rejected Promise is ours to drop, not an unhandled rejection; another thenable's `then` is user code, left alone.
+    if (result instanceof Promise) result.catch(() => {})
     return `serializeError returned ${result instanceof Promise ? 'a Promise' : 'a thenable'}`
   }
   const kind = typeof result

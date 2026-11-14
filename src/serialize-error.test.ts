@@ -376,6 +376,28 @@ describe('serializeError in Logger Options', () => {
     },
   )
 
+  it('a rejecting async serializer leaves no unhandled rejection', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const entries = _captureEntries()
+      const serializeError = (async () => {
+        throw new Error('serializer failed')
+      }) as unknown as ErrorSerializer
+      createLogger({ service: 'svc', serializeError }).error(
+        new Error('x', { cause: new Error('y') }),
+      )
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(entries[0].err).toMatchObject({
+        serializeErrorFailed: 'serializeError returned a Promise',
+      })
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
   it('a non-function serializeError throws at createLogger', () => {
     expect(() => createLogger({ service: 'svc', serializeError: 'no' as never })).toThrow(
       'serializeError must be a function',

@@ -70,7 +70,7 @@ The `serializeError` Logger Option, `(err, defaultSerialize) => object`: writes 
 _Avoid_: error formatter, redaction
 
 **Line Limits**:
-The `limits` Logger Option, off by default. `maxStringLength` cuts a longer string value, wherever it is, to that many characters plus `…[truncated from <n> chars]`. `maxRecordBytes` trims a line larger than that many UTF-8 bytes to fit, largest values first, keeping the Protected Fields. Whatever they cut is marked in the line.
+The `limits` Logger Option, off by default. `maxStringLength` cuts a longer string value, wherever it is, to that many characters plus `…[truncated from <n> chars]`. `maxRecordBytes` trims a line larger than that many UTF-8 bytes to fit, largest values first, keeping the Protected Fields. Whatever they cut or trim is marked in the line.
 _Avoid_: truncation (only one of the two), size cap
 
 **Protected Fields**:
