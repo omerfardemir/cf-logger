@@ -371,6 +371,8 @@ export interface RecordEntry extends RoutedArgs {
   level: string
   /** The logger bindings (`createLogger` / `.child()`). */
   bindings: LogRecord
+  /** The line's re-write budget, which the message's placeholders may have spent from. */
+  budget?: Budget
 }
 
 /**
@@ -384,7 +386,7 @@ export interface RecordEntry extends RoutedArgs {
  * is not dropped. `Error` values are serialized with `serializeError()`: at
  * the top level, in `errors`, and in `args` items (one level down, e.g.
  * `args: [{ err }]`), each `Error` once per line. Never mutates `entry`'s
- * values.
+ * values. `stringifyRecord()` of the result spends from `entry.budget`.
  *
  * @param {RecordEntry} entry - The call: time, level, bindings and the routed arguments.
  * @param {RecordContext} [context] - The current Logging Context, if any.
@@ -414,6 +416,9 @@ export function buildRecord(entry: RecordEntry, context?: RecordContext): LogRec
     record.args = record.args.map((item) => serializeOverflowItem(item, cache))
 
   if (context) applyTrace(record, context.trace)
+  const { budget } = entry
+  if (budget && (budget.values < MAX_REWRITTEN_VALUES || budget.chars < MAX_REWRITTEN_CHARS))
+    lineBudgets.set(record, budget) // only when the message spent some of it
   return record
 }
 
@@ -428,9 +433,49 @@ const MAX_REWRITTEN_VALUES = 10_000
 /**
  * How many characters of keys and strings one line may write again inside
  * repeats, before a repeat is `"[Repeated]"`: a shared object holding a long
- * string costs its length, not one value.
+ * string costs its length, not one value. A long string (see `LONG_STRING`)
+ * written again outside a repeat costs its length too.
  */
 const MAX_REWRITTEN_CHARS = 64 * 1024
+
+/**
+ * From this length on, a string the line has already written is a repeat,
+ * like a shared object: written again while it fits `MAX_REWRITTEN_CHARS`,
+ * then `"[Repeated]"`. Shorter strings repeat freely.
+ */
+const LONG_STRING = 1024
+
+/**
+ * What one line may still write again inside repeats. One per line, shared
+ * by its message's `%j` / `%o` / `%O` placeholders and the walk of its record.
+ */
+export interface Budget {
+  /** Values left (see `MAX_REWRITTEN_VALUES`). */
+  values: number
+  /** Characters left (see `MAX_REWRITTEN_CHARS`). */
+  chars: number
+}
+
+/**
+ * A full budget, for one new line.
+ *
+ * @returns {Budget} The budget.
+ */
+export const newBudget = (): Budget => ({
+  values: MAX_REWRITTEN_VALUES,
+  chars: MAX_REWRITTEN_CHARS,
+})
+
+/** The budget each record from `buildRecord()` is written with, when its entry had one. */
+const lineBudgets = new WeakMap<LogRecord, Budget>()
+
+/** What the walks before this one wrote on the same line: `%j` placeholders earlier in the message. */
+interface Written {
+  /** The objects they wrote, outside repeats. */
+  objects: WeakSet<object>
+  /** The long strings they wrote, outside repeats. */
+  strings: Set<string>
+}
 
 /** Thrown by a strict walk: the value cannot be written as JSON as it is. */
 const NOT_JSON = new Error('not JSON')
@@ -444,14 +489,16 @@ interface Walk {
   strict: boolean
   /** The objects on the path to the current value: a real cycle. */
   ancestors: Set<object>
-  /** Every object written so far, outside repeats: a repeat. */
-  seen: WeakSet<object>
+  /** Every object this walk wrote so far, outside repeats: a repeat. */
+  seen: Set<object>
+  /** Every long string this walk wrote so far, outside repeats. */
+  strings: Set<string>
+  /** What earlier walks of the same line wrote, which are repeats too. */
+  earlier?: Written
   /** How many repeats the current value is nested in. */
   inRepeat: number
-  /** Values left to write again inside repeats (see `MAX_REWRITTEN_VALUES`). */
-  valuesLeft: number
-  /** Characters left to write again inside repeats (see `MAX_REWRITTEN_CHARS`). */
-  charsLeft: number
+  /** The line's re-write budget. */
+  budget: Budget
 }
 
 /**
@@ -463,9 +510,9 @@ interface Walk {
  * @throws `BUDGET_SPENT` when the budget runs out.
  */
 function charge(walk: Walk, key: string, value: unknown): void {
-  walk.valuesLeft--
-  walk.charsLeft -= key.length + (typeof value === 'string' ? value.length : 0)
-  if (walk.valuesLeft < 0 || walk.charsLeft < 0) throw BUDGET_SPENT
+  walk.budget.values--
+  walk.budget.chars -= key.length + (typeof value === 'string' ? value.length : 0)
+  if (walk.budget.values < 0 || walk.budget.chars < 0) throw BUDGET_SPENT
 }
 
 /**
@@ -480,17 +527,37 @@ function charge(walk: Walk, key: string, value: unknown): void {
  */
 function repeatToJSONValue(object: object, walk: Walk): unknown {
   if (walk.inRepeat > 0) return objectToJSONValue(object, walk) // the outer repeat is charged
-  if (walk.valuesLeft <= 0 || walk.charsLeft <= 0) return standIn(walk, '[Repeated]')
+  if (walk.budget.values <= 0 || walk.budget.chars <= 0) return standIn(walk, '[Repeated]')
   walk.inRepeat++
   try {
     return objectToJSONValue(object, walk)
   } catch (thrown) {
     if (thrown !== BUDGET_SPENT) throw thrown
-    walk.valuesLeft = 0
+    walk.budget.values = 0
     return standIn(walk, '[Repeated]')
   } finally {
     walk.inRepeat--
   }
+}
+
+/**
+ * A string, outside repeats: a long one the line has already written is a
+ * repeat, written again while its length fits the budget.
+ *
+ * @param {string} value - The string.
+ * @param {Walk} walk - The current walk, outside repeats.
+ * @returns {string} `value`, or `"[Repeated]"`.
+ * @throws `NOT_JSON` in a strict walk, instead of `"[Repeated]"`.
+ */
+function stringToJSONValue(value: string, walk: Walk): string {
+  if (value.length < LONG_STRING) return value
+  if (!walk.strings.has(value) && !walk.earlier?.strings.has(value)) {
+    walk.strings.add(value)
+    return value
+  }
+  if (value.length > walk.budget.chars) return standIn(walk, '[Repeated]')
+  walk.budget.chars -= value.length
+  return value
 }
 
 /**
@@ -513,11 +580,11 @@ function standIn(walk: Walk, text: string): string {
  * are written, `undefined` is left out of objects and `null` in arrays, boxed
  * primitives are unwrapped. Beyond JSON: a `Map` is an array of
  * `[key, value]` pairs, a `Set` an array; a `BigInt` is its digits, a
- * function `[Function: name]`, a symbol `Symbol(description)`; a real cycle
- * is `"[Circular]"` (a `toJSON` result that refers back to its object
- * included); a repeated object is written again, within a budget per line
- * (see `MAX_REWRITTEN_VALUES`), then is `"[Repeated]"`; a getter or a
- * `toJSON` that throws is `unserializable()` for that value only.
+ * function `[Function: name]`, a symbol `Symbol(description)`; a real cycle is `"[Circular]"` (a `toJSON` result that refers back to
+ * its object included); a repeated object, or a repeated long string, is
+ * written again within a budget per line (see `MAX_REWRITTEN_VALUES`), then
+ * is `"[Repeated]"`; a getter or a `toJSON` that throws is `unserializable()`
+ * for that value only.
  *
  * @param {unknown} value - The value to convert.
  * @param {string} key - Its key in its parent, passed to `toJSON`.
@@ -528,6 +595,7 @@ function standIn(walk: Walk, text: string): string {
  */
 function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true): unknown {
   if (walk.inRepeat > 0) charge(walk, key, value)
+  else if (typeof value === 'string') return stringToJSONValue(value, walk)
   const text = nonJSONText(value)
   if (text !== undefined) return standIn(walk, text)
   if (typeof value !== 'object' || value === null) return value
@@ -561,7 +629,8 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
 
   walk.ancestors.add(object)
   try {
-    if (walk.seen.has(object)) return repeatToJSONValue(object, walk)
+    if (walk.seen.has(object) || walk.earlier?.objects.has(object))
+      return repeatToJSONValue(object, walk)
     if (walk.inRepeat === 0) walk.seen.add(object)
     return objectToJSONValue(object, walk)
   } finally {
@@ -649,15 +718,18 @@ function objectToJSONValue(object: object, walk: Walk): unknown {
  * A new walk.
  *
  * @param {boolean} strict - Whether to give up instead of writing a stand-in.
+ * @param {Budget} budget - The line's re-write budget.
+ * @param {Written} [earlier] - What earlier walks of the same line wrote.
  * @returns {Walk} Its state.
  */
-const newWalk = (strict: boolean): Walk => ({
+const newWalk = (strict: boolean, budget: Budget, earlier?: Written): Walk => ({
   strict,
   ancestors: new Set(),
-  seen: new WeakSet(),
+  seen: new Set(),
+  strings: new Set(),
+  earlier,
   inRepeat: 0,
-  valuesLeft: MAX_REWRITTEN_VALUES,
-  charsLeft: MAX_REWRITTEN_CHARS,
+  budget,
 })
 
 /** Thrown by `stringifyRecord()`'s fast path: the line needs the full walk. */
@@ -667,22 +739,32 @@ const NEEDS_WALK = new Error('needs walk')
  * Serialize a record to one JSON line. Never throws for a value in it: a
  * value JSON cannot write gets a stand-in (see `toJSONValue()`), and only
  * that value. The record's own `toJSON` key, if any, is written as a field,
- * never called.
+ * never called. A record from `buildRecord()` spends from its line's
+ * budget, which its message's placeholders may already have spent from.
  *
  * Most lines take a fast path: native `JSON.stringify`, which gives up on
- * the first object seen twice (a repeat or a cycle), getter or `toJSON` that
- * throws. Those lines are written again by the `toJSONValue()` walk, so a
- * getter on them runs twice.
+ * the first object or long string seen twice (a repeat or a cycle), or
+ * getter or `toJSON` that throws. Those lines are written again
+ * by the `toJSONValue()` walk, so a getter on them runs twice.
  *
  * @param {LogRecord} record - The record to serialize.
  * @returns {string} One JSON line.
- * @throws Only a `RangeError` for a value nested too deep for the stack.
+ * @throws Only a `RangeError` for a value nested too deep for the stack, or a line too long for a string.
  */
 export function stringifyRecord(record: LogRecord): string {
   if (typeof record.toJSON !== 'function') {
     const seen = new WeakSet<object>()
+    let strings: Set<string> | undefined
     try {
       return JSON.stringify(record, (_key, value: unknown) => {
+        if (typeof value === 'string') {
+          if (value.length >= LONG_STRING) {
+            strings ??= new Set()
+            if (strings.has(value)) throw NEEDS_WALK
+            strings.add(value)
+          }
+          return value
+        }
         if (typeof value !== 'object' || value === null) return nonJSONText(value) ?? value
         if (seen.has(value)) throw NEEDS_WALK
         seen.add(value)
@@ -693,25 +775,38 @@ export function stringifyRecord(record: LogRecord): string {
       // A repeat, a cycle, or a value that throws: the walk handles each one on its own.
     }
   }
-  return JSON.stringify(toJSONValue(record, '', newWalk(false), false))
+  const budget = lineBudgets.get(record) ?? newBudget()
+  return JSON.stringify(toJSONValue(record, '', newWalk(false, budget), false))
 }
 
 /**
- * The JSON text `%j`, `%o` and `%O` print, or `undefined` when `value`
- * cannot be printed as it is: anything that would need a stand-in in
+ * The printer for one message's `%j`, `%o` and `%O` placeholders. It gives
+ * the JSON text a placeholder prints, or `undefined` when its value cannot be
+ * printed as it is: anything that would need a stand-in in
  * `stringifyRecord()` (a `BigInt`, a function or a symbol inside, a cycle,
- * too many repeats, a getter or a `toJSON` that throws), or a value JSON
- * writes nothing for. A `Map` prints as `[key, value]` pairs and a `Set` as
- * an array, as on the line.
+ * a repeat over the budget, a getter or a `toJSON` that throws), or a value
+ * JSON writes nothing for. A `Map` prints as `[key, value]` pairs and a
+ * `Set` as an array, as on the line. What one placeholder prints is a repeat
+ * for the next ones, and all of them spend from `budget`; a placeholder that
+ * gives up prints nothing, so what it saw is not a repeat.
  *
- * @param {unknown} value - The placeholder's argument.
- * @returns {string | undefined} The JSON text, or `undefined`.
+ * @param {Budget} budget - The line's re-write budget.
+ * @returns {(value: unknown) => string | undefined} Gives one placeholder's text, or `undefined`.
  */
-export function inlineJSON(value: unknown): string | undefined {
-  try {
-    return JSON.stringify(toJSONValue(value, '', newWalk(true)))
-  } catch {
-    return undefined
+export function inlinePrinter(budget: Budget): (value: unknown) => string | undefined {
+  const written: Written = { objects: new WeakSet(), strings: new Set() }
+  return (value) => {
+    const walk = newWalk(true, budget, written)
+    let text: string | undefined
+    try {
+      text = JSON.stringify(toJSONValue(value, '', walk))
+    } catch {
+      return undefined
+    }
+    if (text === undefined) return undefined
+    for (const object of walk.seen) written.objects.add(object)
+    for (const string of walk.strings) written.strings.add(string)
+    return text
   }
 }
 

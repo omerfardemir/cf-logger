@@ -14,6 +14,7 @@ import { resolveTrace, generateSpanId, toCarrier } from './trace'
 import {
   applyTrace,
   buildRecord,
+  newBudget,
   copyBindings,
   describeFailure,
   nodeSink,
@@ -81,7 +82,14 @@ const noop = () => {}
  * @param {unknown[]} input - The arguments the log method received.
  */
 function write(label: string, bindings: LogRecord, input: unknown[]): void {
-  const entry = { time: new Date().toISOString(), level: label, bindings, ...routeArgs(input) }
+  const budget = newBudget() // one per line: the message's placeholders, then the record
+  const entry = {
+    time: new Date().toISOString(),
+    level: label,
+    bindings,
+    budget,
+    ...routeArgs(input, budget),
+  }
   sink.write(buildRecord(entry, als.getStore()))
 }
 

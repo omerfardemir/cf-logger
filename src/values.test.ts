@@ -690,3 +690,59 @@ describe('an Error is serialized once per line', () => {
     expect(JSON.parse(lines[0]).err.errors.at(-1)).toBe('[Repeated]')
   })
 })
+
+describe('one re-write budget per line', () => {
+  beforeEach(() => _reset())
+
+  it('%j 500 times with one wide object: the message is bounded', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    const shared = wide(20_000)
+    const once = JSON.stringify(shared).length
+    createLogger({ service: 'svc' }).info(
+      '%j '.repeat(500),
+      ...Array.from({ length: 500 }, () => shared),
+    )
+    const line = JSON.parse(lines[0])
+    expect(line.logError).toBeUndefined()
+    expect(line.message.length).toBeLessThan(once + 200_000 + 500 * 3)
+    expect(line.message.startsWith(`${JSON.stringify(shared)} %j`)).toBe(true)
+    expect(line.k19999).toBe(19_999) // the unprinted copies are routed
+  })
+
+  it('the message and the fields share it', () => {
+    const entries = _captureEntries()
+    const shared = wide(6_000) // its repeat fits the budget once, not twice
+    createLogger({ service: 'svc' }).info('v=%j', [shared, shared], { items: [shared, shared] })
+    expect(entries[0].message).toBe(`v=${JSON.stringify([shared, shared])}`)
+    expect(entries[0].items).toEqual([shared, '[Repeated]'])
+  })
+
+  it('an object only in a placeholder that gave up is not a repeat for the next one', () => {
+    const entries = _captureEntries()
+    const inner = { n: 1 }
+    createLogger({ service: 'svc' }).info('%j %j', { inner, big: 1n }, inner)
+    expect(entries[0].message).toBe('%j {"n":1}')
+  })
+})
+
+describe('repeated long strings count against the budget', () => {
+  beforeEach(() => _reset())
+
+  it('one 100 kB string 2,000 times: the line is bounded', () => {
+    const long = 'x'.repeat(100_000)
+    const line = lineFor({ a: Array.from({ length: 2000 }, () => long) })
+    expect(line.length).toBeLessThan(1_000_000)
+    const a = JSON.parse(line).a as unknown[]
+    expect(a).toHaveLength(2000)
+    expect(a[0]).toBe(long)
+    expect(a.at(-1)).toBe('[Repeated]')
+  })
+
+  it('short strings repeat freely, and a long one is written again while it fits', () => {
+    const long = 'y'.repeat(2_000)
+    const parsed = JSON.parse(lineFor({ s: Array(20_000).fill('short'), l: [long, long, long] }))
+    expect(parsed.s).toEqual(Array(20_000).fill('short'))
+    expect(parsed.l).toEqual([long, long, long])
+  })
+})

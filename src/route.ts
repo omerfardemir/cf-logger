@@ -1,13 +1,15 @@
 import {
   functionName,
   functionText,
-  inlineJSON,
+  inlinePrinter,
   isPlainObject,
+  newBudget,
   OPTION_KEYS,
   RECORD_KEYS,
   readEntries,
   TRACE_KEYS,
   unserializable,
+  type Budget,
   type LogRecord,
   type RoutedArgs,
 } from './output'
@@ -67,16 +69,21 @@ function numberFor(value: unknown): number | undefined {
  * object or an array (`[object Object]`, `NaN` would hide its fields).
  * `%d %i %f` never render a function or a non-numeric string (`NaN`); `%d`
  * and `%i` write a `BigInt` exactly. `%j %o %O` never render an `Error`
- * (`{}` would hide its stack) or a value `inlineJSON()` cannot print (a
+ * (`{}` would hide its stack) or a value `print` cannot print (a
  * `BigInt`, a cycle, a getter that throws...), so it is routed like a
  * trailing argument instead.
  *
  * @param {string} code - The character after `%`.
  * @param {unknown} value - The placeholder's argument.
+ * @param {(value: unknown) => string | undefined} print - The message's `inlinePrinter()`.
  * @returns {string | typeof UNRENDERED} The text, or `UNRENDERED` when the placeholder does not print `value`.
  * @throws When `value` cannot be read (a function whose `name` getter throws).
  */
-function render(code: string, value: unknown): string | typeof UNRENDERED {
+function render(
+  code: string,
+  value: unknown,
+  print: (value: unknown) => string | undefined,
+): string | typeof UNRENDERED {
   switch (code) {
     case 'd':
     case 'i':
@@ -92,7 +99,7 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
       if (value === undefined || value instanceof Error) return UNRENDERED
       if (typeof value === 'string') return `'${value}'`
       if (typeof value === 'function') return functionName(value) || functionText(value)
-      return inlineJSON(value) ?? UNRENDERED
+      return print(value) ?? UNRENDERED
     case 's':
       if (typeof value === 'object' && value !== null) return UNRENDERED
       return String(value)
@@ -111,19 +118,24 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
  * cycle or a `BigInt`, an unknown sequence such as `% ` or `%c`), the
  * sequence stays in the text and the argument is returned in `unprinted`
  * instead. Never throws. `%%` becomes `%` only when there are
- * arguments, like `console.log`.
+ * arguments, like `console.log`. `%j`, `%o` and `%O` spend from the line's
+ * re-write budget, all of them together.
  *
  * @param {string} template - The message template.
  * @param {readonly unknown[]} args - The arguments after the template.
+ * @param {Budget} [budget] - The line's re-write budget.
  * @returns {{ message: string, unprinted: unknown[] }} The formatted message, and every argument it did not print, in call order.
  */
 export function formatMessage(
   template: string,
   args: readonly unknown[],
+  budget: Budget = newBudget(),
 ): { message: string; unprinted: unknown[] } {
   if (args.length === 0 || !template.includes('%'))
     return { message: template, unprinted: [...args] }
 
+  let printer: ((value: unknown) => string | undefined) | undefined
+  const print = (value: unknown) => (printer ??= inlinePrinter(budget))(value)
   const unprinted: unknown[] = []
   let message = ''
   let last = 0
@@ -141,7 +153,7 @@ export function formatMessage(
     const value = args[next++]
     let text: string | typeof UNRENDERED
     try {
-      text = render(code, value)
+      text = render(code, value, print)
     } catch {
       text = UNRENDERED // e.g. `%s` with a function whose toString throws
     }
@@ -191,12 +203,14 @@ export function formatMessage(
  *
  * Never throws: a property whose getter throws is merged as
  * `unserializable()`, and an argument that cannot be inspected at all (a
- * `Proxy` whose traps throw) goes to `args` as `unserializable()`.
+ * `Proxy` whose traps throw) goes to `args` as `unserializable()`. Pure but
+ * for `budget`, which the placeholders spend from.
  *
  * @param {readonly unknown[]} input - The arguments the log method received.
+ * @param {Budget} [budget] - The line's re-write budget.
  * @returns {RoutedArgs} Where each argument goes.
  */
-export function routeArgs(input: readonly unknown[]): RoutedArgs {
+export function routeArgs(input: readonly unknown[], budget: Budget = newBudget()): RoutedArgs {
   // No prototype: an `err` or `__proto__` key can only ever be an own key.
   const fields: LogRecord = Object.create(null)
   const errors: Error[] = []
@@ -272,7 +286,7 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
   }
 
   if (template !== undefined) {
-    const formatted = formatMessage(template, remaining)
+    const formatted = formatMessage(template, remaining, budget)
     message = formatted.message
     remaining = formatted.unprinted
   }
