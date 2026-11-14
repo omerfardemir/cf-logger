@@ -1,4 +1,14 @@
-import { functionText, isPlainObject, type LogRecord } from './output'
+import {
+  functionText,
+  inlineJSON,
+  isPlainObject,
+  OPTION_KEYS,
+  OWN_KEYS,
+  readEntries,
+  TRACE_KEYS,
+  unserializable,
+  type LogRecord,
+} from './output'
 
 /**
  * Record keys a log call's object arguments cannot set: their values for these
@@ -8,18 +18,10 @@ import { functionText, isPlainObject, type LogRecord } from './output'
  * structured call passes an error.
  */
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([
-  'time',
-  'level',
-  'message',
-  'service',
-  'environment',
-  'version',
-  'traceId',
-  'spanId',
-  'parentSpanId',
+  ...OWN_KEYS,
+  ...OPTION_KEYS,
+  ...TRACE_KEYS,
   'err',
-  'errors',
-  'args',
 ])
 
 /**
@@ -38,7 +40,12 @@ export interface RoutedArgs {
   args?: unknown[]
 }
 
-/** Values `console.log('a', 'b', 3)` would print as words: appended to the message. */
+/**
+ * Whether `value` is one `console.log('a', 'b', 3)` would print as a word.
+ *
+ * @param {unknown} value - Any value.
+ * @returns {boolean} `true` for a string, number, boolean, `BigInt`, `null` or `undefined`.
+ */
 function isPrimitive(
   value: unknown,
 ): value is string | number | boolean | bigint | null | undefined {
@@ -52,87 +59,55 @@ function isPrimitive(
 const UNRENDERED = Symbol('unrendered')
 
 /**
- * Whether `value` contains itself, as `JSON.stringify` sees it (own
- * enumerable values). Shared references that are not ancestors are not cycles.
- *
- * @param {unknown} value - The value to walk.
- * @param {object[]} [ancestors] - The objects on the path to `value`.
- * @returns {boolean} `true` for a real cycle.
- * @throws When reading a value throws (a getter): the caller handles it.
- */
-function hasCycle(value: unknown, ancestors: object[] = []): boolean {
-  if (typeof value !== 'object' || value === null) return false
-  if (ancestors.includes(value)) return true
-  ancestors.push(value)
-  try {
-    return Object.values(value).some((child) => hasCycle(child, ancestors))
-  } finally {
-    ancestors.pop()
-  }
-}
-
-/**
- * `JSON.stringify` for `%j`/`%o`/`%O`, never throwing. A real cycle is
- * `"[Circular]"`, as with pino. Anything else JSON cannot write (a `BigInt`,
- * a `toJSON` that throws, a symbol) is `UNRENDERED`, so it is routed instead.
+ * The number `%d %i %f` print for `value`, or `undefined` when printing it
+ * would lose the value: `null`, `undefined`, a symbol, an object, an array
+ * or a function (`NaN` or nothing), and a string that is not a number
+ * (`'abc'` would print `NaN`). The number `NaN` itself prints as `NaN`.
  *
  * @param {unknown} value - The placeholder's argument.
- * @returns {string | typeof UNRENDERED} The JSON text, or `UNRENDERED`.
+ * @returns {number | undefined} `Number(value)`, or `undefined`.
  */
-function stringify(value: unknown): string | typeof UNRENDERED {
-  try {
-    return JSON.stringify(value) ?? UNRENDERED
-  } catch {
-    try {
-      return hasCycle(value) ? '"[Circular]"' : UNRENDERED
-    } catch {
-      return UNRENDERED // a getter that throws: routing reports it
-    }
-  }
-}
-
-/**
- * Whether `%d %i %f` print `value` as a number: a string, number, boolean or
- * `BigInt`. `null`, `undefined`, a symbol, an object, an array or a function
- * would print `NaN` or nothing and lose the value.
- *
- * @param {unknown} value - The placeholder's argument.
- * @returns {boolean} `true` when `Number(value)` stands for the value.
- */
-function isNumeric(value: unknown): value is string | number | boolean | bigint {
+function numberFor(value: unknown): number | undefined {
   const type = typeof value
-  return type === 'string' || type === 'number' || type === 'boolean' || type === 'bigint'
+  if (type !== 'string' && type !== 'number' && type !== 'boolean' && type !== 'bigint')
+    return undefined
+  const number = Number(value)
+  return Number.isNaN(number) && type !== 'number' ? undefined : number
 }
 
 /**
- * Render one argument for placeholder `code`, or `UNRENDERED` when the
- * placeholder would not print it. `%s %d %i %f` never render an object or an
- * array (`[object Object]`, `NaN` would hide its fields), `%d %i %f` never
- * render a function (`NaN`), and `%j %o %O` never
- * render an `Error` (`{}` would hide its stack) or a value JSON cannot write,
- * so it is routed like a trailing argument instead.
+ * Render one argument for placeholder `code`. `%s %d %i %f` never render an
+ * object or an array (`[object Object]`, `NaN` would hide its fields).
+ * `%d %i %f` never render a function or a non-numeric string (`NaN`); `%d`
+ * and `%i` write a `BigInt` exactly. `%j %o %O` never render an `Error`
+ * (`{}` would hide its stack) or a value `inlineJSON()` cannot print (a
+ * `BigInt`, a cycle, a getter that throws...), so it is routed like a
+ * trailing argument instead.
+ *
+ * @param {string} code - The character after `%`.
+ * @param {unknown} value - The placeholder's argument.
+ * @returns {string | typeof UNRENDERED} The text, or `UNRENDERED` when the placeholder does not print `value`.
  */
 function render(code: string, value: unknown): string | typeof UNRENDERED {
   switch (code) {
     case 'd':
-    case 'f':
-      return isNumeric(value) ? String(Number(value)) : UNRENDERED
     case 'i':
-      return isNumeric(value) ? String(Math.floor(Number(value))) : UNRENDERED
+    case 'f': {
+      if (code !== 'f' && typeof value === 'bigint') return String(value)
+      const number = numberFor(value)
+      if (number === undefined) return UNRENDERED
+      return String(code === 'i' ? Math.floor(number) : number)
+    }
     case 'j':
     case 'o':
     case 'O':
       if (value === undefined || value instanceof Error) return UNRENDERED
       if (typeof value === 'string') return `'${value}'`
-      if (typeof value === 'function') return value.name || '<anonymous>'
-      return stringify(value)
+      if (typeof value === 'function') return value.name || functionText(value)
+      return inlineJSON(value) ?? UNRENDERED
     case 's':
       if (typeof value === 'object' && value !== null) return UNRENDERED
-      try {
-        return String(value)
-      } catch {
-        return UNRENDERED // e.g. a function whose toString throws
-      }
+      return String(value)
     default:
       return UNRENDERED // not a placeholder (`50% off`, `%c`)
   }
@@ -142,11 +117,12 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
  * Format `template` with `printf` placeholders (`%s %d %i %f %j %o %O %%`).
  *
  * Each `%` sequence takes the next argument in order. When it cannot print
- * that argument (`%d` with `null`, `%j` with `undefined`, `%s %d %i %f` with
- * an object or array, `%d %i %f` with a function, `%j %o %O` with an `Error`
- * or a value JSON cannot write other than a cycle, an unknown sequence such
- * as `% ` or `%c`), the sequence stays in the text and the argument is
- * returned in `unprinted` instead. `%%` becomes `%` only when there are
+ * that argument (`%d` with `null` or `'abc'`, `%j` with `undefined`,
+ * `%s %d %i %f` with an object or array, `%d %i %f` with a function,
+ * `%j %o %O` with an `Error` or a value JSON cannot write as it is, such as a
+ * cycle or a `BigInt`, an unknown sequence such as `% ` or `%c`), the
+ * sequence stays in the text and the argument is returned in `unprinted`
+ * instead. Never throws. `%%` becomes `%` only when there are
  * arguments, like `console.log`.
  *
  * @param {string} template - The message template.
@@ -175,7 +151,12 @@ export function formatMessage(
     }
     if (next >= args.length) continue
     const value = args[next++]
-    const text = render(code, value)
+    let text: string | typeof UNRENDERED
+    try {
+      text = render(code, value)
+    } catch {
+      text = UNRENDERED // e.g. `%s` with a function whose toString throws
+    }
     if (text === UNRENDERED) {
       unprinted.push(value)
       continue
@@ -218,6 +199,10 @@ export function formatMessage(
  * The exception is `message`: when the call gives no other message, the first
  * object's string `message` becomes the message (`logger.info({ message })`).
  *
+ * Never throws: a property whose getter throws is merged as
+ * `unserializable()`, and an argument that cannot be inspected at all (a
+ * `Proxy` whose traps throw) goes to `args` as `unserializable()`.
+ *
  * @param {readonly unknown[]} input - The arguments the log method received.
  * @returns {RoutedArgs} Where each argument goes.
  */
@@ -244,7 +229,7 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
   }
   const merge = (object: Record<string, unknown>) => {
     let moved: Record<string, unknown> | undefined
-    for (const [key, value] of Object.entries(object)) {
+    for (const [key, value] of readEntries(object)) {
       if (key === 'err' && setErr(value)) continue
       const isToJSON = key === 'toJSON' && typeof value === 'function'
       if (!RESERVED_KEYS.has(key) && key !== '__proto__' && !isToJSON) {
@@ -263,23 +248,35 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
   }
 
   const first = input[0]
-  if (typeof first === 'string') {
-    template = first
-  } else if (first instanceof Error) {
-    setErr(first)
-    takeTemplate()
-    if (template === undefined) message = first.message
-  } else if (isPlainObject(first)) {
-    merge(first)
-    takeTemplate()
-  } else if (first == null) {
-    // No fields (an `Error | undefined` that is unset): nothing to write for it.
-    takeTemplate()
-  } else if (isPrimitive(first)) {
-    overflow.push(first)
-    message = String(first)
-  } else {
-    overflow.push(first)
+  try {
+    if (typeof first === 'string') {
+      template = first
+    } else if (first instanceof Error) {
+      setErr(first)
+      takeTemplate()
+      if (template === undefined) {
+        try {
+          message = first.message
+        } catch (thrown) {
+          message = unserializable(thrown)
+        }
+      }
+    } else if (isPlainObject(first)) {
+      merge(first)
+      takeTemplate()
+    } else if (first == null) {
+      // No fields (an `Error | undefined` that is unset): nothing to write for it.
+      takeTemplate()
+    } else if (isPrimitive(first)) {
+      overflow.push(first)
+      message = String(first)
+    } else {
+      overflow.push(first)
+      takeTemplate()
+    }
+  } catch (thrown) {
+    // Only a `Proxy` can throw here, before anything was routed.
+    overflow.push(unserializable(thrown))
     takeTemplate()
   }
 
@@ -290,14 +287,18 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
   }
 
   for (const value of remaining) {
-    if (value instanceof Error) {
-      if (!setErr(value)) errors.push(value)
-    } else if (isPlainObject(value)) {
-      merge(value)
-    } else if (isPrimitive(value)) {
-      words.push(String(value))
-    } else {
-      overflow.push(value)
+    try {
+      if (value instanceof Error) {
+        if (!setErr(value)) errors.push(value)
+      } else if (isPlainObject(value)) {
+        merge(value)
+      } else if (isPrimitive(value)) {
+        words.push(String(value))
+      } else {
+        overflow.push(value)
+      }
+    } catch (thrown) {
+      overflow.push(unserializable(thrown)) // a `Proxy`, before anything was routed
     }
   }
 

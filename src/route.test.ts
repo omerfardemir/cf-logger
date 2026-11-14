@@ -61,7 +61,7 @@ describe('formatMessage', () => {
     }
   })
 
-  it('%j %o %O keep a value JSON cannot write, unless it is a real cycle', () => {
+  it('%j %o %O keep a value JSON cannot write, a real cycle included', () => {
     const throwing = {
       toJSON() {
         throw new Error('nope')
@@ -72,9 +72,14 @@ describe('formatMessage', () => {
     for (const value of [10n, nested, throwing, sym]) {
       expect(formatMessage('v=%j', [value])).toEqual({ message: 'v=%j', unprinted: [value] })
     }
-    const cycle: Record<string, unknown> = { n: 10n }
+    const cycle: Record<string, unknown> = { n: 1 }
     cycle.self = cycle
-    expect(formatMessage('v=%o', [cycle])).toEqual({ message: 'v="[Circular]"', unprinted: [] })
+    expect(formatMessage('v=%o', [cycle])).toEqual({ message: 'v=%o', unprinted: [cycle] })
+    const withFunction = { a: 1, f: onTick }
+    expect(formatMessage('v=%O', [withFunction])).toEqual({
+      message: 'v=%O',
+      unprinted: [withFunction],
+    })
     const shared = { a: 1 }
     expect(formatMessage('v=%j', [{ x: shared, y: shared }])).toEqual({
       message: 'v={"x":{"a":1},"y":{"a":1}}',
@@ -82,7 +87,7 @@ describe('formatMessage', () => {
     })
   })
 
-  it('%d %i %f do not print a function; %s prints its source', () => {
+  it('%d %i %f do not print a function or a non-numeric string; %s prints them', () => {
     for (const code of ['d', 'i', 'f']) {
       expect(formatMessage(`n=%${code}`, [onTick])).toEqual({
         message: `n=%${code}`,
@@ -91,6 +96,22 @@ describe('formatMessage', () => {
     }
     expect(formatMessage('n=%s', [onTick])).toEqual({
       message: `n=${String(onTick)}`,
+      unprinted: [],
+    })
+    expect(formatMessage('%d %i %f %s', ['abc', 'x', '', 'abc'])).toEqual({
+      message: '%d %i 0 abc',
+      unprinted: ['abc', 'x'],
+    })
+  })
+
+  it('%j %o %O write an anonymous function as on the line', () => {
+    expect(
+      formatMessage(
+        '%o',
+        [() => {}].map((f) => f),
+      ),
+    ).toEqual({
+      message: '[Function: anonymous]',
       unprinted: [],
     })
   })
@@ -471,31 +492,64 @@ const throwingToJSON = () => ({
   },
 })
 
+/**
+ * Capture entries, but make the sink throw on its next write only, as no single value can.
+ *
+ * @returns {Record<string, unknown>[]} The captured entries.
+ */
+function failNextWrite(): Record<string, unknown>[] {
+  const entries = _captureEntries()
+  const capture = _setSink({ write: () => {} })
+  let failed = false
+  _setSink({
+    write(line) {
+      if (!failed) {
+        failed = true
+        throw new Error('sink hiccup')
+      }
+      capture.write(line)
+    },
+  })
+  return entries
+}
+
 describe('a log call never throws', () => {
   beforeEach(() => _reset())
 
   it.each([
-    ['a getter that throws, console style', (l: Logger) => l.info('m %s', 'x', throwingGetter())],
-    ['a getter that throws, structured', (l: Logger) => l.info(throwingGetter(), 'm %s', 'x')],
-    ['a toJSON that throws', (l: Logger) => l.info('m %s', 'x', throwingToJSON())],
-  ])('%s: writes a minimal line with logError', (_name, log) => {
+    [
+      'a getter that throws, console style',
+      (l: Logger) => l.info('m %s', 'x', throwingGetter()),
+      { boom: '[Unserializable: Error: getter failed]' },
+    ],
+    [
+      'a getter that throws, structured',
+      (l: Logger) => l.info(throwingGetter(), 'm %s', 'x'),
+      { boom: '[Unserializable: Error: getter failed]' },
+    ],
+    [
+      'a toJSON that throws',
+      (l: Logger) => l.info('m %s', 'x', throwingToJSON()),
+      { nested: '[Unserializable: TypeError: toJSON failed]' },
+    ],
+  ])('%s: only that value is replaced', (_name, log, replaced) => {
     const r = record(log)
     expect(r).toMatchObject({
       level: 'INFO',
       service: 'svc',
-      message: 'm %s',
+      message: 'm x',
       traceId: '0af7651916cd43dd8448eb211c80319c',
+      ...replaced,
     })
-    expect(r.logError).toMatch(/^log call failed: (Error: getter|TypeError: toJSON) failed$/)
-    expect(typeof r.time).toBe('string')
+    expect(r.logError).toBeUndefined()
   })
 
   it('the minimal line keeps its own time and level; bindings for them move to args', () => {
-    const entries = _captureEntries()
+    const entries = failNextWrite()
     runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent: TRACEPARENT }, () =>
       createLogger({ service: 'svc' })
         .child({ level: 'BAD', time: 'T', traceId: 'forged' })
-        .info('m %s', 'x', throwingGetter()),
+        .info('m %s', 'x'),
     )
     expect(entries[0]).toMatchObject({
       level: 'INFO',
@@ -504,17 +558,21 @@ describe('a log call never throws', () => {
       args: [{ level: 'BAD', time: 'T' }],
     })
     expect(entries[0].time).not.toBe('T')
-    expect(entries[0].logError).toMatch(/getter failed/)
+    expect(entries[0].logError).toBe('log call failed: Error: sink hiccup')
   })
 
-  it('drops bindings when they cannot be serialized either', () => {
+  it('a binding that cannot be serialized is replaced, and the line kept', () => {
     const entries = _captureEntries()
     const logger = createLogger({ service: 'svc' }).child(throwingToJSON())
     expect(() => logger.warn('m')).not.toThrow()
     expect(entries).toHaveLength(1)
-    expect(entries[0]).toMatchObject({ level: 'WARN', message: 'm' })
-    expect(entries[0].service).toBeUndefined()
-    expect(entries[0].logError).toMatch(/toJSON failed/)
+    expect(entries[0]).toMatchObject({
+      level: 'WARN',
+      message: 'm',
+      service: 'svc',
+      nested: '[Unserializable: TypeError: toJSON failed]',
+    })
+    expect(entries[0].logError).toBeUndefined()
   })
 
   it('writes nothing, and does not throw, when the sink itself always fails', () => {

@@ -35,7 +35,8 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 }
 
 /**
- * How a function appears in a log line: `[Function: name]`.
+ * How a function appears in a log line: `[Function: name]`, or
+ * `[Function: anonymous]` when it has no name.
  *
  * @param {{ name: string }} fn - The function.
  * @returns {string} Its text.
@@ -44,63 +45,176 @@ export function functionText(fn: { name: string }): string {
   return `[Function: ${fn.name || 'anonymous'}]`
 }
 
-/** How many `cause` levels are serialized before the chain is cut off. */
+/**
+ * Describe a thrown value, never throwing itself.
+ *
+ * @param {unknown} thrown - What a getter, a `toJSON` or the write path threw.
+ * @returns {string} e.g. `TypeError: toJSON failed`, or `String(thrown)` for a non-Error.
+ */
+export function describeFailure(thrown: unknown): string {
+  try {
+    if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`
+    return String(thrown)
+  } catch {
+    return 'unknown error'
+  }
+}
+
+/**
+ * What a value that cannot be read or serialized (a getter or a `toJSON`
+ * that throws) is written as, in place of that one value.
+ *
+ * @param {unknown} thrown - What reading or serializing the value threw.
+ * @returns {string} `[Unserializable: <reason>]`.
+ */
+export function unserializable(thrown: unknown): string {
+  return `[Unserializable: ${describeFailure(thrown)}]`
+}
+
+/**
+ * `object`'s own enumerable string-keyed entries, like `Object.entries()`,
+ * except that a value whose getter throws is `unserializable()` instead.
+ *
+ * @param {object} object - Any object.
+ * @returns {[string, unknown][]} Its entries, in key order.
+ * @throws Only when its keys cannot be listed (a `Proxy` whose `ownKeys` trap throws).
+ */
+export function readEntries(object: object): [string, unknown][] {
+  const entries: [string, unknown][] = []
+  for (const key of Object.keys(object)) {
+    let value: unknown
+    try {
+      value = (object as Record<string, unknown>)[key]
+    } catch (thrown) {
+      value = unserializable(thrown)
+    }
+    entries.push([key, value])
+  }
+  return entries
+}
+
+/**
+ * A plain copy of logger bindings, never throwing: a binding whose getter
+ * throws is `unserializable()`. Taken when the logger is built, so a log
+ * call never runs the getters.
+ *
+ * @param {unknown} source - The bindings passed to `createLogger` or `.child()`.
+ * @returns {LogRecord} The copy; `{}` for `undefined`, `null` or a primitive.
+ */
+export function copyBindings(source: unknown): LogRecord {
+  if (typeof source !== 'object' || source === null) return {}
+  try {
+    return Object.fromEntries(readEntries(source))
+  } catch (thrown) {
+    // The keys cannot be listed. `buildRecord()` moves `args` to the line's `args`.
+    return { args: unserializable(thrown) }
+  }
+}
+
+/** How many levels of `cause` (and of `Error`-valued properties) are serialized before the chain is cut off. */
 const MAX_CAUSE_DEPTH = 5
 
 /**
- * Serialize an `Error` into a plain, JSON-safe object.
+ * Read one property of an `Error`, never throwing.
  *
- * Shape: `{ type, message, stack, ...own enumerable props, cause? }`, where
- * `cause` has the same shape when it is an `Error`, nested up to
- * `MAX_CAUSE_DEPTH` levels.
- *
- * @param {Error} error - The error to serialize.
- * @param {number} [depth] - Current `cause` depth.
- * @returns {LogRecord} The serialized error.
+ * @param {() => unknown} get - Reads the property.
+ * @returns {unknown} Its value, or `unserializable()` when the read throws.
  */
-export function serializeError(error: Error, depth = 0): LogRecord {
-  const out: LogRecord = {
-    type: error.constructor?.name || error.name,
-    message: error.message,
-    stack: error.stack,
+function read(get: () => unknown): unknown {
+  try {
+    return get()
+  } catch (thrown) {
+    return unserializable(thrown)
   }
-  for (const [key, value] of Object.entries(error)) {
-    if (key in out || key === 'cause') continue
-    out[key] = value instanceof Error ? serializeError(value, depth + 1) : value
-  }
-  if (error.cause !== undefined) {
-    if (!(error.cause instanceof Error)) {
-      out.cause = error.cause
-    } else if (depth < MAX_CAUSE_DEPTH) {
-      out.cause = serializeError(error.cause, depth + 1)
-    } else {
-      out.cause = { type: 'Truncated', message: `cause chain deeper than ${MAX_CAUSE_DEPTH}` }
-    }
-  }
-  return out
 }
 
-/** Serialize `value` when it is an `Error`; anything else is returned as is. */
-const serializeIfError = (value: unknown) =>
+/**
+ * Serialize an `Error` into a plain, JSON-safe object. Never throws.
+ *
+ * Shape: `{ type, message, stack, ...own enumerable props, cause? }`. `cause`,
+ * and every own property that is an `Error`, has the same shape, nested up
+ * to `MAX_CAUSE_DEPTH` levels. An `Error` nested inside itself (`e.self = e`,
+ * a `cause` loop) is `"[Circular]"` there. A property whose getter throws is
+ * `unserializable()`.
+ *
+ * @param {Error} error - The error to serialize.
+ * @param {number} [depth] - Current nesting depth.
+ * @param {Set<Error>} [ancestors] - The errors `error` is nested in.
+ * @returns {LogRecord} The serialized error.
+ */
+export function serializeError(
+  error: Error,
+  depth = 0,
+  ancestors: Set<Error> = new Set(),
+): LogRecord {
+  const nested = (value: Error): unknown => {
+    if (ancestors.has(value)) return '[Circular]'
+    if (depth >= MAX_CAUSE_DEPTH)
+      return { type: 'Truncated', message: `cause chain deeper than ${MAX_CAUSE_DEPTH}` }
+    return serializeError(value, depth + 1, ancestors)
+  }
+  ancestors.add(error)
+  try {
+    const out: LogRecord = {
+      type: read(() => error.constructor?.name || error.name),
+      message: read(() => error.message),
+      stack: read(() => error.stack),
+    }
+    let entries: [string, unknown][]
+    try {
+      entries = readEntries(error)
+    } catch (thrown) {
+      entries = [['props', unserializable(thrown)]]
+    }
+    for (const [key, value] of entries) {
+      if (key in out || key === 'cause') continue
+      out[key] = value instanceof Error ? nested(value) : value
+    }
+    const cause = read(() => error.cause)
+    if (cause !== undefined) out.cause = cause instanceof Error ? nested(cause) : cause
+    return out
+  } finally {
+    ancestors.delete(error)
+  }
+}
+
+/**
+ * Serialize `value` when it is an `Error`.
+ *
+ * @param {unknown} value - Any value.
+ * @returns {unknown} `serializeError(value)` for an `Error`; anything else as is.
+ */
+const serializeIfError = (value: unknown): unknown =>
   value instanceof Error ? serializeError(value) : value
 
-/** `serializeIfError` on an overflow value and, one level down, on its items or values. */
+/**
+ * `serializeIfError` on an overflow value and, one level down, on its items or values.
+ *
+ * @param {unknown} value - One item of `args`.
+ * @returns {unknown} The item, with Errors serialized at its top level and one level down.
+ */
 function serializeOverflowItem(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(serializeIfError)
   if (isPlainObject(value)) {
     const out: LogRecord = Object.create(null) // `value` may have an own `__proto__` key
-    for (const [key, v] of Object.entries(value)) out[key] = serializeIfError(v)
+    for (const [key, v] of readEntries(value)) out[key] = serializeIfError(v)
     return out
   }
   return serializeIfError(value)
 }
 
 /**
- * Keys the core writes for every call, which logger bindings and Context
- * Fields cannot set. `workersSink` picks the console method from `level`, so
- * a binding for it would change the line's severity.
+ * loggercf's own keys: written for every call, so logger bindings and
+ * Context Fields cannot set them. `workersSink` picks the console method
+ * from `level`, so a binding for it would change the line's severity.
  */
-const OWN_KEYS = ['time', 'level', 'message', 'errors', 'args'] as const
+export const OWN_KEYS = ['time', 'level', 'message', 'errors', 'args'] as const
+
+/** The Trace Context's keys, which `applyTrace()` writes inside a Logging Context. */
+export const TRACE_KEYS = ['traceId', 'spanId', 'parentSpanId'] as const
+
+/** The Logger Options keys a Root Logger writes on every line. */
+export const OPTION_KEYS = ['service', 'environment', 'version'] as const
 
 /**
  * `source` without the `OWN_KEYS`. Their defined values are pushed onto
@@ -134,11 +248,10 @@ export function takeOwnKeys(
  * @param {TraceContext} trace - The current Trace Context.
  */
 export function applyTrace(record: LogRecord, trace: TraceContext): void {
-  const { traceId, spanId, parentSpanId } = trace
-  record.traceId = traceId
-  record.spanId = spanId
-  if (parentSpanId) record.parentSpanId = parentSpanId
-  else delete record.parentSpanId
+  for (const key of TRACE_KEYS) {
+    if (trace[key]) record[key] = trace[key]
+    else delete record[key]
+  }
 }
 
 /**
@@ -165,10 +278,10 @@ export interface RecordEntry {
 /**
  * Build the final log record from a log call's entry and the current Logging Context.
  *
- * `time`, `level`, `message`, `errors`, `args` and the trace IDs are always
- * the core's own. For the other keys, strongest first: fields passed at the
- * log call → logger bindings (`createLogger` / `.child()`) → Context Fields.
- * A binding or Context Field for one of the core's own keys (trace IDs
+ * loggercf's own keys (`OWN_KEYS`) and the trace IDs are always written by
+ * loggercf. For the other keys, strongest first: fields passed at the log
+ * call → logger bindings (`createLogger` / `.child()`) → Context Fields.
+ * A binding or Context Field for one of loggercf's own keys (trace IDs
  * aside) moves to `args`, after the call's own `args`, bindings first, so it
  * is not dropped. `Error` values are serialized with `serializeError()`: at
  * the top level, in `errors`, and in `args` items (one level down, e.g.
@@ -203,25 +316,233 @@ export function buildRecord(entry: RecordEntry, context?: RecordContext): LogRec
 }
 
 /**
- * `JSON.stringify` that never throws on circular references or `BigInt`, and
- * keeps values JSON would drop: a function as `[Function: name]`, a symbol as
- * `Symbol(description)`.
+ * How many times one line writes again an object it has already written (a
+ * shared reference), before it writes `"[Repeated]"` instead. It keeps the
+ * work, and the line, linear for a deeply shared structure, where writing
+ * every repeat would double the line at each level.
+ */
+const MAX_REPEATS = 1000
+
+/** Thrown by a strict walk: the value cannot be written as JSON as it is. */
+const NOT_JSON = new Error('not JSON')
+
+/** The state of one `toJSONValue()` walk. */
+interface Walk {
+  /** `%j`: give up (throw `NOT_JSON`) wherever a lenient walk would write a stand-in. */
+  strict: boolean
+  /** The objects on the path to the current value: a real cycle. */
+  ancestors: Set<object>
+  /** Every object written so far: a repeat. */
+  seen: WeakSet<object>
+  /** How many repeats have been written again. */
+  repeats: number
+}
+
+/**
+ * The text a lenient walk writes for a value JSON cannot write as is.
+ *
+ * @param {Walk} walk - The current walk.
+ * @param {string} text - The stand-in.
+ * @returns {string} `text`.
+ * @throws `NOT_JSON` in a strict walk.
+ */
+function standIn(walk: Walk, text: string): string {
+  if (walk.strict) throw NOT_JSON
+  return text
+}
+
+/**
+ * `value` as JSON-ready data (plain objects, arrays, strings, numbers,
+ * booleans, `null`), so `JSON.stringify` of the result never throws. It
+ * follows `JSON.stringify`: `toJSON` is called, own enumerable string keys
+ * are written, `undefined` is left out of objects and `null` in arrays, boxed
+ * primitives are unwrapped. Beyond JSON: a `Map` is an array of
+ * `[key, value]` pairs, a `Set` an array; a `BigInt` is its digits, a
+ * function `[Function: name]`, a symbol `Symbol(description)`; a real cycle
+ * is `"[Circular]"`; a repeated object is written again (see `MAX_REPEATS`);
+ * a getter or a `toJSON` that throws is `unserializable()` for that value only.
+ *
+ * @param {unknown} value - The value to convert.
+ * @param {string} key - Its key in its parent, passed to `toJSON`.
+ * @param {Walk} walk - The state of this walk.
+ * @param {boolean} [useToJSON] - Whether to call `value.toJSON` (not on a `toJSON` result).
+ * @returns {unknown} The JSON-ready value; `undefined` where JSON writes nothing.
+ * @throws `NOT_JSON` in a strict walk, instead of any stand-in.
+ */
+function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true): unknown {
+  switch (typeof value) {
+    case 'string':
+    case 'number':
+    case 'boolean':
+    case 'undefined':
+      return value
+    case 'bigint':
+      return standIn(walk, value.toString())
+    case 'symbol':
+      return standIn(walk, value.toString())
+    case 'function':
+      return standIn(walk, functionText(value))
+  }
+  if (value === null) return null
+  const object = value as object
+
+  if (useToJSON) {
+    let replaced: unknown
+    let hasToJSON = false
+    try {
+      const toJSON = (object as { toJSON?: unknown }).toJSON
+      if (typeof toJSON === 'function') {
+        replaced = toJSON.call(object, key)
+        hasToJSON = true
+      }
+    } catch (thrown) {
+      return standIn(walk, unserializable(thrown))
+    }
+    if (hasToJSON) return toJSONValue(replaced, key, walk, false)
+  }
+
+  if (walk.ancestors.has(object)) return standIn(walk, '[Circular]')
+  if (walk.seen.has(object)) {
+    if (walk.repeats >= MAX_REPEATS) return standIn(walk, '[Repeated]')
+    walk.repeats++
+  } else {
+    walk.seen.add(object)
+  }
+  walk.ancestors.add(object)
+  try {
+    return objectToJSONValue(object, walk)
+  } finally {
+    walk.ancestors.delete(object)
+  }
+}
+
+/** `Object.prototype.toString` of the boxed primitives JSON unwraps. */
+const BOXED = new Set(['[object Number]', '[object String]', '[object Boolean]'])
+
+/**
+ * The object part of `toJSONValue()`: its items or entries, each converted.
+ *
+ * @param {object} object - An object that is not a cycle.
+ * @param {Walk} walk - The state of this walk.
+ * @returns {unknown} An array, a plain object or an unwrapped primitive.
+ */
+function objectToJSONValue(object: object, walk: Walk): unknown {
+  let items: ArrayLike<unknown> | undefined
+  let keys: string[] | undefined
+  try {
+    if (!isPlainObject(object) && BOXED.has(Object.prototype.toString.call(object)))
+      return object.valueOf() // `new Number(1)`, as JSON writes it
+    if (object instanceof Map) items = Array.from(object)
+    else if (object instanceof Set) items = Array.from(object)
+    else if (Array.isArray(object)) items = object
+    else keys = Object.keys(object)
+  } catch (thrown) {
+    return standIn(walk, unserializable(thrown))
+  }
+
+  if (items) {
+    const out: unknown[] = []
+    for (let i = 0; i < items.length; i++) {
+      let item: unknown
+      try {
+        item = items[i]
+      } catch (thrown) {
+        item = standIn(walk, unserializable(thrown))
+      }
+      out.push(toJSONValue(item, String(i), walk) ?? null)
+    }
+    return out
+  }
+
+  const out: LogRecord = Object.create(null) // an own `__proto__` key stays a key
+  for (const key of keys!) {
+    let child: unknown
+    try {
+      child = (object as Record<string, unknown>)[key]
+    } catch (thrown) {
+      child = standIn(walk, unserializable(thrown))
+    }
+    const converted = toJSONValue(child, key, walk)
+    if (converted !== undefined) out[key] = converted
+  }
+  return out
+}
+
+/**
+ * A new walk.
+ *
+ * @param {boolean} strict - Whether to give up instead of writing a stand-in.
+ * @returns {Walk} Its state.
+ */
+const newWalk = (strict: boolean): Walk => ({
+  strict,
+  ancestors: new Set(),
+  seen: new WeakSet(),
+  repeats: 0,
+})
+
+/** Thrown by `stringifyRecord()`'s fast path: the line needs the full walk. */
+const NEEDS_WALK = new Error('needs walk')
+
+/**
+ * Serialize a record to one JSON line. Never throws for a value in it: a
+ * value JSON cannot write gets a stand-in (see `toJSONValue()`), and only
+ * that value. The record's own `toJSON` key, if any, is written as a field,
+ * never called.
+ *
+ * Most lines take a fast path: native `JSON.stringify`, which gives up on
+ * the first object seen twice (a repeat or a cycle), getter or `toJSON` that
+ * throws. Those lines are written again by the `toJSONValue()` walk, so a
+ * getter on them runs twice.
  *
  * @param {LogRecord} record - The record to serialize.
  * @returns {string} One JSON line.
+ * @throws Only a `RangeError` for a value nested too deep for the stack.
  */
 export function stringifyRecord(record: LogRecord): string {
-  const seen = new WeakSet<object>()
-  return JSON.stringify(record, (_key, value: unknown) => {
-    if (typeof value === 'bigint') return value.toString()
-    if (typeof value === 'function') return functionText(value)
-    if (typeof value === 'symbol') return value.toString()
-    if (typeof value === 'object' && value !== null) {
-      if (seen.has(value)) return '[Circular]'
-      seen.add(value)
+  if (typeof record.toJSON !== 'function') {
+    const seen = new WeakSet<object>()
+    try {
+      return JSON.stringify(record, (_key, value: unknown) => {
+        switch (typeof value) {
+          case 'bigint':
+            return value.toString()
+          case 'function':
+            return functionText(value)
+          case 'symbol':
+            return value.toString()
+          case 'object':
+            if (value === null) return value
+            if (seen.has(value)) throw NEEDS_WALK
+            seen.add(value)
+            if (value instanceof Map || value instanceof Set) return Array.from(value)
+        }
+        return value
+      })
+    } catch {
+      // A repeat, a cycle, or a value that throws: the walk handles each one on its own.
     }
-    return value
-  })
+  }
+  return JSON.stringify(toJSONValue(record, '', newWalk(false), false))
+}
+
+/**
+ * The JSON text `%j`, `%o` and `%O` print, or `undefined` when `value`
+ * cannot be printed as it is: anything that would need a stand-in in
+ * `stringifyRecord()` (a `BigInt`, a function or a symbol inside, a cycle,
+ * too many repeats, a getter or a `toJSON` that throws), or a value JSON
+ * writes nothing for. A `Map` prints as `[key, value]` pairs and a `Set` as
+ * an array, as on the line.
+ *
+ * @param {unknown} value - The placeholder's argument.
+ * @returns {string | undefined} The JSON text, or `undefined`.
+ */
+export function inlineJSON(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(toJSONValue(value, '', newWalk(true)))
+  } catch {
+    return undefined
+  }
 }
 
 /**

@@ -9,8 +9,8 @@ circular.self = circular
  * `printf` output pinned from pino 10's browser build (`quick-format-unescaped`),
  * recorded before loggercf replaced pino. Every argument here is consumed by a
  * placeholder, so nothing is left over: the message must stay byte-identical.
- * The one deliberate difference, objects and arrays under `%s %d %i %f`, is
- * pinned in `UNPRINTED_OBJECTS` below.
+ * The deliberate differences, where pino printed text that lost the value,
+ * are pinned in `UNPRINTED` below.
  */
 const PINNED: Array<[template: string, args: unknown[], message: string]> = [
   ['plain', [], 'plain'],
@@ -26,7 +26,6 @@ const PINNED: Array<[template: string, args: unknown[], message: string]> = [
   ['%d', [42], '42'],
   ['%d', ['42'], '42'],
   ['%d', [4.5], '4.5'],
-  ['%d', ['abc'], 'NaN'],
   ['%d', [10n], '10'],
   ['%i', [4.9], '4'],
   ['%i', ['-4.9'], '-5'],
@@ -35,7 +34,6 @@ const PINNED: Array<[template: string, args: unknown[], message: string]> = [
   ['%j', [{ a: 1 }], '{"a":1}'],
   ['%j', ['s'], "'s'"],
   ['%j', [namedFn], 'namedFn'],
-  ['%j', [circular], '"[Circular]"'],
   ['%j', [null], 'null'],
   ['%o', [{ a: [1] }], '{"a":[1]}'],
   ['%O', [{ a: 1 }], '{"a":1}'],
@@ -48,13 +46,13 @@ const PINNED: Array<[template: string, args: unknown[], message: string]> = [
 ]
 
 /**
- * `%s %d %i %f` do not print an object or an array (pino printed
- * `[object Object]`, `1,2` or `NaN` and dropped its fields): the placeholder
- * stays in the text and the value is routed like a trailing argument.
+ * Values pino printed as text that lost them: an object or an array under
+ * `%s %d %i %f` (`[object Object]`, `1,2` or `NaN`), a non-numeric string
+ * under `%d` (`NaN`), a circular object under `%j` (`"[Circular]"`). The
+ * placeholder stays in the text and the value is routed like a trailing
+ * argument.
  */
-const UNPRINTED_OBJECTS: Array<
-  [template: string, value: unknown, routed: Record<string, unknown>]
-> = [
+const UNPRINTED: Array<[template: string, value: unknown, routed: Record<string, unknown>]> = [
   ['n=%d', { a: 1 }, { message: 'n=%d', a: 1 }],
   ['n=%i', { a: 1 }, { message: 'n=%i', a: 1 }],
   ['n=%f', { a: 1 }, { message: 'n=%f', a: 1 }],
@@ -62,6 +60,8 @@ const UNPRINTED_OBJECTS: Array<
   ['n=%s', [1, 2], { message: 'n=%s', args: [[1, 2]] }],
   ['n=%d', [1, 2], { message: 'n=%d', args: [[1, 2]] }],
   ['GET /a%d0b', { status: 200 }, { message: 'GET /a%d0b', status: 200 }],
+  ['n=%d', 'abc', { message: 'n=%d abc' }],
+  ['v=%j', circular, { message: 'v=%j', a: 1, self: { a: 1, self: '[Circular]' } }],
 ]
 
 describe('printf placeholders', () => {
@@ -79,7 +79,7 @@ describe('printf placeholders', () => {
     expect(entries[0].message).toBe(message)
   })
 
-  it.each(UNPRINTED_OBJECTS)('%j keeps its object or array argument', (template, value, routed) => {
+  it.each(UNPRINTED)('%j keeps its argument', (template, value, routed) => {
     const entries = _captureEntries()
     createLogger({ service: 'svc' }).info(template, value)
     expect(entries[0]).toMatchObject(routed)

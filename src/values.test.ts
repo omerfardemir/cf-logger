@@ -1,0 +1,273 @@
+import { describe, it, expect, beforeEach } from 'vitest'
+import {
+  createLogger,
+  getLogger,
+  runWithLogger,
+  _captureEntries,
+  _reset,
+  _setSink,
+} from './logger'
+import { serializeError, stringifyRecord } from './output'
+
+const TRACEPARENT = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+
+/** A chain of `depth` nodes, each `{ l: next, r: next }`: two paths to every node below it. */
+function dag(depth: number, leaf: unknown = { big: 1n }): unknown {
+  let node = leaf
+  for (let i = 0; i < depth; i++) node = { l: node, r: node }
+  return node
+}
+
+/** An object whose `a` getter throws `thrown`. */
+const throwing = (thrown: unknown = 1): Record<string, unknown> =>
+  Object.defineProperty({}, 'a', {
+    enumerable: true,
+    get() {
+      throw thrown
+    },
+  })
+
+/** How long `fn` takes, in milliseconds. */
+const elapsed = (fn: () => void) => {
+  const start = performance.now()
+  fn()
+  return performance.now() - start
+}
+
+describe('shared references are not cycles, and stay linear', () => {
+  beforeEach(() => _reset())
+
+  it('a repeated, non-cyclic object is written again', () => {
+    const entries = _captureEntries()
+    const sh = { x: 1 }
+    createLogger({ service: 'svc' }).info('m', { p: sh, q: sh })
+    expect(entries[0]).toMatchObject({ p: { x: 1 }, q: { x: 1 } })
+  })
+
+  it('a real cycle is still "[Circular]"', () => {
+    const entries = _captureEntries()
+    const loop: Record<string, unknown> = { name: 'loop' }
+    loop.self = loop
+    createLogger({ service: 'svc' }).info('m', { loop })
+    expect(entries[0].loop).toEqual({ name: 'loop', self: '[Circular]' })
+  })
+
+  it('%j with a deeply shared structure runs in well under 100 ms (depth 30)', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    const ms = elapsed(() => logger.info('v=%j', dag(30)))
+    expect(ms).toBeLessThan(100)
+    expect(entries[0].message).toBe('v=%j') // a BigInt inside: routed, not printed
+    expect(entries[0].logError).toBeUndefined()
+    expect(entries[0]).toHaveProperty('l')
+  })
+
+  it('a field or %j with a deeply shared structure runs in well under 100 ms (depth 30)', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    const ms = elapsed(() => {
+      logger.info('m', { tree: dag(30, { n: 1 }) })
+      logger.info('m %j', dag(30, { n: 1 }))
+    })
+    expect(ms).toBeLessThan(100)
+    expect(JSON.stringify(entries)).toContain('"[Repeated]"')
+    expect(entries.map((e) => e.logError)).toEqual([undefined, undefined])
+  })
+})
+
+describe('Map and Set', () => {
+  beforeEach(() => _reset())
+
+  it('a Map is [key, value] pairs and a Set an array, in fields and args', () => {
+    const entries = _captureEntries()
+    const map = new Map<unknown, unknown>([
+      ['a', 1],
+      [{ k: 1 }, new Set([2])],
+    ])
+    createLogger({ service: 'svc' }).info('m', { map, set: new Set(['x', 'y']) }, [map])
+    expect(entries[0]).toMatchObject({
+      map: [
+        ['a', 1],
+        [{ k: 1 }, [2]],
+      ],
+      set: ['x', 'y'],
+      args: [
+        [
+          [
+            ['a', 1],
+            [{ k: 1 }, [2]],
+          ],
+        ],
+      ],
+    })
+  })
+
+  it('%j %o %O print a Map as pairs and a Set as an array', () => {
+    const entries = _captureEntries()
+    createLogger({ service: 'svc' }).info('%j %o %O', new Map([['a', 1]]), new Set([1]), {
+      m: new Map(),
+    })
+    expect(entries[0].message).toBe('[["a",1]] [1] {"m":[]}')
+  })
+})
+
+describe('placeholders keep values they cannot print', () => {
+  beforeEach(() => _reset())
+
+  it('%d %i %f with a non-numeric string: unprinted, appended as a word', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    logger.info('id=%d', 'abc')
+    logger.info('id=%i', 'abc')
+    logger.info('id=%f', 'abc')
+    logger.info('n=%d', NaN)
+    expect(entries.map((e) => e.message)).toEqual(['id=%d abc', 'id=%i abc', 'id=%f abc', 'n=NaN'])
+  })
+
+  it('%d %i print a BigInt exactly', () => {
+    const entries = _captureEntries()
+    const big = 123456789012345678901234567890n
+    createLogger({ service: 'svc' }).info('%d %i', big, big)
+    expect(entries[0].message).toBe(`${big} ${big}`)
+  })
+
+  it('a cyclic object under %j %o %O is routed with all its keys', () => {
+    const entries = _captureEntries()
+    const loop: Record<string, unknown> = { name: 'loop', n: 1 }
+    loop.self = loop
+    createLogger({ service: 'svc' }).info('v=%o', loop)
+    expect(entries[0]).toMatchObject({
+      message: 'v=%o',
+      name: 'loop',
+      n: 1,
+      self: { name: 'loop', n: 1, self: '[Circular]' },
+    })
+  })
+})
+
+describe('errors that reference themselves', () => {
+  beforeEach(() => _reset())
+
+  it('an Error with e.self = e keeps err', () => {
+    const entries = _captureEntries()
+    const e = new Error('boom') as Error & { self?: unknown }
+    e.self = e
+    createLogger({ service: 'svc' }).error('failed', e)
+    expect(entries[0]).toMatchObject({
+      message: 'failed',
+      err: { type: 'Error', message: 'boom', self: '[Circular]' },
+    })
+    expect(entries[0].logError).toBeUndefined()
+  })
+
+  it('serializeError never throws on a getter that throws', () => {
+    const e = Object.defineProperty(new Error('boom'), 'code', {
+      enumerable: true,
+      get() {
+        throw new Error('no code')
+      },
+    })
+    expect(serializeError(e)).toMatchObject({
+      message: 'boom',
+      code: '[Unserializable: Error: no code]',
+    })
+  })
+})
+
+describe('one bad value does not cost the rest of the line', () => {
+  beforeEach(() => _reset())
+
+  it('a getter that throws: only that value is replaced; err and the message stay', () => {
+    const entries = _captureEntries()
+    createLogger({ service: 'svc' }).error('failed', new Error('boom'), throwing())
+    expect(entries[0]).toMatchObject({
+      level: 'ERROR',
+      message: 'failed',
+      err: { type: 'Error', message: 'boom' },
+      a: '[Unserializable: 1]',
+    })
+    expect(entries[0].logError).toBeUndefined()
+  })
+
+  it('a nested toJSON that throws: only that value is replaced', () => {
+    const entries = _captureEntries()
+    const bad = {
+      toJSON() {
+        throw new TypeError('toJSON failed')
+      },
+    }
+    createLogger({ service: 'svc' }).info('m %s', 'x', { ok: 1, deep: { bad, fine: 2 } })
+    expect(entries[0]).toMatchObject({
+      message: 'm x',
+      ok: 1,
+      deep: { bad: '[Unserializable: TypeError: toJSON failed]', fine: 2 },
+    })
+    expect(entries[0].logError).toBeUndefined()
+  })
+
+  it('a getter in a leading object or an args item is replaced too', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    logger.info(throwing(new Error('x')), 'm')
+    logger.info('m', [throwing()])
+    expect(entries[0]).toMatchObject({ message: 'm', a: '[Unserializable: Error: x]' })
+    expect(entries[1]).toMatchObject({ message: 'm', args: [[{ a: '[Unserializable: 1]' }]] })
+  })
+
+  it('the minimal line is the last resort: when writing the full line fails', () => {
+    const entries = _captureEntries()
+    const capture = _setSink({ write: () => {} }) // the capture sink installed above
+    let calls = 0
+    _setSink({
+      write(record) {
+        if (calls++ === 0) throw new Error('sink hiccup')
+        capture.write(record)
+      },
+    })
+    createLogger({ service: 'svc' }).info('m %s', 'x')
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({ level: 'INFO', service: 'svc', message: 'm %s' })
+    expect(entries[0].logError).toBe('log call failed: Error: sink hiccup')
+  })
+})
+
+describe('the serializer', () => {
+  it('never calls the record’s own toJSON', () => {
+    const record = Object.assign(Object.create(null), {
+      a: 1,
+      toJSON: () => {
+        throw new Error('x')
+      },
+    })
+    expect(JSON.parse(stringifyRecord(record))).toEqual({ a: 1, toJSON: '[Function: toJSON]' })
+  })
+
+  it('keeps JSON’s own conversions: Date, NaN, undefined in arrays and objects', () => {
+    const date = new Date(0)
+    expect(stringifyRecord({ date, n: NaN, list: [undefined, 1], gone: undefined })).toBe(
+      '{"date":"1970-01-01T00:00:00.000Z","n":null,"list":[null,1]}',
+    )
+  })
+
+  it('an own __proto__ key stays a key', () => {
+    const record = JSON.parse('{"__proto__":{"x":1},"a":1}')
+    expect(stringifyRecord(record)).toBe('{"__proto__":{"x":1},"a":1}')
+  })
+})
+
+describe('inside a Logging Context', () => {
+  beforeEach(() => _reset())
+
+  it('a bad value keeps the trace IDs and Context Fields', () => {
+    const entries = _captureEntries()
+    runWithLogger(
+      { logger: createLogger({ service: 'svc' }), traceparent: TRACEPARENT, fields: { r: 1 } },
+      () => getLogger().warn('m', throwing()),
+    )
+    expect(entries[0]).toMatchObject({
+      r: 1,
+      a: '[Unserializable: 1]',
+      traceId: '0af7651916cd43dd8448eb211c80319c',
+    })
+  })
+})

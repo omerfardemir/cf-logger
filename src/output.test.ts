@@ -227,14 +227,11 @@ describe('errors', () => {
     expect(entries[0].reason).toMatchObject({ type: 'TypeError', message: 'bad input' })
   })
 
-  it('cuts off deep or circular cause chains', () => {
-    const a = new Error('a')
-    const b = new Error('b', { cause: a })
-    a.cause = b
+  it('cuts off deep cause chains', () => {
+    let err = new Error('e0')
+    for (let i = 1; i < 10; i++) err = new Error(`e${i}`, { cause: err })
 
-    const serialized = serializeError(a)
-    const line = stringifyRecord(serialized)
-
+    const serialized = serializeError(err)
     let depth = 0
     let node = serialized
     while (node.cause && typeof node.cause === 'object') {
@@ -243,7 +240,27 @@ describe('errors', () => {
     }
     expect(depth).toBe(6)
     expect(node.type).toBe('Truncated')
-    expect(line.length).toBeGreaterThan(0)
+  })
+
+  it('a circular cause chain is "[Circular]" where it loops', () => {
+    const a = new Error('a')
+    const b = new Error('b', { cause: a })
+    a.cause = b
+
+    expect(serializeError(a)).toMatchObject({
+      message: 'a',
+      cause: { message: 'b', cause: '[Circular]' },
+    })
+    expect(stringifyRecord(serializeError(a)).length).toBeGreaterThan(0)
+  })
+
+  it('a shared, non-circular Error is serialized in each place', () => {
+    const shared = new Error('shared')
+    const err = Object.assign(new Error('outer'), { first: shared, second: shared })
+    expect(serializeError(err)).toMatchObject({
+      first: { message: 'shared' },
+      second: { message: 'shared' },
+    })
   })
 })
 
