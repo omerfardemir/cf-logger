@@ -105,6 +105,19 @@ describe('resolveTrace', () => {
     const trace = resolveTrace(header)
     expect(trace.traceFlags).toBe(0)
   })
+
+  it('keeps tracestate with a valid traceparent', () => {
+    const header = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+    expect(resolveTrace(header, 'congo=t61rcWkgMzE').tracestate).toBe('congo=t61rcWkgMzE')
+  })
+
+  it('ignores tracestate when traceparent is missing or invalid (W3C)', () => {
+    expect(resolveTrace(undefined, 'congo=t61rcWkgMzE').tracestate).toBeUndefined()
+    expect(resolveTrace(null, 'congo=t61rcWkgMzE')).not.toHaveProperty('tracestate')
+    expect(resolveTrace('00-bad-01', 'congo=t61rcWkgMzE')).not.toHaveProperty('tracestate')
+    const allZero = `00-${'0'.repeat(32)}-b7ad6b7169203331-01`
+    expect(resolveTrace(allZero, 'congo=t61rcWkgMzE')).not.toHaveProperty('tracestate')
+  })
 })
 
 describe('Trace Carrier', () => {

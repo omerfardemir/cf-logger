@@ -324,7 +324,8 @@ describe('getTraceCarrier', () => {
     let producer: ReturnType<typeof getTraceContext>
     let consumer: ReturnType<typeof getTraceContext>
 
-    runWithLogger({ logger, tracestate: 'v=1' }, () => {
+    const traceparent = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
+    runWithLogger({ logger, traceparent, tracestate: 'v=1' }, () => {
       producer = getTraceContext()
       sent = JSON.parse(JSON.stringify(getTraceCarrier())) // as a queue message body would
     })
