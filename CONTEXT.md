@@ -23,7 +23,7 @@ The logger built once per process or isolate from Logger Options, carrying only 
 _Avoid_: base logger, factory
 
 **Default Logger**:
-The Root Logger an isolate registers for code that runs outside every Logging Context (module scope, plain RPC methods, `scheduled`, shared packages); `getLogger()` returns it there. Set with `setDefaultLogger`, or registered by `useLogger`, `TracedEntrypoint`, `tracedWorker` or `defaultLoggerFromEnv` the first time they see a Root Logger. Like every Root Logger it carries no Context Fields, so no unit of work's data reaches another through it.
+The Root Logger an isolate registers for code that runs outside every Logging Context (module scope, plain RPC methods, `scheduled`, shared packages); `getLogger()` returns it there. Set with `setDefaultLogger`, or registered by `useLogger`, `TracedEntrypoint`, `tracedWorker` or `defaultLoggerFromEnv` the first time they see a Root Logger, unless one is already set. Like every Root Logger it carries no Context Fields, so no unit of work's data reaches another through it.
 _Avoid_: global logger, fallback logger
 
 **Logger Options**:

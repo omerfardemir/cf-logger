@@ -87,7 +87,7 @@ app.use(useLogger((c) => createLogger(loggerOptionsFromEnv(c.env)))) // a new Ro
 
 ### Register a Default Logger
 
-Module scope, plain `WorkerEntrypoint` RPC methods, `scheduled`, Durable Object methods and shared packages often run outside every Logging Context. Their `getLogger()` lines say `service: 'unknown'` unless the isolate has a Default Logger. On Workers, build the Root Logger with `defaultLoggerFromEnv()` from `loggercf/workers`: it reads `env` through `cloudflare:workers` (so it works at module scope), takes the same Env Mapping as `loggerOptionsFromEnv`, and registers itself as the Default Logger.
+Module scope, plain `WorkerEntrypoint` RPC methods, `scheduled`, Durable Object methods and shared packages often run outside every Logging Context. Their `getLogger()` lines say `service: 'unknown'` unless the isolate has a Default Logger. On Workers, build the Root Logger with `defaultLoggerFromEnv()` from `loggercf/workers`: it reads `env` through `cloudflare:workers` (so it works at module scope), takes the same Env Mapping as `loggerOptionsFromEnv`, and registers the logger as the Default Logger unless one is already set. A mapping function's `env` is typed `Cloudflare.Env`, which `wrangler types` fills in.
 
 ```ts
 import { Hono } from 'hono'
@@ -104,7 +104,7 @@ getLogger().info('module loaded') // has service, environment, version; no trace
 export default app
 ```
 
-On Node.js, or to choose the logger yourself, call `setDefaultLogger(rootLogger)` from `loggercf`. It always replaces the current default. `useLogger(rootLogger)`, `TracedEntrypoint` and `tracedWorker` register their Root Logger only when no default is set yet (first seen wins). `useLogger`'s factory form registers nothing, so with a factory call `setDefaultLogger` yourself or use `defaultLoggerFromEnv()`. Pass a Root Logger, never `rootLogger.child({ requestId })`: its bindings would appear on every line logged outside a context. `getLogger('name')` with a name still returns a standalone logger without `environment` or `version`.
+On Node.js, or to choose the logger yourself, call `setDefaultLogger(rootLogger)` from `loggercf`. It always replaces the current default. `useLogger(rootLogger)`, `defaultLoggerFromEnv()`, and `TracedEntrypoint` / `tracedWorker` (when the entrypoint is constructed) register their Root Logger only when no default is set yet (first seen wins). `useLogger`'s factory form registers nothing, so with a factory call `setDefaultLogger` yourself or use `defaultLoggerFromEnv()`. Pass the Root Logger itself, never `rootLogger.child({ requestId })` or a logger taken inside a Logging Context: fields passed to `.child()` would appear on every line logged outside a context. `getLogger('name')` with a name still returns a standalone logger without `environment` or `version`.
 
 ### Per-request data goes in Context Fields
 

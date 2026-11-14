@@ -131,8 +131,8 @@ setDefaultLogger(logger)
 getLogger().info('starting') // service, environment and version from env
 ```
 
-- Outside a context the line has no trace IDs and no Context Fields. Context Fields live in each Logging Context, never on the logger, so registering a logger (even the one `getLogger()` returns inside a context) cannot carry one request's data into other work.
-- Pass the Root Logger. A `.child({ ... })` of it is accepted, but its bindings go on every line logged outside a context, so they must be per-process data too.
+- Outside a context the line has no trace IDs and no Context Fields. Context Fields live in each Logging Context, never on the logger, so the Default Logger cannot carry one request's data into other work.
+- Pass the Root Logger itself, not a logger taken from inside a Logging Context. A `.child({ ... })` of it is accepted, but the fields passed to `.child()` go on every line logged outside a context, so they must be per-process data too.
 - `setDefaultLogger` always replaces the current default, including one registered automatically. Calling it again replaces it again.
 
 `useLogger(rootLogger)`, `TracedEntrypoint`, `tracedWorker` and `defaultLoggerFromEnv` register their Root Logger the first time they see one, unless a default is already set: first seen wins. On Workers, [`defaultLoggerFromEnv()`](#defaultloggerfromenvmapping) builds and registers one from `env` with no setup.
@@ -439,7 +439,7 @@ All workers in the chain share the same `traceId`.
 
 ### `TracedEntrypoint<Env>`
 
-Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. The first read of `this.rootLogger` (every `session()` call does one) registers it as the [Default Logger](#setdefaultloggerlogger) unless one is already set; `tracedWorker()` does the same. Override the `envMapping` getter to read other vars (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)), or override `loggerOptions` to build the options yourself.
+Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Its constructor registers `this.rootLogger` as the [Default Logger](#setdefaultloggerlogger) unless one is already set, so `getLogger()` in `scheduled()`, `queue()` or a plain RPC method logs with its `service`; `tracedWorker()` does the same. Because the constructor reads `rootLogger`, build `envMapping` / `loggerOptions` overrides from `this.env`, not from subclass instance fields. Override the `envMapping` getter to read other vars (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)), or override `loggerOptions` to build the options yourself.
 
 ```ts
 import {
