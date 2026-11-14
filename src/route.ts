@@ -15,10 +15,10 @@ import {
 } from './output'
 
 /**
- * The keys a log call's object arguments cannot set: the Record Keys, the
- * Logger Options keys, the trace IDs and `err`. Their values for these keys
- * move to `args` instead, so a call can never overwrite what loggercf writes
- * and nothing is dropped. `err` and `message` are the exceptions while
+ * The Moved Keys: the keys a log call's object arguments cannot set, namely
+ * the Record Keys, the Logger Options keys, the trace IDs and `err`. Their
+ * values for these keys move to `args` instead, so a call can never
+ * overwrite what loggercf writes and nothing is dropped. `err` and `message` are the exceptions while
  * they are unset (see `routeArgs()`): `logger.error({ err }, 'msg')` is how a
  * structured call passes an error.
  */

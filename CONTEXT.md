@@ -46,15 +46,19 @@ The rule that places every argument of a log call in the line (the message, top-
 _Avoid_: argument parsing, normalization
 
 **Record Keys**:
-The keys loggercf writes itself on every log line: `time`, `level`, `message`, `errors` and `args`. A log call's objects, Logger Bindings and Context Fields can't set them: their values for these keys move to the Overflow, so a `.child({ level: 'ERROR' })` can't change a line's severity. A log call's objects also can't set `service`, `environment`, `version` or the trace IDs, and set `err` only while it is unset.
+The keys loggercf writes itself on every log line: `time`, `level`, `message`, `errors` and `args`. A log call's objects, Logger Bindings and Context Fields can't set them: their values for these keys move to the Overflow, so a `.child({ level: 'ERROR' })` can't change a line's severity. A log call's objects can't set the wider Moved Keys either.
 _Avoid_: own keys, reserved keys, core keys. Not to be confused with the Hono middleware's Owned Keys.
+
+**Moved Keys**:
+The keys a log call's objects can't set: the Record Keys, `service`, `environment` and `version` (from the Root Logger's Logger Options), the trace IDs (`traceId`, `spanId`, `parentSpanId`) and `err`. An object's values for them move to the Overflow, one object per argument. Two are taken from an object while still unset: `err`, and a string `message` when the call has no other message. Logger Bindings and Context Fields are held only to the Record Keys.
+_Avoid_: reserved keys, protected keys, the keys loggercf writes itself
 
 **Logger Bindings**:
 The fixed fields a logger writes on every line: a Root Logger's `service`, `environment` and `version`, `createLogger`'s second argument, and the fields of each `.child()` merged in. Read once, when the logger is built, never at a log call. Per-unit-of-work data belongs in Context Fields instead.
 _Avoid_: logger fields, child fields
 
 **Overflow**:
-The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, a leading `undefined` / `null` not followed by a string, an `undefined` / `null` in the message's place after a leading object or `Error`, an object's values for the Record Keys and the other keys it can't set, and a Logger Binding's or Context Field's value for a Record Key), in call order. Present only when non-empty.
+The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, a leading `undefined` / `null` not followed by a string, an `undefined` / `null` in the message's place after a leading object or `Error`, an object's values for the Moved Keys, and a Logger Binding's or Context Field's value for a Record Key), in call order. Present only when non-empty.
 _Avoid_: extras, rest, leftovers
 
 ### Tracing

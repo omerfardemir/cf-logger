@@ -233,7 +233,7 @@ describe('routeArgs', () => {
     })
   })
 
-  it('plain objects, leading or not: reserved keys move to args as one object per argument', () => {
+  it('plain objects, leading or not: Moved Keys move to args as one object per argument', () => {
     expect(
       routeArgs([
         { service: 'other', a: 1 },
@@ -407,7 +407,7 @@ describe('log call examples (issue #21), in both call styles', () => {
     }
   })
 
-  it('reserved keys cannot be overwritten; their values land in args', () => {
+  it('Moved Keys cannot be overwritten; their values land in args', () => {
     let traceId: string | undefined
     for (const r of [
       record((l) => {
@@ -672,7 +672,7 @@ type Kind =
   | 'boolean'
   | 'null'
   | 'object'
-  | 'reservedObject'
+  | 'movedKeysObject'
   | 'error'
   | 'array'
   | 'instance'
@@ -690,7 +690,7 @@ const KINDS: Kind[] = [
   'boolean',
   'null',
   'object',
-  'reservedObject',
+  'movedKeysObject',
   'error',
   'array',
   'instance',
@@ -702,7 +702,7 @@ const KINDS: Kind[] = [
   'protoObject',
   'toJSONObject',
 ]
-const RESERVED = [...MOVED_KEYS]
+const MOVED = [...MOVED_KEYS]
 
 /**
  * One generated argument, with the unique token that must appear in the
@@ -739,8 +739,8 @@ function generator(seed: number) {
         return { value: null }
       case 'object':
         return { value: { [`key_${t}`]: t }, token: t }
-      case 'reservedObject':
-        return { value: { [pick(RESERVED)]: t, [`key_${t}`]: 1 }, token: t }
+      case 'movedKeysObject':
+        return { value: { [pick(MOVED)]: t, [`key_${t}`]: 1 }, token: t }
       case 'error':
         return { value: new Error(t), token: t }
       case 'array':
