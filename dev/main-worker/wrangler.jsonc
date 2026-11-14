@@ -24,6 +24,19 @@
       "entrypoint": "LoggedMath",
     },
   ],
+  // Units of work outside HTTP (src/units.ts), driven by scripts/e2e-local.mjs.
+  // Cron runs locally through /cdn-cgi/handler/scheduled. Before `pnpm dev:deploy`,
+  // create the queue: `wrangler queues create loggercf-dev-jobs`.
+  "triggers": { "crons": ["0 3 * * *"] },
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM", "class_name": "Room" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "queues": {
+    "producers": [{ "binding": "JOBS", "queue": "loggercf-dev-jobs" }],
+    "consumers": [{ "queue": "loggercf-dev-jobs", "max_batch_timeout": 1 }],
+  },
+  "workflows": [{ "name": "loggercf-dev-report", "binding": "REPORT", "class_name": "Report" }],
   "vars": {
     "ENVIRONMENT": "development",
     "RELEASE": "e69d9c8",

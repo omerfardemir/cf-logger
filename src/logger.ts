@@ -439,22 +439,39 @@ export function withSpan<R>(operation: string, fn: () => R): R {
   return als.run(store, () => recordSpan(operation, fn))
 }
 
+/** The text a Span records as its `error`. */
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 /**
  * Time `fn` as a Span covering the *current* Logging Context (no new span ID).
  *
  * Used by `withSpan()` after it opens a nested context, and by Traced Sessions,
- * whose whole Logging Context is the Span. Logs only when the trace is sampled.
+ * whose whole Logging Context is the Span. The `span.end` line is written only when
+ * the trace is sampled (and `timed` is on). Otherwise a throw is still logged, as one
+ * `<operation> failed` line at `ERROR` with `err` and a `span` object without timing
+ * (`operation`, `status: 'ERROR'`, `error`), so a query on `span.status` finds it too;
+ * success writes nothing.
  *
  * @internal Not exported from the package entry points.
  */
-export function recordSpan<R>(operation: string, fn: () => R): R {
+export function recordSpan<R>(operation: string, fn: () => R, timed = true): R {
   const store = als.getStore()
-  if (!store || (store.trace.traceFlags & 0x01) !== 0x01) return fn()
+  if (!store) return fn()
 
   const { logger } = store
+  const sampled = timed && (store.trace.traceFlags & 0x01) === 0x01
   const startTime = Date.now()
 
   const emit = (status: SpanContext['status'], error?: unknown) => {
+    if (!sampled) {
+      if (status === 'ERROR') {
+        const span = { operation, status, error: errorText(error) }
+        logger.error({ span, err: error }, '%s failed', operation)
+      }
+      return
+    }
     const endTime = Date.now()
     const span: SpanContext = {
       operation,
@@ -462,9 +479,7 @@ export function recordSpan<R>(operation: string, fn: () => R): R {
       endTime,
       duration: endTime - startTime,
       status,
-      ...(status === 'ERROR'
-        ? { error: error instanceof Error ? error.message : String(error) }
-        : {}),
+      ...(status === 'ERROR' ? { error: errorText(error) } : {}),
     }
     if (status === 'ERROR') {
       logger.error({ span, err: error }, 'span.end %s', operation)
@@ -494,6 +509,20 @@ export function recordSpan<R>(operation: string, fn: () => R): R {
   }
   emit('OK')
   return result
+}
+
+/**
+ * Capture the current Logging Context, to re-enter it from a callback the runtime
+ * calls outside it. A Workflows `step.do` callback, for one, arrives back over RPC
+ * in no Logging Context.
+ *
+ * @internal Not exported from the package entry points.
+ * @returns A function that runs `fn` in the captured Logging Context, or `undefined`
+ *   outside a Logging Context.
+ */
+export function captureLoggingContext(): (<R>(fn: () => R) => R) | undefined {
+  const store = als.getStore()
+  return store && ((fn) => als.run(store, fn))
 }
 
 /**
