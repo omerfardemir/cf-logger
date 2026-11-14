@@ -12,9 +12,13 @@ This means distributed tracing across service bindings requires a user-space sol
 
 Wrap the service binding in a JS `Proxy` to intercept method calls and append a hidden `{__$$trace: traceparent}` argument. Strip it on the receiver.
 
-**Blocked by:** `DataCloneError` — wrapping a `Fetcher`/service binding stub in a `Proxy` throws `ServiceStub serialization requires the 'experimental' compat flag` (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)). The `experimental` flag prevents deployment to production.
+**Wrapping the stub is not the problem.** A caller-side `Proxy` over a `Fetcher` / service binding works in workerd: both `fetch` forms, RPC method calls, nested property getters, `RpcTarget` results, promise pipelining and `connect()` all go through it. `tracedFetcher` relies on this.
 
-> **Note:** The _receiver-side_ Proxy (wrapping `this` inside an `RpcTarget`) was fixed in workerd [#3212](https://github.com/cloudflare/workerd/pull/3212) (Dec 2024, `v1.20241213.0`). But the _caller-side_ Proxy on `Fetcher` remains broken.
+**What fails** is passing the Proxy itself _as an RPC argument_ (handing the wrapped binding to another Worker). Serializing it throws `DataCloneError: ServiceStub serialization requires the 'experimental' compat flag` (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)), and the `experimental` flag prevents deployment to production. Pass the original binding instead.
+
+An earlier version of this section said the caller-side Proxy itself was broken; only the RPC-argument case above is. The Session Factory (Approach 4) remains the adopted design for RPC; this approach was not revisited.
+
+> **Note:** The _receiver-side_ Proxy (wrapping `this` inside an `RpcTarget`) was fixed in workerd [#3212](https://github.com/cloudflare/workerd/pull/3212) (Dec 2024, `v1.20241213.0`).
 
 ### ❌ Approach 2: Cap'n Web (RPC over HTTP)
 
@@ -199,15 +203,15 @@ Span logging is **optional**. Omit the operation name and `traced()` has zero sp
 
 2. **Allow metadata/headers on RPC calls** — a user-space channel to attach context to RPC invocations. Would eliminate the need for the session pattern.
 
-3. **Fix Proxy on Fetcher stubs** (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)) — would enable transparent tracing without changing method signatures.
+3. **Serialize a Proxy over a Fetcher stub** (workerd [#6358](https://github.com/cloudflare/workerd/issues/6358)) — so a wrapped binding could itself be passed as an RPC argument. Calling through the Proxy already works.
 
 ## Key Decisions
 
-| Decision                             | Rationale                                                            |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| Session Factory over Proxy           | CF platform limitation (workerd #6358) blocks Proxy on Fetcher stubs |
-| Private fields for traceparent       | `#field` on RpcTarget stays server-side, never serialized            |
-| `withTrace()` one-liner API          | Clean DX without changing method signatures                          |
-| Span data excludes trace IDs         | Already on every log line — no duplicate bytes                       |
-| Optional span logging                | Zero overhead when you don't need timing                             |
-| Env var convention (NAME, LOG_LEVEL) | Consistent across workers, readable from wrangler config             |
+| Decision                             | Rationale                                                                            |
+| ------------------------------------ | ------------------------------------------------------------------------------------ |
+| Session Factory over Proxy           | A Proxy over the stub works, but cannot be passed as an RPC argument (workerd #6358) |
+| Private fields for traceparent       | `#field` on RpcTarget stays server-side, never serialized                            |
+| `withTrace()` one-liner API          | Clean DX without changing method signatures                                          |
+| Span data excludes trace IDs         | Already on every log line — no duplicate bytes                                       |
+| Optional span logging                | Zero overhead when you don't need timing                                             |
+| Env var convention (NAME, LOG_LEVEL) | Consistent across workers, readable from wrangler config                             |
