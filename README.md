@@ -251,19 +251,21 @@ const res2 = await tracedFetch('https://api.example.com/items', undefined, { spa
 
 ### `tracedFetcher(binding, options?)`
 
-Wrap a service binding (a `Fetcher`) so its HTTP interface carries the trace: `fetch(input, init)` and `fetch(request)` both send the current Trace Carrier, and the receiving Worker's `useLogger` continues it. Use it when Workers talk over HTTP through bindings (a gateway forwarding to internal Workers); for RPC methods use [`withTrace`](#withtracebinding-fn-fields) instead.
+Wrap a service binding (a `Fetcher`) so every call through its HTTP interface sends the current Trace Carrier, as `fetch(input, init)` or `fetch(request)`, and the receiving Worker's `useLogger` continues the trace. Use it when Workers talk over HTTP through bindings (a gateway forwarding to internal Workers); for RPC methods use [`withTrace`](#withtracebinding-fn-fields) instead.
 
 ```ts
 import { tracedFetcher } from 'loggercf'
 
 app.all('/api/*', async (c) => {
   const api = tracedFetcher(c.env.API, { forwardRequestId: true, spans: true })
-  return api.fetch(c.req.raw) // same Request, plus traceparent / tracestate / X-Request-Id
+  // Same Request, plus traceparent / tracestate, and this Worker's Request ID as X-Request-Id
+  // (replacing the client's, which useLogger may have rejected)
+  return api.fetch(c.req.raw)
 })
 ```
 
 - It returns the binding's own type. `connect()` and every other member pass through to the binding unchanged; only `fetch` is wrapped. Hand the original binding (not the wrapper) to anything that stores or transfers it.
-- Nothing you pass is mutated. The trace headers go in a new `Headers`, starting from the headers `fetch` would send (`init.headers` when given, otherwise the `Request`'s). A `Request` is passed on as it is, with only the new headers beside it, so its body (streaming included) is neither read nor copied, and its `method`, `redirect`, `signal` and `cf` still apply.
+- Nothing you pass is mutated. The Trace Carrier goes in a new `Headers`, starting from the headers `fetch` would send (`init.headers` when given, otherwise the `Request`'s). A `tracestate` already there is dropped, since it belongs to another `traceparent`. A `Request` is passed on as it is, with only the new headers beside it, so its body (streaming included) is neither read nor copied, and its `method`, `redirect`, `signal` and `cf` still apply. A `Request` passed as `init` (`fetch(url, request)`) is read into a plain `init`, so its body too is left for the binding to read, as with `fetch`.
 - Outside a Logging Context, `fetch` calls the binding with exactly the arguments you gave it.
 - It never retries, catches or changes an error: the call returns or rejects with exactly what the binding does. A header value that is not safe to send (one with a line break, say) is left out rather than making the call throw.
 
@@ -271,12 +273,14 @@ app.all('/api/*', async (c) => {
 
 `tracedFetch` and `tracedFetcher` take the same options. All are off by default.
 
-| Option             | Effect                                                                                                                                                                                                                                                    |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `forwardRequestId` | Sends the current Request ID (the `requestId` Context Field) as `X-Request-Id`, so the receiver's `useLogger` can reuse it (if it passes that side's validation). Never overwrites an `X-Request-Id` you set. Sends nothing when there is no `requestId`. |
-| `spans`            | Logs one Span per call, `span.end fetch`, with `method`, `host`, `path` and the response `statusCode`. `path` is the pathname only, never the query string, which can carry tokens. The downstream work's parent span is this Span.                       |
+| Option             | Effect                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `forwardRequestId` | Sends the current Request ID (the `requestId` Context Field) as `X-Request-Id`, so the receiver's `useLogger` can reuse it (if it passes that side's validation). It replaces any `X-Request-Id` already on the call, in `init` or on the `Request`, so forwarding `c.req.raw` sends your ID, not the client's. To send your own ID instead, leave this off and set the header. With no `requestId`, the headers are left alone. |
+| `spans`            | Logs one Span per call, `span.end fetch`, with `method`, `host`, `path` and the response `statusCode`. `path` is the pathname only, never the query string, which can carry tokens. The downstream work's parent span is this Span.                                                                                                                                                                                              |
 
-A Span's status says whether the call completed, not what it answered. Any response, 5xx included, is `OK` (filter on `statusCode` to find failing responses; the receiver's own logs record its errors). A call that throws or rejects, such as a network failure, is logged at `ERROR` with the error, then the same error is rethrown. Like every Span, it is written only when the trace is sampled.
+On `tracedFetch`, `forwardRequestId` sends your Request ID to whatever host you call, third parties included.
+
+A Span's status says whether the call completed, not what it answered. Any response, 5xx included, is `OK` (filter on `statusCode` to find failing responses; the receiver's own logs record its errors). A call that throws or rejects, such as a network failure, is logged at `ERROR` with the error, then the same error is rethrown. The error is logged as it is, since it is rethrown unchanged: if its message quotes the URL (`Failed to parse URL from /x?token=abc`), the query string is on that line. Like every Span, it is written only when the trace is sampled.
 
 ```json
 {
@@ -382,7 +386,7 @@ app.use(
     requestId: {
       // a source is a header name (case-insensitive) or a function (c) => string | undefined
       from: ['cf-ray', 'x-request-id'], // prefer Cloudflare's Ray ID, then the client's header
-      trustIncoming: true, // false: always generate; no header chooses the ID or adds cfRay (trace headers still apply)
+      trustIncoming: true, // false: always generate; no header chooses the ID or adds cfRay (the Trace Carrier still applies)
       validate: /^[\w\-=:.]{1,128}$/, // or (id, c) => boolean; replaces the default, length cap included
       generate: () => crypto.randomUUID(),
     },

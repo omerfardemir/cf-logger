@@ -165,7 +165,7 @@ Call these inside `useLogger`, `this.traced`, or `runWithLogger`. Outside a Logg
 
 - `setLoggerContext` ignores the fields and writes one WARN per isolate: `setLoggerContext called outside a Logging Context; fields ignored`. That WARN in the logs means a call site is outside every Logging Context.
 - `withSpan` just runs the function, with no Span.
-- `getTraceCarrier()` returns `{}`, and `tracedFetch` / `tracedFetcher` send no trace headers.
+- `getTraceCarrier()` returns `{}`, and `tracedFetch` / `tracedFetcher` send no Trace Carrier.
 - `getLogger()` writes through the Default Logger, or without one a standalone logger with `service: 'unknown'` (or the name you pass). Either way the line has no trace IDs and no Context Fields.
 
 ### Traced Sessions: every RPC method runs in `this.traced`
@@ -227,12 +227,12 @@ export default class extends TracedEntrypoint<Env> {
 }
 ```
 
-### Outbound HTTP carries the trace
+### Outbound HTTP sends the Trace Carrier
 
-Use `tracedFetch` for `fetch`, and wrap a service binding with `tracedFetcher` before calling its `fetch`. Do not set `traceparent` by hand, and do not wrap the call in your own retry or `try/catch` for the logger's sake: the wrapper returns or throws exactly what `fetch` or the binding does. It never mutates the `Request` or `init` you pass, so forwarding `c.req.raw` is fine. Its options are off by default:
+Use `tracedFetch` for `fetch`, and wrap a service binding with `tracedFetcher` before calling its `fetch`. Do not set `traceparent` by hand, and do not wrap the call in your own retry or `try/catch` for the logger's sake: the wrapper returns or throws exactly what `fetch` or the binding does. It never mutates the `Request` or `init` you pass. Forwarding `c.req.raw` passes the client's headers on as they are, `X-Request-Id` included, unless `forwardRequestId` is on. Its options are off by default:
 
-- `forwardRequestId: true` sends the `requestId` Context Field as `X-Request-Id` (never replacing one you set), so the receiver's `useLogger` reuses it.
-- `spans: true` logs one `span.end fetch` per call with `method`, `host`, `path` (no query string) and `statusCode`. A 5xx response is still an `OK` Span (look at `statusCode`); a network failure is an `ERROR` Span, and the error is rethrown.
+- `forwardRequestId: true` sends the `requestId` Context Field as `X-Request-Id`, replacing any already on the call (a forwarded `c.req.raw`'s included), so the receiver's `useLogger` reuses this Worker's ID. To send your own ID, leave it off and set the header. On `tracedFetch` the ID goes to whatever host you call.
+- `spans: true` logs one `span.end fetch` per call with `method`, `host`, `path` (no query string) and `statusCode`. A 5xx response is still an `OK` Span (look at `statusCode`); a network failure is an `ERROR` Span, and the error is rethrown. The error is logged as it is, so a message that quotes the URL puts its query string on that line.
 
 ```ts
 import { Hono } from 'hono'
