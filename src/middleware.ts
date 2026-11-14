@@ -18,12 +18,18 @@ export type RequestIdSource = string | ((c: Context) => string | undefined)
  *
  * With `trustIncoming: false`, steps 1 and 2 are skipped: the ID is always generated.
  *
- * Every value from steps 1 and 2 must pass `validate`; one that fails is skipped, and the
- * request's lines get `requestIdRejected: true` (the rejected value is not logged).
+ * Every non-empty value from steps 1 and 2 must pass `validate`; one that fails (or makes
+ * `validate` throw) is skipped, and the request's lines get `requestIdRejected: true`. The
+ * rejected value is never logged, not even as `cfRay`. An empty value, or a source that
+ * returns nothing or a non-string, counts as "none" and is not a rejection.
  * Whatever `validate` says, a value must also be a safe header value (printable ASCII, no
  * leading or trailing space), because it is echoed in the `X-Request-Id` response header.
- * The generated ID is not validated, but one that is not a safe header value is replaced by
- * `crypto.randomUUID()`, with one `WARN` per isolate.
+ * The generated ID is not validated, but when `generate` throws or returns a value that is not
+ * a safe header value, `crypto.randomUUID()` is used instead.
+ *
+ * A source, `validate` or `generate` that throws never fails the request. Each `useLogger()`
+ * writes one `WARN` through its Root Logger the first time that happens (no error message,
+ * since it may echo the ID).
  */
 export interface RequestIdOptions {
   /**
@@ -74,19 +80,8 @@ const SAFE_HEADER_VALUE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/
 const UNSAFE_GENERATED_ID_WARNING =
   'useLogger: requestId.generate threw or returned a value that is not a safe header value; using crypto.randomUUID()'
 
-/** Whether the unsafe-generated-ID warning has been written in this isolate. */
-let warnedUnsafeGeneratedId = false
-
-/**
- * Re-arm the one-time unsafe-generated-ID warning.
- *
- * Not called from `logger.ts`'s `_reset()`, so the core entry never imports the Hono module.
- *
- * @internal Test helper, not part of the public API.
- */
-export function _resetMiddlewareWarnings(): void {
-  warnedUnsafeGeneratedId = false
-}
+const REQUEST_ID_CALLBACK_THREW_WARNING =
+  'useLogger: a requestId.from source or requestId.validate threw; the value was skipped'
 
 /** What `useLogger` takes from the request for its Context Fields. */
 interface PickedRequestId {
@@ -99,10 +94,11 @@ interface PickedRequestId {
 }
 
 /** Calls an app callback; a throw counts as "no usable value", never as a failed request. */
-function attempt<R>(fn: () => R): R | undefined {
+function tryCall<R>(fn: () => R, onThrow: () => void): R | undefined {
   try {
     return fn()
   } catch {
+    onThrow()
     return undefined
   }
 }
@@ -124,7 +120,7 @@ function matches(pattern: RegExp, value: string): boolean {
  */
 function requestIdPicker(
   options: RequestIdOptions = {},
-): (c: Context, logger: Logger) => PickedRequestId {
+): (c: Context, logger: Pick<Logger, 'warn'>) => PickedRequestId {
   const {
     from = DEFAULT_REQUEST_ID_SOURCES,
     trustIncoming = true,
@@ -147,13 +143,25 @@ function requestIdPicker(
 
   const accepts = typeof validate === 'function' ? validate : (id: string) => matches(validate, id)
 
-  const generateSafe = (c: Context, logger: Logger): string => {
-    const id = attempt(() => generate(c))
+  // One WARN of each kind per useLogger() call, written through the Root Logger it was given.
+  let warnedUnsafeGenerated = false
+  let warnedCallbackThrew = false
+  const warnOnce = (logger: Pick<Logger, 'warn'>, kind: 'generate' | 'callback') => {
+    if (kind === 'generate' ? warnedUnsafeGenerated : warnedCallbackThrew) return
+    if (kind === 'generate') warnedUnsafeGenerated = true
+    else warnedCallbackThrew = true
+    logger.warn(
+      kind === 'generate' ? UNSAFE_GENERATED_ID_WARNING : REQUEST_ID_CALLBACK_THREW_WARNING,
+    )
+  }
+
+  const generateSafe = (c: Context, logger: Pick<Logger, 'warn'>): string => {
+    const id = tryCall(
+      () => generate(c),
+      () => {},
+    )
     if (typeof id === 'string' && SAFE_HEADER_VALUE.test(id)) return id
-    if (!warnedUnsafeGeneratedId) {
-      warnedUnsafeGeneratedId = true
-      logger.warn(UNSAFE_GENERATED_ID_WARNING)
-    }
+    warnOnce(logger, 'generate')
     return crypto.randomUUID()
   }
 
@@ -164,17 +172,20 @@ function requestIdPicker(
   }
 
   return (c, logger) => {
-    const cfRay = readCfRay(c)
+    const threw = () => warnOnce(logger, 'callback')
+    let cfRay = readCfRay(c)
     let rejected = false
     for (const read of sources) {
-      const id = attempt(() => read(c))
+      const id = tryCall(() => read(c), threw)
       // No value (absent, empty, or a source that threw or returned a non-string) is not a rejection.
       if (typeof id !== 'string' || id === '') continue
-      // A `validate` that throws rejects the value.
-      if (SAFE_HEADER_VALUE.test(id) && attempt(() => accepts(id, c))) {
+      // Only a literal `true` accepts: a `validate` that throws, or returns a Promise, rejects.
+      if (SAFE_HEADER_VALUE.test(id) && tryCall(() => accepts(id, c), threw) === true) {
         return { id, rejected, cfRay }
       }
       rejected = true
+      // A rejected value is never logged, so it can't come back as `cfRay` either.
+      if (id === cfRay) cfRay = undefined
     }
     return { id: generateSafe(c, logger), rejected, cfRay }
   }
@@ -223,7 +234,7 @@ export function useLogger<T extends LogFields = LogFields>(
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
 
-    const { id: requestId, rejected, cfRay } = pickRequestId(c, rootLogger as Logger)
+    const { id: requestId, rejected, cfRay } = pickRequestId(c, rootLogger)
     const method = c.req.method
     const path = new URL(c.req.url).pathname
 

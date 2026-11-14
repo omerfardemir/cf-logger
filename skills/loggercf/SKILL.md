@@ -113,7 +113,7 @@ Context Fields do not cross RPC on their own. To carry them to another Worker, p
 
 ### Request ID in Hono
 
-`useLogger` reuses an incoming `X-Request-Id` only when it is 1 to 128 characters of `A-Z a-z 0-9 _ - = : .`; otherwise it falls back to `c.var.requestId` set by an earlier middleware, then generates a UUID. The chosen ID is on every line, in `c.var.requestId`, and in the `X-Request-Id` response header. When an incoming ID was rejected, every line also gets `requestIdRejected: true` (never the rejected value). When the request has a well-formed `cf-ray` header and `trustIncoming` is not `false`, every line also gets `cfRay`; trust it only on requests straight from Cloudflare's edge, since a Worker calling over a service binding `fetch` can set any `cf-ray`. Configure it with the second argument, not with your own header parsing:
+`useLogger` reuses an incoming `X-Request-Id` only when it is 1 to 128 characters of `A-Z a-z 0-9 _ - = : .`; otherwise it falls back to `c.var.requestId` set by an earlier middleware, then generates a UUID. The chosen ID is on every line, in `c.var.requestId`, and in the `X-Request-Id` response header. When a non-empty incoming ID was rejected, every line also gets `requestIdRejected: true` (never the rejected value, not even as `cfRay`); an empty one counts as none. When the request has a well-formed `cf-ray` header and `trustIncoming` is not `false`, every line also gets `cfRay`; trust it only on requests straight from Cloudflare's edge, since a Worker calling over a service binding `fetch` can set any `cf-ray`. Configure it with the second argument, not with your own header parsing:
 
 ```ts
 import { Hono } from 'hono'
