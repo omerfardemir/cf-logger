@@ -36,6 +36,18 @@ const elapsed = (fn: () => void) => {
   return performance.now() - start
 }
 
+/** One object with `keys` numeric keys. */
+const wide = (keys: number) =>
+  Object.fromEntries(Array.from({ length: keys }, (_, i) => [`k${i}`, i]))
+
+/** Log `fields` once and return the written line, as the sink receives it. */
+const lineFor = (fields: Record<string, unknown>) => {
+  let line = ''
+  _setSink({ write: (record) => (line = stringifyRecord(record)) })
+  createLogger({ service: 'svc' }).info(fields, 'msg')
+  return line
+}
+
 describe('shared references are not cycles, and stay linear', () => {
   beforeEach(() => _reset())
 
@@ -74,6 +86,51 @@ describe('shared references are not cycles, and stay linear', () => {
     expect(ms).toBeLessThan(100)
     expect(JSON.stringify(entries)).toContain('"[Repeated]"')
     expect(entries.map((e) => e.logError)).toEqual([undefined, undefined])
+  })
+
+  for (const [keys, copies] of [
+    [20_000, 1001],
+    [2_000, 1500],
+  ]) {
+    it(`a ${keys}-key object shared ${copies} times: fast, and the line stays bounded`, () => {
+      const shared = wide(keys)
+      const once = JSON.stringify(shared).length
+      let line = ''
+      const ms = elapsed(
+        () => (line = lineFor({ items: Array.from({ length: copies }, () => shared) })),
+      )
+      expect(ms).toBeLessThan(500)
+      // One full copy, re-written values up to the budget, then `"[Repeated]"` for the rest.
+      expect(line.length).toBeLessThan(once + 200_000 + copies * '"[Repeated]",'.length)
+      const items = JSON.parse(line).items as unknown[]
+      expect(items).toHaveLength(copies)
+      expect(items[0]).toEqual(shared)
+      expect(items.at(-1)).toBe('[Repeated]')
+      expect(JSON.parse(line).logError).toBeUndefined()
+    })
+  }
+
+  it('a repeat is written in full or not at all, never cut part way', () => {
+    const shared = wide(6_000) // fits the budget once, not twice
+    const items = JSON.parse(lineFor({ items: [shared, shared, shared, shared] })).items
+    for (const item of items)
+      expect(item === '[Repeated]' || Object.keys(item).length === 6_000).toBe(true)
+    expect(items[1]).toEqual(shared)
+    expect(items.at(-1)).toBe('[Repeated]')
+  })
+
+  it('a non-repeated large object is written in full', () => {
+    const big = wide(50_000)
+    const parsed = JSON.parse(lineFor({ big, other: wide(50_000) }))
+    expect(parsed.big).toEqual(big)
+    expect(parsed.other).toEqual(big)
+  })
+
+  it('a shared object with a long string counts its bytes too', () => {
+    const shared = { s: 'x'.repeat(100_000) }
+    const line = lineFor({ items: Array.from({ length: 50 }, () => shared) })
+    expect(line.length).toBeLessThan(300_000)
+    expect(JSON.parse(line).items.at(-1)).toBe('[Repeated]')
   })
 })
 

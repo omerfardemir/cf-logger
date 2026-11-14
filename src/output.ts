@@ -316,15 +316,25 @@ export function buildRecord(entry: RecordEntry, context?: RecordContext): LogRec
 }
 
 /**
- * How many times one line writes again an object it has already written (a
- * shared reference), before it writes `"[Repeated]"` instead. It keeps the
- * work, and the line, linear for a deeply shared structure, where writing
- * every repeat would double the line at each level.
+ * How many values one line may write again inside repeats (objects it has
+ * already written, a shared reference), before a repeat is `"[Repeated]"`.
+ * Every value inside a repeat counts, at any depth, so the work and the line
+ * stay bounded however wide or deeply shared the structure is.
  */
-const MAX_REPEATS = 1000
+const MAX_REWRITTEN_VALUES = 10_000
+
+/**
+ * How many characters of keys and strings one line may write again inside
+ * repeats, before a repeat is `"[Repeated]"`: a shared object holding a long
+ * string costs its length, not one value.
+ */
+const MAX_REWRITTEN_CHARS = 64 * 1024
 
 /** Thrown by a strict walk: the value cannot be written as JSON as it is. */
 const NOT_JSON = new Error('not JSON')
+
+/** Thrown inside a repeat when the line's re-write budget runs out. */
+const BUDGET_SPENT = new Error('re-write budget spent')
 
 /** The state of one `toJSONValue()` walk. */
 interface Walk {
@@ -332,10 +342,53 @@ interface Walk {
   strict: boolean
   /** The objects on the path to the current value: a real cycle. */
   ancestors: Set<object>
-  /** Every object written so far: a repeat. */
+  /** Every object written so far, outside repeats: a repeat. */
   seen: WeakSet<object>
-  /** How many repeats have been written again. */
-  repeats: number
+  /** How many repeats the current value is nested in. */
+  inRepeat: number
+  /** Values left to write again inside repeats (see `MAX_REWRITTEN_VALUES`). */
+  valuesLeft: number
+  /** Characters left to write again inside repeats (see `MAX_REWRITTEN_CHARS`). */
+  charsLeft: number
+}
+
+/**
+ * Charge the walk's re-write budget for one value inside a repeat.
+ *
+ * @param {Walk} walk - The current walk, inside a repeat.
+ * @param {string} key - The value's key in its parent.
+ * @param {unknown} value - The value.
+ * @throws `BUDGET_SPENT` when the budget runs out.
+ */
+function charge(walk: Walk, key: string, value: unknown): void {
+  walk.valuesLeft--
+  walk.charsLeft -= key.length + (typeof value === 'string' ? value.length : 0)
+  if (walk.valuesLeft < 0 || walk.charsLeft < 0) throw BUDGET_SPENT
+}
+
+/**
+ * Write a repeat, an object the line has already written, again, within the
+ * re-write budget. A repeat is written in full or, once the budget is spent,
+ * is `"[Repeated]"` as a whole: never cut part way.
+ *
+ * @param {object} object - The repeated object.
+ * @param {Walk} walk - The current walk.
+ * @returns {unknown} Its JSON-ready value, or `"[Repeated]"`.
+ * @throws `NOT_JSON` in a strict walk, instead of `"[Repeated]"`.
+ */
+function repeatToJSONValue(object: object, walk: Walk): unknown {
+  if (walk.inRepeat > 0) return objectToJSONValue(object, walk) // the outer repeat is charged
+  if (walk.valuesLeft <= 0 || walk.charsLeft <= 0) return standIn(walk, '[Repeated]')
+  walk.inRepeat++
+  try {
+    return objectToJSONValue(object, walk)
+  } catch (thrown) {
+    if (thrown !== BUDGET_SPENT) throw thrown
+    walk.valuesLeft = 0
+    return standIn(walk, '[Repeated]')
+  } finally {
+    walk.inRepeat--
+  }
 }
 
 /**
@@ -359,8 +412,9 @@ function standIn(walk: Walk, text: string): string {
  * primitives are unwrapped. Beyond JSON: a `Map` is an array of
  * `[key, value]` pairs, a `Set` an array; a `BigInt` is its digits, a
  * function `[Function: name]`, a symbol `Symbol(description)`; a real cycle
- * is `"[Circular]"`; a repeated object is written again (see `MAX_REPEATS`);
- * a getter or a `toJSON` that throws is `unserializable()` for that value only.
+ * is `"[Circular]"`; a repeated object is written again, within a budget per line
+ * (see `MAX_REWRITTEN_VALUES`), then is `"[Repeated]"`; a getter or a
+ * `toJSON` that throws is `unserializable()` for that value only.
  *
  * @param {unknown} value - The value to convert.
  * @param {string} key - Its key in its parent, passed to `toJSON`.
@@ -370,21 +424,11 @@ function standIn(walk: Walk, text: string): string {
  * @throws `NOT_JSON` in a strict walk, instead of any stand-in.
  */
 function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true): unknown {
-  switch (typeof value) {
-    case 'string':
-    case 'number':
-    case 'boolean':
-    case 'undefined':
-      return value
-    case 'bigint':
-      return standIn(walk, value.toString())
-    case 'symbol':
-      return standIn(walk, value.toString())
-    case 'function':
-      return standIn(walk, functionText(value))
-  }
-  if (value === null) return null
-  const object = value as object
+  if (walk.inRepeat > 0) charge(walk, key, value)
+  const text = nonJSONText(value)
+  if (text !== undefined) return standIn(walk, text)
+  if (typeof value !== 'object' || value === null) return value
+  const object = value
 
   if (useToJSON) {
     let replaced: unknown
@@ -402,18 +446,33 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
   }
 
   if (walk.ancestors.has(object)) return standIn(walk, '[Circular]')
-  if (walk.seen.has(object)) {
-    if (walk.repeats >= MAX_REPEATS) return standIn(walk, '[Repeated]')
-    walk.repeats++
-  } else {
-    walk.seen.add(object)
-  }
   walk.ancestors.add(object)
   try {
+    if (walk.seen.has(object)) return repeatToJSONValue(object, walk)
+    if (walk.inRepeat === 0) walk.seen.add(object)
     return objectToJSONValue(object, walk)
   } finally {
     walk.ancestors.delete(object)
   }
+}
+
+/**
+ * The text loggercf writes for a primitive JSON cannot write: a `BigInt`'s
+ * digits, `[Function: name]`, `Symbol(description)`. Shared by the fast path
+ * and the walk of `stringifyRecord()`.
+ *
+ * @param {unknown} value - Any value.
+ * @returns {string | undefined} Its text, or `undefined` for any other value.
+ */
+function nonJSONText(value: unknown): string | undefined {
+  switch (typeof value) {
+    case 'bigint':
+    case 'symbol':
+      return value.toString()
+    case 'function':
+      return functionText(value)
+  }
+  return undefined
 }
 
 /** `Object.prototype.toString` of the boxed primitives JSON unwraps. */
@@ -429,20 +488,25 @@ const BOXED = new Set(['[object Number]', '[object String]', '[object Boolean]']
 function objectToJSONValue(object: object, walk: Walk): unknown {
   let items: ArrayLike<unknown> | undefined
   let keys: string[] | undefined
+  let length = 0
+  let boxed: { value: unknown } | undefined
   try {
     if (!isPlainObject(object) && BOXED.has(Object.prototype.toString.call(object)))
-      return object.valueOf() // `new Number(1)`, as JSON writes it
-    if (object instanceof Map) items = Array.from(object)
+      boxed = { value: object.valueOf() } // `new Number(1)`, as JSON writes it
+    else if (object instanceof Map) items = Array.from(object)
     else if (object instanceof Set) items = Array.from(object)
     else if (Array.isArray(object)) items = object
     else keys = Object.keys(object)
+    length = items?.length ?? 0
   } catch (thrown) {
     return standIn(walk, unserializable(thrown))
   }
 
+  if (boxed) return toJSONValue(boxed.value, '', walk) // `Object(1n)` as its digits
+
   if (items) {
     const out: unknown[] = []
-    for (let i = 0; i < items.length; i++) {
+    for (let i = 0; i < length; i++) {
       let item: unknown
       try {
         item = items[i]
@@ -478,7 +542,9 @@ const newWalk = (strict: boolean): Walk => ({
   strict,
   ancestors: new Set(),
   seen: new WeakSet(),
-  repeats: 0,
+  inRepeat: 0,
+  valuesLeft: MAX_REWRITTEN_VALUES,
+  charsLeft: MAX_REWRITTEN_CHARS,
 })
 
 /** Thrown by `stringifyRecord()`'s fast path: the line needs the full walk. */
@@ -504,19 +570,10 @@ export function stringifyRecord(record: LogRecord): string {
     const seen = new WeakSet<object>()
     try {
       return JSON.stringify(record, (_key, value: unknown) => {
-        switch (typeof value) {
-          case 'bigint':
-            return value.toString()
-          case 'function':
-            return functionText(value)
-          case 'symbol':
-            return value.toString()
-          case 'object':
-            if (value === null) return value
-            if (seen.has(value)) throw NEEDS_WALK
-            seen.add(value)
-            if (value instanceof Map || value instanceof Set) return Array.from(value)
-        }
+        if (typeof value !== 'object' || value === null) return nonJSONText(value) ?? value
+        if (seen.has(value)) throw NEEDS_WALK
+        seen.add(value)
+        if (value instanceof Map || value instanceof Set) return Array.from(value)
         return value
       })
     } catch {
