@@ -3,6 +3,7 @@
 // Builds the package, starts the three dev Workers (main → bind → math) with
 // `pnpm dev`, sends requests carrying a known traceparent, and asserts:
 //   - HTTP: status, X-Request-Id / X-Trace-Id / traceparent / tracestate response headers, bodies.
+//   - Request ID: an invalid incoming X-Request-Id is replaced by a generated UUID.
 //   - Logs: the Workers' own output continues the trace across every RPC hop,
 //     with the span chain intact and no duplicate keys on any line, and each
 //     Worker's `version` read through its Env Mapping.
@@ -147,6 +148,17 @@ async function probe(base, path, expectedStatus) {
   }
 }
 
+/** An invalid incoming X-Request-Id must not be echoed; useLogger generates a UUID instead. */
+async function checkInvalidRequestId(base, failures) {
+  const res = await fetch(`${base}/trace`, { headers: { 'X-Request-Id': 'not a valid id' } })
+  await res.arrayBuffer()
+  const echoed = res.headers.get('X-Request-Id') ?? ''
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(echoed))
+    failures.push(
+      `invalid X-Request-Id: response X-Request-Id ${JSON.stringify(echoed)}, expected a UUID`,
+    )
+}
+
 function checkResponses(results, failures) {
   const byPath = Object.fromEntries(results.map((r) => [r.path, r]))
   const traceparentRe = new RegExp(`^00-${TRACE_ID}-[0-9a-f]{16}-01$`)
@@ -278,10 +290,12 @@ async function main() {
       results.push(await probe(base, path, status))
     }
 
+    const failures = []
+    await checkInvalidRequestId(base, failures)
+
     await sleep(1000) // let wrangler flush the Workers' log output
     await server.flush()
 
-    const failures = []
     checkResponses(results, failures)
     checkLogs(failures)
 
