@@ -1050,7 +1050,8 @@ describe('withLogging', () => {
   })
 
   const ENV = { NAME: 'search', ENVIRONMENT: 'staging', VERSION: '1.2.3' }
-  const CALLER_TRACEPARENT = '00-11111111111111111111111111111111-2222222222222222-01'
+  const CALLER_TRACEPARENT_BASE = '00-11111111111111111111111111111111-2222222222222222'
+  const CALLER_TRACEPARENT = `${CALLER_TRACEPARENT_BASE}-01`
   const RPC_METHODS = new Set([
     'constructor',
     'search',
@@ -1214,6 +1215,89 @@ describe('withLogging', () => {
     expect(() => worker.fail()).toThrow(failure)
 
     expect(spanEnds(entries)).toHaveLength(0)
+  })
+
+  it('without spans, a throw writes one ERROR line with err and rpcMethod, then is rethrown', async () => {
+    const entries = _captureEntries()
+    const thrown = new Error('fetch failed')
+    class WithFetch extends SearchWorker {
+      fetch(_request: Request): Response {
+        throw thrown
+      }
+    }
+    const worker = new (withLogging(WithFetch))({} as any, ENV)
+
+    expect(() => worker.fail()).toThrow(failure)
+    await expect(worker.failAsync()).rejects.toBe(failure)
+    expect(() => worker.fetch(new Request('https://svc/x'))).toThrow(thrown)
+    worker.search('cats')
+
+    expect(entries.filter((e) => e.level === 'ERROR')).toEqual([
+      expect.objectContaining({
+        message: 'WithFetch.fail failed',
+        operation: 'WithFetch.fail',
+        rpcMethod: 'fail',
+        entrypoint: 'WithFetch',
+        service: 'search',
+        err: expect.objectContaining({ message: 'search failed' }),
+      }),
+      expect.objectContaining({ message: 'WithFetch.failAsync failed', rpcMethod: 'failAsync' }),
+      expect.objectContaining({
+        message: 'WithFetch.fetch failed',
+        rpcMethod: 'fetch',
+        err: expect.objectContaining({ message: 'fetch failed' }),
+      }),
+    ])
+    expect(spanEnds(entries)).toHaveLength(0)
+  })
+
+  it('without spans, a throw through a nested call or a session is logged once', async () => {
+    const entries = _captureEntries()
+    class Nesting extends SearchWorker {
+      outer() {
+        return this.fail()
+      }
+    }
+    const worker = new (withLogging(Nesting, { session: true }))({} as any, ENV)
+
+    expect(() => worker.outer()).toThrow(failure)
+    expect(() => tracedSession(worker).fail()).toThrow(failure)
+
+    expect(entries.filter((e) => e.level === 'ERROR')).toEqual([
+      expect.objectContaining({ message: 'Nesting.outer failed', rpcMethod: 'outer' }),
+      expect.objectContaining({ message: 'Nesting.fail failed', rpcMethod: 'fail' }),
+    ])
+  })
+
+  it('with spans, a throw writes only the span.end at ERROR; unsampled, one failed line', async () => {
+    const entries = _captureEntries()
+    class WithFetch extends WorkerEntrypoint<typeof ENV> {
+      fetch(_request: Request): Response {
+        throw failure
+      }
+    }
+    const worker = new (withLogging(WithFetch, { spans: true }))({} as any, ENV)
+    const sampled = new Request('https://svc/x', { headers: { traceparent: CALLER_TRACEPARENT } })
+    const unsampled = new Request('https://svc/x', {
+      headers: { traceparent: `${CALLER_TRACEPARENT_BASE}-00` },
+    })
+
+    expect(() => worker.fetch(sampled)).toThrow(failure)
+    expect(entries.filter((e) => e.level === 'ERROR').map((e) => e.message)).toEqual([
+      'span.end WithFetch.fetch',
+    ])
+
+    entries.length = 0
+    expect(() => worker.fetch(unsampled)).toThrow(failure)
+    expect(entries).toEqual([
+      expect.objectContaining({
+        level: 'ERROR',
+        message: 'WithFetch.fetch failed',
+        operation: 'WithFetch.fetch',
+        rpcMethod: 'fetch',
+        traceId: '11111111111111111111111111111111',
+      }),
+    ])
   })
 
   it('a public method called from another one stays in the same trace', () => {
@@ -1725,6 +1809,7 @@ describe('withLogging(DurableObject)', () => {
       service: 'jobs',
       environment: 'staging',
       durableObject: 'Room',
+      objectId: 'a'.repeat(64),
       objectName: 'lobby',
     }
     expect(linesOf(entries, 'joined')[0]).toMatchObject({
@@ -1742,11 +1827,10 @@ describe('withLogging(DurableObject)', () => {
       const line = linesOf(entries, message)[0]
       expect(line).toMatchObject({ ...common, rpcMethod })
       expect(line!.traceId).toMatch(/^[0-9a-f]{32}$/)
-      expect(line).not.toHaveProperty('objectId')
     }
   })
 
-  it('uses objectId when the id has no name', async () => {
+  it('has objectId alone when the id has no name', async () => {
     const entries = _captureEntries()
     const room = new (withLogging(Room))(state(), ENV)
     await room.join('bob')
@@ -1785,6 +1869,42 @@ describe('withLogging(DurableObject)', () => {
       span: { status: 'ERROR', error: 'room failed' },
       err: { message: 'room failed' },
     })
+  })
+
+  it('without spans, a throw in alarm, fetch or an RPC method writes one ERROR line', async () => {
+    const entries = _captureEntries()
+    const alarmFailure = new Error('alarm failed')
+    class Failing extends Room {
+      override alarm() {
+        throw alarmFailure
+      }
+
+      override fetch(_request: Request): Response {
+        throw failure
+      }
+    }
+    const room = new (withLogging(Failing))(state('lobby'), ENV)
+
+    expect(() => room.alarm()).toThrow(alarmFailure)
+    expect(() => room.fetch(new Request('https://room/x'))).toThrow(failure)
+    await expect(room.fail()).rejects.toBe(failure)
+
+    const common = { level: 'ERROR', durableObject: 'Failing', objectId: 'a'.repeat(64) }
+    expect(entries).toEqual([
+      expect.objectContaining({
+        ...common,
+        message: 'Failing.alarm failed',
+        rpcMethod: 'alarm',
+        err: expect.objectContaining({ message: 'alarm failed' }),
+      }),
+      expect.objectContaining({ ...common, message: 'Failing.fetch failed', rpcMethod: 'fetch' }),
+      expect.objectContaining({
+        ...common,
+        message: 'Failing.fail failed',
+        rpcMethod: 'fail',
+        err: expect.objectContaining({ message: 'room failed' }),
+      }),
+    ])
   })
 
   it('adds no RPC methods, leaves connect unwrapped, and rejects session', () => {

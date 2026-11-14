@@ -54,14 +54,17 @@ export function registerRootLogger(rootLogger: () => Logger): void {
  * @param {Parameters<typeof runWithLogger>[0]} context - The Logging Context to open.
  * @param {() => R} fn - The function to run in it.
  * @param {string} [operation] - Span operation name; no Span without it.
+ * @param {boolean} [timed] - `false` writes no `span.end`, only the `<operation> failed`
+ *   line on a throw (see `recordSpan`).
  * @returns {R} The return value of `fn`, unchanged.
  */
 export function runLogged<R>(
   context: Parameters<typeof runWithLogger>[0],
   fn: () => R,
   operation?: string,
+  timed = true,
 ): R {
-  return runWithLogger(context, operation ? () => recordSpan(operation, fn) : fn)
+  return runWithLogger(context, operation ? () => recordSpan(operation, fn, timed) : fn)
 }
 
 /** Any method, as stored on a prototype. */

@@ -585,6 +585,8 @@ function checkUnits(results, failures) {
   const joined = line('Room join')
   expectFields('Room join', joined, { ...room, rpcMethod: 'join' })
   if (!isRoot(joined)) failures.push(`logs: Room join is not a root trace: ${show(joined)}`)
+  if (!/^[0-9a-f]{64}$/.test(joined?.objectId ?? ''))
+    failures.push(`logs: Room join has no objectId beside objectName: ${show(joined)}`)
   expectFields('Room fetch', line('Room fetch'), {
     ...room,
     rpcMethod: 'fetch',

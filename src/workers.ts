@@ -4,6 +4,7 @@ import {
   getLogger,
   getTraceCarrier,
   getTraceContext,
+  recordSpan,
   registerDefaultLogger,
   setLoggerContext,
   withSpan,
@@ -430,8 +431,8 @@ const DURABLE_OBJECT_HANDLERS = [
 const DURABLE_OBJECT_WRAPPED = ['alarm', 'webSocketMessage', 'webSocketClose', 'webSocketError']
 
 /**
- * The Context Fields naming one Durable Object: `objectName` when its ID has a name
- * (`idFromName` / `getByName`), otherwise `objectId`.
+ * The Context Fields naming one Durable Object: always `objectId`, and `objectName`
+ * too when its ID has a name (`idFromName` / `getByName`).
  *
  * @param {DurableObjectState | undefined} state - The object's `ctx`.
  * @returns {LogFields} The fields, empty when the state has no ID.
@@ -439,7 +440,7 @@ const DURABLE_OBJECT_WRAPPED = ['alarm', 'webSocketMessage', 'webSocketClose', '
 function objectFieldsOf(state: DurableObjectState | undefined): LogFields {
   const id = state?.id
   if (!id) return {}
-  return id.name ? { objectName: id.name } : { objectId: id.toString() }
+  return { objectId: id.toString(), ...(id.name ? { objectName: id.name } : {}) }
 }
 
 /**
@@ -671,14 +672,14 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
   }
 
   /**
-   * The Span operation name of one call, `<Class>.<method>` (the bare method name for
-   * an anonymous class), or `undefined` when `spans` is off.
+   * The operation name of one call, `<Class>.<method>` (the bare method name for an
+   * anonymous class): the Span's name with `spans`, and the `<operation> failed`
+   * line's without.
    *
    * @param {string} name - The method name.
-   * @returns {string | undefined} The operation name.
+   * @returns {string} The operation name.
    */
-  const operationOf = (name: string): string | undefined =>
-    spans ? (entrypoint ? `${entrypoint}.${name}` : name) : undefined
+  const operationOf = (name: string): string => (entrypoint ? `${entrypoint}.${name}` : name)
 
   const Logged = class extends (Class as EntrypointClass) {
     constructor(ctx: ExecutionContext, env: unknown) {
@@ -703,11 +704,15 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
     function (this: object, ...args: unknown[]) {
       const run = () => method.apply(this, args)
       const operation = operationOf(name)
-      if (getTraceContext()) return operation ? withSpan(operation, run) : run()
+      // Joining a context: a child Span with `spans`; without, the call that opened
+      // the context logs a throw, so it is logged once.
+      if (getTraceContext()) return spans ? withSpan(operation, run) : run()
+      // Without `spans`, no span.end, but a throw is still logged at ERROR.
       return runLogged(
         { logger: rootLoggerOf(this), ...carrierOf?.(args), fields: fieldsOf(name, this) },
         run,
         operation,
+        spans,
       )
     }
 
@@ -772,10 +777,15 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
            */
           const sessionMethod = function (this: LoggedSession, ...args: unknown[]) {
             const target = this.#target
-            return this.#traced(() => {
+            const operation = operationOf(name)
+            const run = () => {
               setLoggerContext(fieldsOf(name))
               return method.apply(target, args)
-            }, operationOf(name))
+            }
+            // Without `spans`, no span.end, but a throw is still logged at ERROR.
+            return spans
+              ? this.#traced(run, operation)
+              : this.#traced(() => recordSpan(operation, run, false))
           }
           defineMethod(this.prototype, name, sessionMethod)
         }
