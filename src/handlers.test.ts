@@ -31,7 +31,7 @@ vi.mock('cloudflare:workers', () => ({
   },
 }))
 
-import { WorkerEntrypoint, WorkflowEntrypoint } from 'cloudflare:workers'
+import { WorkerEntrypoint, WorkflowEntrypoint, type WorkflowStep } from 'cloudflare:workers'
 import { withQueueMessage, withScheduled, withWorkflow, tracedStep } from './workers'
 import {
   _captureEntries,
@@ -82,28 +82,39 @@ const batch = (...messages: ReturnType<typeof queueMessage>[]) => ({
 /**
  * A stand-in for the Workflows engine's `step`: runs each callback with a step
  * context, outside every Logging Context (as an RPC callback arrives), and
- * retries a throwing callback up to `limit` times.
+ * retries a throwing callback up to `limit` times. `step.count` counts the calls
+ * per step name, as the engine does. `rollBack(i)` runs the `i`th call's rollback
+ * handler, also outside every Logging Context.
  */
 function fakeStep(limit = 1) {
-  const calls: { name: string; args: unknown[] }[] = []
-  let count = 0
+  const calls: { name: string; args: unknown[]; ctx?: unknown; output?: unknown }[] = []
+  const counts = new Map<string, number>()
   return {
     calls,
     async do(name: string, ...rest: unknown[]) {
-      calls.push({ name, args: rest })
+      const call: (typeof calls)[number] = { name, args: rest }
+      calls.push(call)
       const callback = (typeof rest[0] === 'function' ? rest[0] : rest[1]) as (
         ctx: unknown,
       ) => Promise<unknown>
-      count++
+      const count = (counts.get(name) ?? 0) + 1
+      counts.set(name, count)
       for (let attempt = 1; ; attempt++) {
+        call.ctx = { step: { name, count }, attempt, config: {} }
         try {
-          return await outsideEveryContext(() =>
-            callback({ step: { name, count }, attempt, config: {} }),
-          )
+          call.output = await outsideEveryContext(() => callback(call.ctx))
+          return call.output
         } catch (err) {
           if (attempt >= limit) throw err
         }
       }
+    },
+    rollBack(index: number, error = new Error('later step failed')) {
+      const { name, args, ctx, output } = calls[index]!
+      const options = (typeof args[0] === 'function' ? args[1] : args[2]) as {
+        rollback: (input: unknown) => Promise<void>
+      }
+      return outsideEveryContext(() => options.rollback({ ctx, error, output, stepName: name }))
     },
   }
 }
@@ -399,6 +410,35 @@ describe('withQueueMessage', () => {
     expect(b.retryAll).not.toHaveBeenCalled()
   })
 
+  it('for an unsampled carrier, a throw still writes one ERROR line; success writes none', async () => {
+    const entries = _captureEntries()
+    const failure = new Error('bad order')
+    const unsampled = { trace: { traceparent: PRODUCER_TRACEPARENT.replace(/-01$/, '-00') } }
+    const m = queueMessage(unsampled, 'x', 2)
+    const b = batch(m)
+
+    await expect(withQueueMessage(b, m, async () => 'ok')).resolves.toBe('ok')
+    expect(entries).toHaveLength(0)
+    await expect(
+      withQueueMessage(b, m, async () => {
+        throw failure
+      }),
+    ).rejects.toBe(failure)
+
+    expect(linesOf(entries, 'span.end queue.message')).toHaveLength(0)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toMatchObject({
+      level: 'ERROR',
+      message: 'queue.message failed',
+      operation: 'queue.message',
+      queue: 'orders',
+      messageId: 'x',
+      attempts: 2,
+      traceId: '11111111111111111111111111111111',
+      err: { message: 'bad order' },
+    })
+  })
+
   it('reads env through cloudflare:workers with the Env Mapping, and registers the Default Logger', async () => {
     const entries = _captureEntries()
     workersEnv.QUEUE_SERVICE = 'consumer'
@@ -413,6 +453,29 @@ describe('withQueueMessage', () => {
     expect(linesOf(entries, 'outside')[0]).toMatchObject({ service: 'consumer' })
   })
 })
+
+/**
+ * Type-level checks for tracedStep's overloads, never called: a delay function
+ * narrows the callback context as `step.do` does.
+ */
+function tracedStepTypes(s: WorkflowStep) {
+  void tracedStep(
+    s,
+    'dynamic',
+    { retries: { limit: 2, delay: () => '1 second' as const } },
+    async (ctx) => {
+      // @ts-expect-error a delay function leaves no resolved delay on the context
+      void ctx.config.retries?.delay
+      return 1
+    },
+  )
+  void tracedStep(
+    s,
+    'static',
+    { retries: { limit: 2, delay: '1 second' } },
+    async (ctx) => ctx.config.retries?.delay ?? 0,
+  )
+}
 
 describe('withWorkflow and tracedStep', () => {
   it('the fake step runs callbacks outside the Logging Context, as RPC callbacks arrive', async () => {
@@ -502,6 +565,7 @@ describe('withWorkflow and tracedStep', () => {
     expect(spans[0]).toMatchObject({
       level: 'ERROR',
       step: 'fetch rows',
+      stepCount: 1,
       attempt: 1,
       workflowInstanceId: 'inst-1',
       traceId: runTrace!.traceId,
@@ -554,8 +618,124 @@ describe('withWorkflow and tracedStep', () => {
 
     expect(result).toBe(output)
     expect(step.calls[0]!.args[0]).toBe(config)
-    expect(step.calls[0]!.args[2]).toBe(rollback)
+    // The rollback options are copied, with a handler that re-enters the Logging
+    // Context; the object passed in is not changed.
+    expect(step.calls[0]!.args[2]).toEqual({ rollback: expect.any(Function) })
+    expect(step.calls[0]!.args[2]).not.toBe(rollback)
+    expect(Object.keys(rollback)).toEqual(['rollback'])
     expect(received).toMatchObject({ step: { name: 'save', count: 1 }, attempt: 1 })
+  })
+
+  it('tracedStep records stepCount, so a step name repeated in a loop is told apart', async () => {
+    const entries = _captureEntries()
+    class Report extends WorkflowEntrypoint<typeof ENV> {
+      async run(_event: unknown, s: any) {
+        for (let i = 0; i < 2; i++) {
+          await tracedStep(s, 'page', async () => {
+            getLogger().info('paging')
+            return i
+          })
+        }
+      }
+    }
+    await new (withWorkflow(Report))({} as ExecutionContext, ENV).run(
+      event() as any,
+      fakeStep() as any,
+    )
+
+    expect(linesOf(entries, 'paging').map((e) => e.stepCount)).toEqual([1, 2])
+    expect(linesOf(entries, 'span.end page').map((e) => e.stepCount)).toEqual([1, 2])
+  })
+
+  it('tracedStep for an unsampled trace still writes one ERROR line per failed attempt', async () => {
+    const entries = _captureEntries()
+    const failure = new Error('flaky')
+    class Report extends WorkflowEntrypoint<typeof ENV> {
+      async run(_event: unknown, s: any) {
+        return tracedStep(s, 'charge', async () => {
+          throw failure
+        })
+      }
+    }
+    const unsampled = { trace: { traceparent: PRODUCER_TRACEPARENT.replace(/-01$/, '-00') } }
+
+    await expect(
+      new (withWorkflow(Report))({} as ExecutionContext, ENV).run(
+        event(unsampled) as any,
+        fakeStep(2) as any,
+      ),
+    ).rejects.toBe(failure)
+
+    expect(linesOf(entries, 'span.end charge')).toHaveLength(0)
+    const failed = linesOf(entries, 'charge failed')
+    expect(failed.map((e) => e.attempt)).toEqual([1, 2])
+    expect(failed[0]).toMatchObject({
+      level: 'ERROR',
+      operation: 'charge',
+      step: 'charge',
+      workflowInstanceId: 'inst-1',
+      traceId: '11111111111111111111111111111111',
+      err: { message: 'flaky' },
+    })
+  })
+
+  it('tracedStep runs the rollback handler in the run context, as a Span', async () => {
+    const entries = _captureEntries()
+    const failure = new Error('undo failed')
+    let received: unknown
+    let runTrace: ReturnType<typeof getTraceContext> = null
+    const rollbackConfig = { retries: { limit: 1, delay: 0 } }
+    class Report extends WorkflowEntrypoint<typeof ENV> {
+      async run(_event: unknown, s: any) {
+        runTrace = getTraceContext()
+        await tracedStep(s, 'reserve', async () => 'seat-1', {
+          rollback: async (input) => {
+            received = input
+            getLogger().info('releasing')
+          },
+          rollbackConfig,
+        })
+        await tracedStep(s, 'refund', async () => 'r-1', {
+          rollback: async () => {
+            throw failure
+          },
+        })
+      }
+    }
+    const step = fakeStep()
+    await new (withWorkflow(Report))({} as ExecutionContext, ENV).run(event() as any, step as any)
+
+    // The engine runs rollback handlers later, over RPC, outside every Logging Context.
+    expect((step.calls[0]!.args[1] as { rollbackConfig: unknown }).rollbackConfig).toBe(
+      rollbackConfig,
+    )
+    await step.rollBack(0)
+    await expect(step.rollBack(1)).rejects.toBe(failure)
+
+    expect(received).toMatchObject({ output: 'seat-1', stepName: 'reserve' })
+    expect(linesOf(entries, 'releasing')[0]).toMatchObject({
+      workflowInstanceId: 'inst-1',
+      step: 'reserve',
+      stepCount: 1,
+      rollback: true,
+      traceId: runTrace!.traceId,
+    })
+    expect(linesOf(entries, 'span.end rollback reserve')[0]).toMatchObject({
+      level: 'INFO',
+      parentSpanId: runTrace!.spanId,
+      span: { status: 'OK' },
+    })
+    expect(linesOf(entries, 'span.end rollback refund')[0]).toMatchObject({
+      level: 'ERROR',
+      step: 'refund',
+      rollback: true,
+      err: { message: 'undo failed' },
+    })
+  })
+
+  it('tracedStep narrows the callback context as step.do does for a delay function', () => {
+    // The checks are in tracedStepTypes, which `pnpm typecheck` checks and nothing calls.
+    expect(tracedStepTypes).toBeTypeOf('function')
   })
 
   it('tracedStep throws the error step.do throws, unchanged', async () => {

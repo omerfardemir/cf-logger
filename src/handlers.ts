@@ -8,6 +8,9 @@
 import {
   WorkflowEntrypoint,
   env as workersEnv,
+  type WorkflowBackoff,
+  type WorkflowDelayDuration,
+  type WorkflowDelayFunction,
   type WorkflowStep,
   type WorkflowStepConfig,
   type WorkflowStepContext,
@@ -303,47 +306,73 @@ function ownRun(Class: WorkflowClass): Method | undefined {
 }
 
 /**
- * The Context Fields of one step attempt: `step`, and `attempt` when the engine
- * passes a step context.
+ * The Context Fields of one step attempt: `step`, plus `stepCount` (which call of a
+ * step with this name it is, 1 for the first) and `attempt` when the engine passes
+ * a step context.
  *
  * @param {string} name - The step name.
  * @param {unknown} ctx - The step context `step.do` passed to the callback.
  * @returns {LogFields} The Context Fields.
  */
 function stepFields(name: string, ctx: unknown): LogFields {
-  const attempt = (ctx as { attempt?: unknown } | undefined)?.attempt
-  return typeof attempt === 'number' ? { step: name, attempt } : { step: name }
+  const { step, attempt } = (ctx ?? {}) as { step?: { count?: unknown }; attempt?: unknown }
+  return {
+    step: name,
+    ...(typeof step?.count === 'number' ? { stepCount: step.count } : {}),
+    ...(typeof attempt === 'number' ? { attempt } : {}),
+  }
+}
+
+/** `WorkflowStepConfig` with a delay function, as `step.do`'s overloads tell it apart. */
+type StepConfigWithDelayFunction = Omit<WorkflowStepConfig, 'retries'> & {
+  retries: { limit: number; delay: WorkflowDelayFunction; backoff?: WorkflowBackoff }
+}
+
+/** `WorkflowStepConfig` with a fixed delay, as `step.do`'s overloads tell it apart. */
+type StepConfigWithStaticDelay = Omit<WorkflowStepConfig, 'retries'> & {
+  retries?: { limit: number; delay: WorkflowDelayDuration | number; backoff?: WorkflowBackoff }
 }
 
 /**
  * `step.do(name, ...)` with each attempt recorded as a Span, named after the step,
- * with the Context Fields `step` and `attempt`. Takes the same arguments as
- * `step.do` after `step`: an optional config, the callback, and optional rollback
- * options.
+ * with the Context Fields `step`, `stepCount` and `attempt`. Takes the same arguments
+ * as `step.do` after `step`, with the same overloads: an optional config, the
+ * callback, and optional rollback options.
  *
  * Call it inside `run` of a class wrapped with `withWorkflow()`. The engine calls the
  * callback back over RPC, outside the Logging Context `run` opened; `tracedStep`
  * re-enters it, so lines in the callback carry `workflowInstanceId` and the run's
  * trace too, and the Span's parent is the run's span. A retried attempt writes its
  * own Span: `ERROR` with `err` for an attempt that throws, `INFO` for the one that
- * succeeds. A step whose result the engine already has (on a replay) runs no
- * callback, so it writes nothing.
+ * succeeds. For an unsampled trace only a throw is written, as one `<name> failed`
+ * line at `ERROR`. A step whose result the engine already has (on a replay) runs no
+ * callback, so it writes nothing. `stepCount` is the engine's `ctx.step.count`, so a
+ * step name repeated in a loop can be told apart.
+ *
+ * The rollback handler re-enters the run's Logging Context the same way, as a Span
+ * named `rollback <name>`, with `step`, `stepCount` and `rollback: true`. A
+ * function-valued `retries.delay` is not wrapped: it runs outside every Logging
+ * Context, so lines it writes carry no trace (keep it a pure computation).
  *
  * Determinism is kept: `step.do` is called once, with the same name, the same config
- * and rollback options objects, and a callback that returns the original's value (or
- * throws its error) unchanged. No step is added. Outside a Logging Context it calls
- * `step.do` with the arguments untouched.
+ * object, and a callback that returns the original's value (or throws its error)
+ * unchanged. The rollback options are copied (`rollbackConfig` included, as the same
+ * object), never changed, so the handler can be wrapped. No step is added. Outside a
+ * Logging Context it calls `step.do` with the arguments untouched.
  *
  * @template T - The step's return type.
  * @param {WorkflowStep} step - The `step` passed to `run`.
  * @param {string} name - The step name, as for `step.do`.
+ * @param {WorkflowStepConfig} [config] - The step config, as for `step.do`, passed through unchanged.
+ * @param {(ctx: WorkflowStepContext) => Promise<T>} callback - The step's work, as for `step.do`.
+ * @param {WorkflowStepRollbackOptions<T>} [rollbackOptions] - The rollback handler and its config, as for `step.do`.
  * @returns {Promise<T>} What `step.do` returns, unchanged.
  *
  * @example
  * ```ts
  * const user = await tracedStep(step, 'load user', async () => db.getUser(id))
  * await tracedStep(step, 'charge', { retries: { limit: 3, delay: '5 seconds' } }, async (ctx) => {
- *   getLogger().info('charging') // ..., workflowInstanceId, step: 'charge', attempt
+ *   getLogger().info('charging') // ..., workflowInstanceId, step: 'charge', stepCount, attempt
  * })
  * ```
  */
@@ -352,6 +381,22 @@ export function tracedStep<T extends Rpc.Serializable<T>>(
   name: string,
   callback: (ctx: WorkflowStepContext) => Promise<T>,
   rollbackOptions?: WorkflowStepRollbackOptions<T>,
+): Promise<T>
+// The config overloads mirror `step.do`'s and keep its order: the broad
+// `WorkflowStepConfig` one must stay last, or it shadows the narrowing ones.
+export function tracedStep<T extends Rpc.Serializable<T>>(
+  step: WorkflowStep,
+  name: string,
+  config: StepConfigWithDelayFunction,
+  callback: (ctx: WorkflowStepContext<WorkflowDelayFunction>) => Promise<T>,
+  rollbackOptions?: WorkflowStepRollbackOptions<T, WorkflowDelayFunction>,
+): Promise<T>
+export function tracedStep<T extends Rpc.Serializable<T>>(
+  step: WorkflowStep,
+  name: string,
+  config: StepConfigWithStaticDelay,
+  callback: (ctx: WorkflowStepContext<WorkflowDelayDuration | number>) => Promise<T>,
+  rollbackOptions?: WorkflowStepRollbackOptions<T, WorkflowDelayDuration | number>,
 ): Promise<T>
 export function tracedStep<T extends Rpc.Serializable<T>>(
   step: WorkflowStep,
@@ -377,5 +422,22 @@ export function tracedStep(step: WorkflowStep, name: string, ...rest: unknown[])
         return (callback as Method).apply(undefined, callbackArgs)
       }),
     )
+
+  const options = rest[at + 1] as { rollback?: unknown } | undefined
+  const rollback = options?.rollback
+  if (typeof rollback === 'function') {
+    args[at + 1] = {
+      ...options,
+      rollback: (...rollbackArgs: unknown[]) =>
+        enter(() =>
+          withSpan(`rollback ${name}`, () => {
+            const { ctx } = (rollbackArgs[0] ?? {}) as { ctx?: unknown }
+            const { attempt: _attempt, ...fields } = stepFields(name, ctx)
+            setLoggerContext({ ...fields, rollback: true })
+            return (rollback as Method).apply(undefined, rollbackArgs)
+          }),
+        ),
+    }
+  }
   return stepDo(args)
 }
