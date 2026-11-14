@@ -34,7 +34,7 @@ The rule that places every argument of a log call in exactly one part of the lin
 _Avoid_: argument parsing, normalization
 
 **Overflow**:
-The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, an object's values for loggercf's own keys), in call order. Present only when non-empty.
+The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, an object's values for loggercf's own keys, and a logger binding's or Context Field's value for `time`, `level`, `message`, `errors` or `args`), in call order. Present only when non-empty.
 _Avoid_: extras, rest, leftovers
 
 ### Tracing

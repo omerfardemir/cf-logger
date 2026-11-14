@@ -131,6 +131,47 @@ describe('record shape', () => {
     })
   })
 
+  it('bindings cannot set time, level, message, errors or args; their values move to args', () => {
+    const entries = _captureEntries()
+    createLogger({ service: 'svc' })
+      .child({ time: 'T', level: 'BAD', message: 'B', errors: 'E', args: 'A', a: 1 })
+      .info('m')
+    expect(entries[0]).toMatchObject({ level: 'INFO', message: 'm', a: 1 })
+    expect(entries[0].time).not.toBe('T')
+    expect(Object.keys(entries[0]).slice(0, 2)).toEqual(['time', 'level'])
+    expect(entries[0].errors).toBeUndefined()
+    expect(entries[0].args).toEqual([
+      { time: 'T', level: 'BAD', message: 'B', errors: 'E', args: 'A' },
+    ])
+  })
+
+  it('Context Fields cannot set them either, even when the call gives no message', () => {
+    const entries = _captureEntries()
+    runWithLogger({ logger: createLogger({ service: 'svc' }) }, () => {
+      setLoggerContext({ level: 'CTX', message: 'm2', b: 2 })
+      createLogger({ service: 'svc' }).info({ a: 1 })
+    })
+    expect(entries[0]).toMatchObject({ level: 'INFO', a: 1, b: 2 })
+    expect(entries[0]).not.toHaveProperty('message')
+    expect(entries[0].args).toEqual([{ level: 'CTX', message: 'm2' }])
+  })
+
+  it('moved values follow the call’s own args: call, then bindings, then Context Fields', () => {
+    const entries = _captureEntries()
+    runWithLogger({ logger: createLogger({ service: 'svc' }), fields: { level: 'CTX' } }, () => {
+      createLogger({ service: 'svc' }).child({ level: 'BIND' }).warn('m', [1], { level: 'CALL' })
+    })
+    expect(entries[0]).toMatchObject({ level: 'WARN', message: 'm' })
+    expect(entries[0].args).toEqual([[1], { level: 'CALL' }, { level: 'BIND' }, { level: 'CTX' }])
+  })
+
+  it('Workers picks the console method from the call’s level, not a binding', () => {
+    const calls = captureConsole(workersSink, () =>
+      createLogger({ service: 'svc' }).child({ level: 'ERROR' }).info('m'),
+    )
+    expect(calls.map(([method]) => method)).toEqual(['info'])
+  })
+
   it('a log call cannot invent a parentSpanId on a root trace', () => {
     const entries = _captureEntries()
     runWithLogger({ logger: createLogger({ service: 'svc' }) }, () => {

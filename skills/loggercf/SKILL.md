@@ -235,7 +235,7 @@ An `Error` is serialized with type, message, stack, own fields and `cause`. `pri
 logger.info('loaded order %s', order) // message stays 'loaded order %s', order's keys spill onto the line; use logger.info({ order }, 'loaded order')
 ```
 
-`traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call can't overwrite them, or loggercf's other own keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`): an object's values for those keys land in `args` instead. An object's `err`, and a string `message` when the call has no other message, are used while still unset. To read the trace IDs, call `getTraceContext()`.
+`traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call can't overwrite them, or loggercf's other own keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`): an object's values for those keys land in `args` instead. Logger fields (`.child()`) and Context Fields can't set `time`, `level`, `message`, `errors` or `args` either; their values for those keys land in `args` too. An object's `err`, and a string `message` when the call has no other message, are used while still unset. To read the trace IDs, call `getTraceContext()`.
 
 ## Wrangler setup
 

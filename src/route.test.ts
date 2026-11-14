@@ -490,6 +490,23 @@ describe('a log call never throws', () => {
     expect(typeof r.time).toBe('string')
   })
 
+  it('the minimal line keeps its own time and level; bindings for them move to args', () => {
+    const entries = _captureEntries()
+    runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent: TRACEPARENT }, () =>
+      createLogger({ service: 'svc' })
+        .child({ level: 'BAD', time: 'T', traceId: 'forged' })
+        .info('m %s', 'x', throwingGetter()),
+    )
+    expect(entries[0]).toMatchObject({
+      level: 'INFO',
+      message: 'm %s',
+      traceId: '0af7651916cd43dd8448eb211c80319c',
+      args: [{ level: 'BAD', time: 'T' }],
+    })
+    expect(entries[0].time).not.toBe('T')
+    expect(entries[0].logError).toMatch(/getter failed/)
+  })
+
   it('drops bindings when they cannot be serialized either', () => {
     const entries = _captureEntries()
     const logger = createLogger({ service: 'svc' }).child(throwingToJSON())

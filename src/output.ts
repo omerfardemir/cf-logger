@@ -74,34 +74,109 @@ function serializeOverflowItem(value: unknown): unknown {
 }
 
 /**
+ * Keys the core writes for every call, which logger bindings and Context
+ * Fields cannot set. `workersSink` picks the console method from `level`, so
+ * a binding for it would change the line's severity.
+ */
+const OWN_KEYS = ['time', 'level', 'message', 'errors', 'args'] as const
+
+/**
+ * `source` without the `OWN_KEYS`. Their defined values are pushed onto
+ * `moved` as one object, so they land in `args` instead of being dropped.
+ *
+ * @param {LogRecord | undefined} source - Logger bindings or Context Fields. Never mutated.
+ * @param {LogRecord[]} moved - Collects the values taken out, one object per source.
+ * @returns {LogRecord | undefined} `source` itself when it has none of the keys, else a copy without them.
+ */
+export function takeOwnKeys(
+  source: LogRecord | undefined,
+  moved: LogRecord[],
+): LogRecord | undefined {
+  if (!source || !OWN_KEYS.some((key) => Object.hasOwn(source, key))) return source
+  const rest: LogRecord = { ...source }
+  const taken: LogRecord = {}
+  for (const key of OWN_KEYS) {
+    if (rest[key] !== undefined) taken[key] = rest[key]
+    delete rest[key]
+  }
+  if (Object.keys(taken).length > 0) moved.push(taken)
+  return rest
+}
+
+/**
+ * Set the trace IDs on `record`, replacing any value already there. A
+ * `parentSpanId` is removed on a root trace. Keys already in `record` keep
+ * their position.
+ *
+ * @param {LogRecord} record - The line to stamp. Mutated.
+ * @param {TraceContext} trace - The current Trace Context.
+ */
+export function applyTrace(record: LogRecord, trace: TraceContext): void {
+  const { traceId, spanId, parentSpanId } = trace
+  record.traceId = traceId
+  record.spanId = spanId
+  if (parentSpanId) record.parentSpanId = parentSpanId
+  else delete record.parentSpanId
+}
+
+/**
+ * One log call, ready to build: what the logger adds (`time`, `level`,
+ * bindings) and where `routeArgs()` put the arguments.
+ */
+export interface RecordEntry {
+  /** ISO 8601 time of the call. */
+  time: string
+  /** The upper-case level label. */
+  level: string
+  /** The logger's bindings (`createLogger` / `.child()`). */
+  bindings: LogRecord
+  /** Fields passed at the call. Routing has already moved their reserved keys to `args`. */
+  fields: LogRecord
+  /** The formatted message, when the call gave one. */
+  message?: string
+  /** Errors after the first, in call order. */
+  errors?: unknown[]
+  /** The call's overflow, in call order. */
+  args?: unknown[]
+}
+
+/**
  * Build the final log record from a log call's entry and the current Logging Context.
  *
- * Precedence, strongest first: trace IDs (protected) → fields passed at the log
- * call → logger bindings (`createLogger` / `.child()`) → Context Fields.
- * The logger has already merged the log-call fields (from `routeArgs()`) over
- * the bindings in `entry`. `Error` values are serialized with
- * `serializeError()`: at the top level, in `errors`, and in `args` items
- * (one level down, e.g. `args: [{ err }]`). Never mutates `entry`'s values.
+ * `time`, `level`, `message`, `errors`, `args` and the trace IDs are always
+ * the core's own. For the other keys, strongest first: fields passed at the
+ * log call → logger bindings (`createLogger` / `.child()`) → Context Fields.
+ * A binding or Context Field for one of the core's own keys (trace IDs
+ * aside) moves to `args`, after the call's own `args`, bindings first, so it
+ * is not dropped. `Error` values are serialized with `serializeError()`: at
+ * the top level, in `errors`, and in `args` items (one level down, e.g.
+ * `args: [{ err }]`). Never mutates `entry`'s values.
  *
- * @param {LogRecord} entry - The logger's entry (time, level, bindings, call fields, message, errors, args).
+ * @param {RecordEntry} entry - The call: time, level, bindings and the routed arguments.
  * @param {RecordContext} [context] - The current Logging Context, if any.
  * @returns {LogRecord} The record to hand to a `Sink`.
  */
-export function buildRecord(entry: LogRecord, context?: RecordContext): LogRecord {
-  const { time, level, ...rest } = entry
-  const record: LogRecord = { time, level, ...context?.fields, ...rest }
+export function buildRecord(entry: RecordEntry, context?: RecordContext): LogRecord {
+  const moved: LogRecord[] = []
+  const bindings = takeOwnKeys(entry.bindings, moved)
+  const contextFields = takeOwnKeys(context?.fields, moved)
+  const record: LogRecord = {
+    time: entry.time,
+    level: entry.level,
+    ...contextFields,
+    ...bindings,
+    ...entry.fields,
+  }
+  if (entry.message !== undefined) record.message = entry.message
+  if (entry.errors) record.errors = entry.errors
+  const args = [...(entry.args ?? []), ...moved]
+  if (args.length > 0) record.args = args
 
   for (const [key, value] of Object.entries(record)) record[key] = serializeIfError(value)
   if (Array.isArray(record.errors)) record.errors = record.errors.map(serializeIfError)
   if (Array.isArray(record.args)) record.args = record.args.map(serializeOverflowItem)
 
-  if (context) {
-    const { traceId, spanId, parentSpanId } = context.trace
-    record.traceId = traceId
-    record.spanId = spanId
-    if (parentSpanId) record.parentSpanId = parentSpanId
-    else delete record.parentSpanId
-  }
+  if (context) applyTrace(record, context.trace)
   return record
 }
 

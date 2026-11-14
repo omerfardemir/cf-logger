@@ -11,9 +11,11 @@ import type {
 } from './types'
 import { resolveTrace, generateSpanId, injectCarrier, toCarrier } from './trace'
 import {
+  applyTrace,
   buildRecord,
   nodeSink,
   stringifyRecord,
+  takeOwnKeys,
   workersSink,
   type LogRecord,
   type Sink,
@@ -68,18 +70,15 @@ const noop = () => {}
  * Build one log line: route the arguments, add time, level and bindings, then
  * hand it to `buildRecord()` and the current sink.
  *
- * Order of keys: `time`, `level`, bindings, call fields, `message`, `errors`, `args`.
+ * Order of keys: `time`, `level`, Context Fields, bindings, call fields,
+ * `message`, `errors`, `args`, trace IDs.
  *
  * @param {string} label - The upper-case level written as `level`.
  * @param {LogRecord} bindings - The logger's bindings (`createLogger` / `.child()`).
  * @param {unknown[]} input - The arguments the log method received.
  */
 function write(label: string, bindings: LogRecord, input: unknown[]): void {
-  const { fields, message, errors, args } = routeArgs(input)
-  const entry: LogRecord = { time: new Date().toISOString(), level: label, ...bindings, ...fields }
-  if (message !== undefined) entry.message = message
-  if (errors) entry.errors = errors
-  if (args) entry.args = args
+  const entry = { time: new Date().toISOString(), level: label, bindings, ...routeArgs(input) }
   sink.write(buildRecord(entry, als.getStore()))
 }
 
@@ -103,7 +102,8 @@ function describeFailure(thrown: unknown): string {
  * serializing the line fails (a getter that throws, a `toJSON` that throws...),
  * a minimal line is written instead: `time`, `level`, the trace IDs,
  * bindings, the message template as given, and `logError` describing the
- * failure. If even that fails, the line is written without bindings, then
+ * failure. As in `buildRecord()`, bindings for the core's own keys move to
+ * `args`. If even that fails, the line is written without bindings, then
  * dropped.
  *
  * @param {string} label - The upper-case level written as `level`.
@@ -116,19 +116,25 @@ function safeWrite(label: string, bindings: LogRecord, input: unknown[]): void {
   } catch (thrown) {
     const template = [input[0], input[1]].find((value) => typeof value === 'string')
     const trace = als.getStore()?.trace
-    const minimal: LogRecord = { time: new Date().toISOString(), level: label }
-    if (trace) {
-      minimal.traceId = trace.traceId
-      minimal.spanId = trace.spanId
-      if (trace.parentSpanId) minimal.parentSpanId = trace.parentSpanId
-    }
+    const head: LogRecord = { time: new Date().toISOString(), level: label }
+    if (trace) applyTrace(head, trace)
     const tail: LogRecord = { logError: `log call failed: ${describeFailure(thrown)}` }
     if (template !== undefined) tail.message = template
+    /** `head`, `extra`, `tail`; then the trace IDs again, so `extra` cannot replace them. */
+    const minimal = (extra?: LogRecord): LogRecord => {
+      const line: LogRecord = { ...head, ...extra, ...tail }
+      if (trace) applyTrace(line, trace)
+      return line
+    }
     try {
-      sink.write({ ...minimal, ...bindings, ...tail })
+      // Like `buildRecord()`: bindings cannot set `time`, `level` or `message`.
+      const moved: LogRecord[] = []
+      const line = minimal(takeOwnKeys(bindings, moved))
+      if (moved.length > 0) line.args = moved
+      sink.write(line)
     } catch {
       try {
-        sink.write({ ...minimal, ...tail })
+        sink.write(minimal())
       } catch {
         // Nowhere left to write: a log call must not throw.
       }

@@ -569,7 +569,7 @@ logger.info('x', { level: 'custom', traceId: 'mine', a: 1 })
 Every runtime builds the same JSON line, one per log call (covered by a test that compares the two):
 
 - Starts with `time` (ISO 8601) and `level` (`TRACE` … `FATAL`); no `pid` or `hostname`.
-- When keys collide, strongest first: trace IDs (`traceId`, `spanId`, `parentSpanId`) and the other keys above, which a log call can't set → fields passed to the log call → logger fields (`createLogger` / `.child()`) → Context Fields.
+- When keys collide: `time`, `level`, `message`, `errors` and `args` are always loggercf's own, and so are the trace IDs (`traceId`, `spanId`, `parentSpanId`) inside a Logging Context. Logger fields and Context Fields can't set them either: their values for `time`, `level`, `message`, `errors` or `args` move to `args` (after the call's own `args`, logger fields first), so a `.child({ level: 'ERROR' })` can't change a line's severity. For every other key, strongest first: fields passed to the log call (which can't set `service`, `environment` or `version`, see above) → logger fields (`createLogger` / `.child()`) → Context Fields.
 - Errors become `{ type, message, stack, ...own fields (e.g. code), cause }`, with `cause` nested the same way: at the top level, in `errors`, and inside `args` items (e.g. `args: [{ err }]`).
 - Circular references are written as `"[Circular]"`, `BigInt` as a string, a function as `"[Function: name]"` and a symbol as `"Symbol(description)"`.
 - A log call never throws. If a value can't be read or serialized (a getter or a `toJSON` that throws), a minimal line is written instead: `time`, `level`, the trace IDs, the logger fields, the message template as given, and `logError` describing the failure.
