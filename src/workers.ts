@@ -5,6 +5,7 @@ import {
   getLogger,
   getTraceCarrier,
   getTraceContext,
+  hasDefaultLogger,
   recordSpan,
   registerDefaultLogger,
   runWithLogger,
@@ -174,9 +175,13 @@ export class TracedSession<E = unknown> extends RpcTarget {
  *
  * The constructor registers `rootLogger` as the Default Logger unless one is
  * already set (first seen wins), so `getLogger()` in `scheduled()`, `queue()` or a
- * plain RPC method logs with its `service`. It reads `rootLogger` before subclass
- * fields are initialized: build `envMapping` / `loggerOptions` overrides from
- * `this.env`, not from instance fields.
+ * plain RPC method logs with its `service`. The first instance in an isolate reads
+ * `rootLogger` before subclass fields are initialized: build `envMapping` /
+ * `loggerOptions` overrides from `this.env`, not from instance fields, and not from
+ * `this.ctx.props` (which differ per caller). A Worker that exports several
+ * entrypoints with different services should register its default explicitly at
+ * module scope (`defaultLoggerFromEnv()` or `setDefaultLogger()`), because otherwise
+ * whichever class is constructed first in an isolate wins.
  *
  * @template E - The worker environment type.
  *
@@ -200,7 +205,8 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
    */
   constructor(ctx: ExecutionContext, env: E) {
     super(ctx, env)
-    registerDefaultLogger(this.rootLogger)
+    // Once a default is set, skip building the Root Logger on every request or RPC call.
+    if (!hasDefaultLogger()) registerDefaultLogger(this.rootLogger)
   }
 
   /**

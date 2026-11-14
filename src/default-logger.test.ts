@@ -12,6 +12,12 @@ import {
 import { useLogger } from './middleware'
 import * as core from './index'
 
+/** The `service` a line written with `getLogger()` outside a Logging Context carries. */
+function outsideService(entries: Record<string, unknown>[]): unknown {
+  getLogger().info('probe')
+  return entries.at(-1)?.service
+}
+
 describe('Default Logger', () => {
   beforeEach(() => _reset())
 
@@ -33,7 +39,6 @@ describe('Default Logger', () => {
     })
     setDefaultLogger(root)
 
-    expect(getLogger()).toBe(root)
     getLogger().info('module scope')
 
     expect(entries[0]).toMatchObject({
@@ -68,12 +73,11 @@ describe('Default Logger', () => {
   })
 
   it('a later setDefaultLogger() replaces the default', () => {
-    const first = createLogger({ service: 'first' })
-    const second = createLogger({ service: 'second' })
-    setDefaultLogger(first)
-    setDefaultLogger(second)
+    const entries = _captureEntries()
+    setDefaultLogger(createLogger({ service: 'first' }))
+    setDefaultLogger(createLogger({ service: 'second' }))
 
-    expect(getLogger()).toBe(second)
+    expect(outsideService(entries)).toBe('second')
   })
 
   it('carries no Context Fields or trace IDs, even when registered inside a Logging Context', async () => {
@@ -115,6 +119,40 @@ describe('Default Logger', () => {
   it('is exported from the core entry', () => {
     expect(core.setDefaultLogger).toBe(setDefaultLogger)
   })
+
+  it('a getLogger() kept at module scope before registration logs through the later default', () => {
+    const entries = _captureEntries()
+    const early = getLogger() // e.g. a shared package's top level, evaluated before the app's
+    early.info('before')
+    setDefaultLogger(createLogger({ service: 'orders', version: '1.2.0' }))
+    early.info('after')
+
+    expect(entries.find((e) => e.message === 'before')).toMatchObject({ service: 'unknown' })
+    expect(entries.find((e) => e.message === 'after')).toMatchObject({
+      service: 'orders',
+      version: '1.2.0',
+    })
+  })
+
+  it('a getLogger() kept at module scope still gets the Logging Context on each line', () => {
+    const entries = _captureEntries()
+    const early = getLogger()
+    setDefaultLogger(createLogger({ service: 'orders' }))
+    runWithLogger({ logger: createLogger({ service: 'ctx' }), fields: { requestId: 'r1' } }, () =>
+      early.info('inside'),
+    )
+
+    expect(entries[0]).toMatchObject({ service: 'orders', requestId: 'r1' })
+    expect(entries[0]!.traceId).toBeDefined()
+  })
+
+  it('getLogger().child() binds to the logger current at the time of the call', () => {
+    const entries = _captureEntries()
+    setDefaultLogger(createLogger({ service: 'orders' }))
+    getLogger().child({ component: 'billing' }).info('child')
+
+    expect(entries[0]).toMatchObject({ service: 'orders', component: 'billing' })
+  })
 })
 
 describe('useLogger registers its Root Logger as the Default Logger', () => {
@@ -127,7 +165,7 @@ describe('useLogger registers its Root Logger as the Default Logger', () => {
     app.use(useLogger(root))
     app.get('/', (c) => c.text('ok'))
 
-    expect(getLogger()).toBe(root)
+    expect(outsideService(entries)).toBe('api')
 
     await app.request('/', { headers: { 'X-Request-Id': 'req-abc' } })
     getLogger().info('outside the request')
@@ -139,27 +177,27 @@ describe('useLogger registers its Root Logger as the Default Logger', () => {
   })
 
   it('first seen wins', () => {
-    const first = createLogger({ service: 'first' })
-    new Hono().use(useLogger(first))
+    const entries = _captureEntries()
+    new Hono().use(useLogger(createLogger({ service: 'first' })))
     new Hono().use(useLogger(createLogger({ service: 'second' })))
 
-    expect(getLogger()).toBe(first)
+    expect(outsideService(entries)).toBe('first')
   })
 
   it('does not replace a default set with setDefaultLogger()', () => {
-    const explicit = createLogger({ service: 'explicit' })
-    setDefaultLogger(explicit)
+    const entries = _captureEntries()
+    setDefaultLogger(createLogger({ service: 'explicit' }))
     new Hono().use(useLogger(createLogger({ service: 'api' })))
 
-    expect(getLogger()).toBe(explicit)
+    expect(outsideService(entries)).toBe('explicit')
   })
 
   it('an explicit setDefaultLogger() replaces the registered one', () => {
+    const entries = _captureEntries()
     new Hono().use(useLogger(createLogger({ service: 'api' })))
-    const explicit = createLogger({ service: 'explicit' })
-    setDefaultLogger(explicit)
+    setDefaultLogger(createLogger({ service: 'explicit' }))
 
-    expect(getLogger()).toBe(explicit)
+    expect(outsideService(entries)).toBe('explicit')
   })
 
   it('does not register a logger returned by a factory', async () => {

@@ -134,6 +134,9 @@ getLogger().info('starting') // service, environment and version from env
 - Outside a context the line has no trace IDs and no Context Fields. Context Fields live in each Logging Context, never on the logger, so the Default Logger cannot carry one request's data into other work.
 - Pass the Root Logger itself, not a logger taken from inside a Logging Context. A `.child({ ... })` of it is accepted, but the fields passed to `.child()` go on every line logged outside a context, so they must be per-process data too.
 - `setDefaultLogger` always replaces the current default, including one registered automatically. Calling it again replaces it again.
+- The default is looked up when each line is written, not when `getLogger()` is called. A shared package that keeps `const log = getLogger()` at its top level (which runs before your app's module body) still logs with your `service` once the default is registered; only lines written before that say `service: 'unknown'`. `getLogger().child({...})` binds to the logger current at the time of the `.child()` call, so call it after registration.
+- The logger you register, or pass to `useLogger` or a `TracedEntrypoint` that registers it automatically, must not depend on the request or on `ctx.props`: the first one seen stays the default for the isolate.
+- A Worker that exports several entrypoints with different services should register its default explicitly at module scope (`defaultLoggerFromEnv()` or `setDefaultLogger()`). Otherwise whichever entrypoint class is constructed first in an isolate wins.
 
 `useLogger(rootLogger)`, `TracedEntrypoint`, `tracedWorker` and `defaultLoggerFromEnv` register their Root Logger the first time they see one, unless a default is already set: first seen wins. On Workers, [`defaultLoggerFromEnv()`](#defaultloggerfromenvmapping) builds and registers one from `env` with no setup.
 

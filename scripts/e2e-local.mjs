@@ -248,7 +248,11 @@ function checkDefaultLogger(failures) {
   const start = records.find(
     (r) => r.traceId === TRACE_ID && String(r.message).startsWith('request.start '),
   )
-  if (start && (start.service !== 'pino-log-test' || start.environment !== 'development')) {
+  if (!start) {
+    failures.push(
+      'logs: no main-worker request.start line for the module-scope Default Logger check',
+    )
+  } else if (start.service !== 'pino-log-test' || start.environment !== 'development') {
     failures.push(`logs: main-worker request.start lacks its env fields: ${JSON.stringify(start)}`)
   }
 }

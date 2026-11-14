@@ -33,6 +33,7 @@ import {
   createLogger,
   setDefaultLogger,
   _captureEntries,
+  _getDefaultLogger,
 } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
 
@@ -806,7 +807,7 @@ describe('Default Logger from the Workers helpers', () => {
     })
 
     const logger = defaultLoggerFromEnv()
-    expect(getLogger()).toBe(logger)
+    expect(_getDefaultLogger()).toBe(logger)
 
     getLogger().debug('outside any Logging Context')
     expect(entries[0]).toMatchObject({
@@ -850,7 +851,7 @@ describe('Default Logger from the Workers helpers', () => {
     const logger = defaultLoggerFromEnv()
 
     expect(logger).not.toBe(explicit)
-    expect(getLogger()).toBe(explicit)
+    expect(_getDefaultLogger()).toBe(explicit)
   })
 
   it('TracedEntrypoint registers its Root Logger when constructed', () => {
@@ -869,7 +870,7 @@ describe('Default Logger from the Workers helpers', () => {
     })
     entrypoint.scheduled()
 
-    expect(getLogger()).toBe((entrypoint as any).rootLogger)
+    expect(_getDefaultLogger()).toBe((entrypoint as any).rootLogger)
     expect(entries[0]).toMatchObject({
       service: 'rpc-worker',
       environment: 'staging',
@@ -888,8 +889,8 @@ describe('Default Logger from the Workers helpers', () => {
     }
 
     const entrypoint = new Entrypoint({} as any, { NAME: 'ignored' })
-    expect(getLogger()).toBe((entrypoint as any).rootLogger)
-    expect(getLogger()).toBe(custom)
+    expect(_getDefaultLogger()).toBe((entrypoint as any).rootLogger)
+    expect(_getDefaultLogger()).toBe(custom)
   })
 
   it('tracedWorker() registers its Root Logger; Context Fields never reach the default', () => {
@@ -918,13 +919,13 @@ describe('Default Logger from the Workers helpers', () => {
     const first = (a as any).rootLogger
     expect((b as any).rootLogger).not.toBe(first)
 
-    expect(getLogger()).toBe(first)
+    expect(_getDefaultLogger()).toBe(first)
 
     const explicit = createLogger({ service: 'explicit' })
     setDefaultLogger(explicit)
     const again = new TracedEntrypoint({} as any, { NAME: 'first' })
     expect((again as any).rootLogger).toBe(first)
 
-    expect(getLogger()).toBe(explicit)
+    expect(_getDefaultLogger()).toBe(explicit)
   })
 })
