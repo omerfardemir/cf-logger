@@ -80,10 +80,35 @@ export function defaultLoggerFromEnv<E = Cloudflare.Env>(mapping?: EnvMapping<E>
 }
 
 /**
+ * `TracedSession`'s `traced()` for code in this module, so `withLogging()`'s session
+ * reaches it even when an RPC method of the same name is on its prototype.
+ */
+let runTraced: <R>(session: TracedSession<any>, fn: () => R, operation?: string) => R
+
+/**
+ * Define a member on one instance: non-enumerable and configurable, like a class
+ * member, but not on the prototype, so JSRPC does not expose it (workerd never
+ * exposes an `RpcTarget`'s instance properties, as with `env`). Skipped when a
+ * subclass already has a member of that name, which then stays what callers reach.
+ *
+ * @param {object} target - The instance.
+ * @param {string} name - The member name.
+ * @param {PropertyDescriptor} descriptor - A `value` or a `get`.
+ */
+function defineInstanceMember(target: object, name: string, descriptor: PropertyDescriptor): void {
+  // A member the subclass already declares wins: withLogging's session relies on this
+  // when an entrypoint has its own `traced` or `logger` method.
+  if (name in target) return
+  Object.defineProperty(target, name, { ...descriptor, enumerable: false, configurable: true })
+}
+
+/**
  * Base class for Traced Sessions.
  *
- * Stores `traceparent` in a private field (`#traceparent`) which is never sent
- * over the wire; only prototype methods are exposed via JSRPC.
+ * JSRPC exposes only the methods and getters your subclass declares. The Trace
+ * Carrier, Context Fields and Root Logger are `#private`, and `traced`, `logger` and `env` are
+ * instance properties, which JSRPC never exposes: a caller holding a session stub
+ * cannot call `traced` or read `logger` or `env`.
  * Subclass this with your RPC methods and wrap them with `this.traced()`.
  *
  * @template E - The worker environment type.
@@ -109,6 +134,30 @@ export class TracedSession<E = unknown> extends RpcTarget {
   protected env: E
 
   /**
+   * Run a function in a Logging Context continuing the caller's trace.
+   *
+   * Each call gets its own span ID whose parent is the caller's span. When
+   * `operation` is provided, the call is reported as a Span (`span.end` with
+   * timing and status) if the trace is sampled; for an unsampled trace a throw is
+   * still logged, as one `<operation> failed` line at `ERROR`. The return value and
+   * a throw or rejection pass through unchanged.
+   *
+   * An instance property, so JSRPC never exposes it; call it as `this.traced(fn, op)`.
+   *
+   * @template R - The return type of `fn`.
+   * @param {() => R} fn - The function to execute inside the Logging Context.
+   * @param {string} [operation] - Span operation name (e.g. `'bind.add'`).
+   * @returns {R} The return value of `fn`.
+   */
+  declare protected readonly traced: <R>(fn: () => R, operation?: string) => R
+
+  /**
+   * The current Logging Context's logger inside `this.traced()`, otherwise the
+   * Root Logger. An instance property, so JSRPC never exposes it.
+   */
+  declare protected readonly logger: Logger
+
+  /**
    * @param {SessionInit} init - The caller's Trace Carrier and Context Fields.
    * @param {Logger} rootLogger - The isolate's Root Logger (see `TracedEntrypoint.rootLogger`).
    * @param {E} env - The worker environment bindings.
@@ -118,22 +167,24 @@ export class TracedSession<E = unknown> extends RpcTarget {
     this.#init = { ...init }
     this.#rootLogger = rootLogger
     this.env = env
+    defineInstanceMember(this, 'traced', {
+      value: <R>(fn: () => R, operation?: string): R => this.#traced(fn, operation),
+      writable: true,
+    })
+    defineInstanceMember(this, 'logger', {
+      get: (): Logger => (getTraceContext() ? getLogger() : this.#rootLogger),
+    })
   }
 
   /**
-   * Run a function in a Logging Context continuing the caller's trace.
-   *
-   * Each call gets its own span ID whose parent is the caller's span. When
-   * `operation` is provided, the call is reported as a Span (`span.end` with
-   * timing and status) if the trace is sampled; for an unsampled trace a throw is
-   * still logged, as one `<operation> failed` line at `ERROR`.
+   * `traced()`'s implementation.
    *
    * @template R - The return type of `fn`.
    * @param {() => R} fn - The function to execute inside the Logging Context.
-   * @param {string} [operation] - Span operation name (e.g. `'bind.add'`).
+   * @param {string} [operation] - Span operation name.
    * @returns {R} The return value of `fn`.
    */
-  protected traced<R>(fn: () => R, operation?: string): R {
+  #traced<R>(fn: () => R, operation?: string): R {
     return runLogged(
       {
         logger: this.#rootLogger,
@@ -146,14 +197,8 @@ export class TracedSession<E = unknown> extends RpcTarget {
     )
   }
 
-  /**
-   * The current Logging Context's logger inside `this.traced()`, otherwise the
-   * Root Logger.
-   *
-   * @returns {Logger} The logger to use.
-   */
-  protected get logger(): Logger {
-    return getTraceContext() ? getLogger() : this.#rootLogger
+  static {
+    runTraced = (session, fn, operation) => session.#traced(fn, operation)
   }
 }
 
@@ -766,19 +811,6 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
         this.#target = target
       }
 
-      /**
-       * `TracedSession.traced()`, reached through `super` so that a user method named
-       * `traced`, copied onto this prototype, cannot shadow it.
-       *
-       * @template R - The return type of `fn`.
-       * @param {() => R} fn - The method call.
-       * @param {string} [operation] - Span operation name.
-       * @returns {R} The return value of `fn`.
-       */
-      #traced<R>(fn: () => R, operation?: string): R {
-        return super.traced(fn, operation)
-      }
-
       static {
         for (const [name, method] of rpcMethods) {
           /**
@@ -796,10 +828,11 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
               setLoggerContext(fieldsOf(name))
               return method.apply(target, args)
             }
-            // Without `spans`, no span.end, but a throw is still logged at ERROR.
+            // Without `spans`, no span.end, but a throw is still logged at ERROR. Through
+            // `runTraced`, so a user method named `traced` on this prototype cannot shadow it.
             return spans
-              ? this.#traced(run, operation)
-              : this.#traced(() => recordSpan(operation, run, false))
+              ? runTraced(this, run, operation)
+              : runTraced(this, () => recordSpan(operation, run, false))
           }
           defineMethod(this.prototype, name, sessionMethod)
         }

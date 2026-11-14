@@ -92,6 +92,11 @@ Changes to the Logger Options read from env:
 - An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw.
 - `LOG_LEVEL: "SILENT"` (any level name not in lowercase) falls back to `'info'` with one `WARN`; 0.0.1 passed it on and threw. `"silent"` still mutes all logs, as in 0.0.1.
 
+Changes to Traced Sessions (`loggercf/workers`):
+
+- `traced` and `logger` are no longer RPC members of a Traced Session (a `TracedSession` subclass, `tracedWorker`'s, or `withLogging({ session: true })`'s). In 0.0.1 a caller holding a session stub could call `session.traced(...)` or read `session.logger`; now both fail as missing methods. `this.traced(fn, op)` and `this.logger` inside a subclass work as before.
+- They are now instance properties typed `protected readonly`, so a subclass can no longer override `traced()` or the `logger` getter (TypeScript reports it), and `super.traced(...)` no longer exists. Give such a helper another name and call `this.traced` from it. In plain JavaScript (or past a `@ts-expect-error`) a subclass member named `traced` or `logger` replaces the helper and is callable over RPC like any other method.
+
 Changes to the Hono middleware (`useLogger`):
 
 - `request.error` lines are gone. A request that failed has one `request.end` with `err`. Move any alert or query on `request.error` to `request.end` with `err` present, or to its level.
@@ -538,6 +543,8 @@ export default tracedWorker(MySession)
 | `this.traced(fn, operation?)` | Runs `fn` in a Logging Context continuing the caller's trace. Optional `operation` reports the call as a Span. |
 | `this.logger`                 | Request-scoped logger (must be called inside `traced()`)                                                       |
 | `this.env`                    | Worker env (bindings, vars) — for multi-hop RPC calls                                                          |
+
+**What callers can reach.** A caller holding a session stub can call every method and read every getter your subclass declares (or inherits from your own base classes), and nothing else. `traced`, `logger` and `env` are instance properties, and the Trace Carrier, Context Fields and Root Logger are `#private`; JSRPC exposes none of them, so `session.traced(...)` or `session.logger` over RPC fails with `The RPC receiver does not implement the method`. Keep helpers you do not want callable as `#private` methods or functions outside the class. `traced` and `logger` cannot be overridden in a subclass (TypeScript reports it, and `super.traced` does not exist); give your own helper another name. In plain JavaScript (or past a `@ts-expect-error`) a subclass member named `traced` or `logger` replaces the helper and is callable over RPC like any other method.
 
 ### `tracedWorker(SessionClass, options?)`
 

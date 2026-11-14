@@ -1032,6 +1032,25 @@ describe('Default Logger from the Workers helpers', () => {
 })
 
 const ownNames = (o: object) => new Set(Object.getOwnPropertyNames(o))
+/**
+ * What JSRPC can reach on an `RpcTarget`: the string-keyed members of its prototype
+ * chain (methods and accessors, own and inherited) above `RpcTarget.prototype`, without
+ * `constructor`. workerd does not expose the instance's own properties, `#private`
+ * members, symbol keys, or `Object.prototype`.
+ */
+const rpcSurface = (target: object) => {
+  const names = new Set<string>()
+  for (
+    let proto = Object.getPrototypeOf(target);
+    proto && proto !== RpcTarget.prototype && proto !== Object.prototype;
+    proto = Object.getPrototypeOf(proto)
+  ) {
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (name !== 'constructor') names.add(name)
+    }
+  }
+  return names
+}
 /** Lines whose message is `message`. */
 const linesOf = (entries: Record<string, unknown>[], message: string) =>
   entries.filter((e) => e.message === message)
@@ -1446,7 +1465,11 @@ describe('withLogging', () => {
 
     expect(ownNames(Object.getPrototypeOf(session))).toEqual(RPC_METHODS)
     expect(ownNames(Worker.prototype)).toEqual(new Set([...RPC_METHODS, 'session']))
-    expect(Object.getOwnPropertyNames(session)).toEqual(['env'])
+    // `traced` and `logger` are instance properties, which JSRPC never exposes.
+    expect(rpcSurface(session)).toEqual(
+      new Set([...RPC_METHODS].filter((n) => n !== 'constructor')),
+    )
+    expect(ownNames(session)).toEqual(new Set(['env', 'traced', 'logger']))
   })
 
   it('session: true rejects a class that already defines session()', () => {
@@ -1742,6 +1765,91 @@ describe('withLogging', () => {
     const NoFetch = withLogging(SearchWorker, { fetch: false })
     expect(withLogging(NoFetch, { fetch: false })).toBe(NoFetch)
     expect(() => withLogging(NoFetch)).toThrow(/already wrapped with other options/)
+  })
+})
+
+describe('the JSRPC surface of a Traced Session', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+  })
+
+  const ENV = { NAME: 'receiver' }
+  const CALLER_TRACEPARENT = '00-11111111111111111111111111111111-2222222222222222-01'
+
+  class UserSession extends TracedSession<typeof ENV> {
+    add(a: number, b: number) {
+      return this.traced(() => {
+        this.logger.info({ a, b }, 'adding')
+        return { sum: a + b, trace: getTraceContext() }
+      }, 'user.add')
+    }
+  }
+
+  class DerivedSession extends UserSession {
+    double(n: number) {
+      return this.traced(() => n * 2)
+    }
+  }
+
+  it('a TracedSession subclass exposes only its own methods, not traced or logger', () => {
+    const entries = _captureEntries()
+    const session = new DerivedSession(
+      { traceparent: CALLER_TRACEPARENT },
+      createLogger({ service: 'receiver' }),
+      ENV,
+    )
+
+    expect(rpcSurface(session)).toEqual(new Set(['add', 'double']))
+    expect(rpcSurface(new TracedSession({}, createLogger({ service: 'x' }), ENV))).toEqual(
+      new Set(),
+    )
+    // Instance properties, which JSRPC never exposes, and not enumerable.
+    expect(Object.keys(session)).toEqual(['env'])
+    expect(ownNames(session)).toEqual(new Set(['env', 'traced', 'logger']))
+
+    // The subclass API is unchanged.
+    expect(session.add(2, 3).sum).toBe(5)
+    expect(session.add(2, 3).trace!.traceId).toBe('11111111111111111111111111111111')
+    expect(session.double(4)).toBe(8)
+    expect(entries.find((e) => e.message === 'adding')).toMatchObject({
+      service: 'receiver',
+      traceId: '11111111111111111111111111111111',
+      parentSpanId: '2222222222222222',
+    })
+    expect(spanEnds(entries)[0]).toMatchObject({ message: 'span.end user.add' })
+  })
+
+  it("tracedWorker's sessions expose only the session class's methods", () => {
+    const Worker = tracedWorker(UserSession)
+    const session = new Worker(undefined, ENV).session({ traceparent: CALLER_TRACEPARENT })
+
+    expect(session).toBeInstanceOf(UserSession)
+    expect(rpcSurface(session)).toEqual(new Set(['add']))
+    expect(session.add(1, 1).trace!.traceId).toBe('11111111111111111111111111111111')
+  })
+
+  it("withLogging({ session: true })'s sessions expose only the entrypoint's RPC methods", () => {
+    class Plain extends WorkerEntrypoint<typeof ENV> {
+      hello(name: string) {
+        getLogger().info({ name }, 'hello')
+        return getTraceContext()
+      }
+
+      bye() {
+        return 'bye'
+      }
+
+      fetch() {
+        return new Response('ok')
+      }
+    }
+    const Worker = withLogging(Plain, { session: true })
+    const worker = new Worker({} as any, ENV)
+    const session = worker.session({ traceparent: CALLER_TRACEPARENT })
+
+    expect(rpcSurface(session)).toEqual(new Set(['hello', 'bye']))
+    expect(session.hello('ada')!.traceId).toBe('11111111111111111111111111111111')
   })
 })
 
