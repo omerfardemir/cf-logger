@@ -1234,6 +1234,93 @@ describe('useLogger hook errors', () => {
     expect(warnings()).toEqual([])
   })
 
+  it('treats a fields result with a throwing getter as a failure: same response, no fields, one WARN', async () => {
+    const { starts, ends, warnings, app } = optionsApp({
+      fields: () => ({
+        tenant: 't-1',
+        get broken(): string {
+          throw new Error('getter broke')
+        },
+      }),
+    })
+    app.get('/', (c) => c.text('handled'))
+    for (let i = 0; i < 2; i++) {
+      const res = await app.request('/')
+      expect(res.status).toBe(200)
+      expect(await res.text()).toBe('handled')
+    }
+    expect(starts()).toHaveLength(2)
+    expect(ends()).toHaveLength(2)
+    for (const e of [...starts(), ...ends()]) expect(e).not.toHaveProperty('tenant')
+    expect(warnings()).toHaveLength(1)
+    expect(warnings()[0]).toMatchObject({
+      hook: 'fields',
+      err: expect.objectContaining({ message: 'getter broke' }),
+    })
+  })
+
+  it('treats an endFields result with a throwing getter as a failure: request.end is still written', async () => {
+    const { ends, warnings, app } = optionsApp({
+      endFields: () => ({
+        userId: 'u-1',
+        get broken(): string {
+          throw new Error('getter broke')
+        },
+      }),
+    })
+    app.get('/', (c) => c.text('handled'))
+    const res = await app.request('/')
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('handled')
+    expect(ends()).toHaveLength(1)
+    expect(ends()[0]).toMatchObject({ level: 'INFO', statusCode: 200 })
+    expect(ends()[0]).not.toHaveProperty('userId')
+    expect(warnings()).toHaveLength(1)
+    expect(warnings()[0]).toMatchObject({
+      hook: 'endFields',
+      err: expect.objectContaining({ message: 'getter broke' }),
+    })
+  })
+
+  it('treats a Proxy result whose traps throw as a failure, for fields and endFields', async () => {
+    const trap = () => {
+      throw new Error('trap broke')
+    }
+    const hostile = () => new Proxy({}, { ownKeys: trap, get: trap, has: trap })
+    const { starts, ends, warnings, app } = optionsApp({ fields: hostile, endFields: hostile })
+    app.get('/', (c) => c.text('handled'))
+    const res = await app.request('/')
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('handled')
+    expect(starts()).toHaveLength(1)
+    expect(ends()).toHaveLength(1)
+    expect(warnings().map((w) => w.hook)).toEqual(['fields', 'endFields'])
+    for (const w of warnings()) {
+      expect(w).toMatchObject({ err: expect.objectContaining({ message: 'trap broke' }) })
+    }
+  })
+
+  it('treats a Proxy result whose ownKeys trap alone throws as a failure', async () => {
+    const hostile = () =>
+      new Proxy(
+        {},
+        {
+          ownKeys() {
+            throw new Error('ownKeys broke')
+          },
+        },
+      )
+    const { ends, warnings, app } = optionsApp({ endFields: hostile })
+    app.get('/', (c) => c.text('handled'))
+    expect((await app.request('/')).status).toBe(200)
+    expect(ends()).toHaveLength(1)
+    expect(warnings()).toHaveLength(1)
+    expect(warnings()[0]).toMatchObject({
+      hook: 'endFields',
+      err: expect.objectContaining({ message: 'ownKeys broke' }),
+    })
+  })
+
   it('warns once per useLogger instance', async () => {
     const lines = _captureLines()
     for (let i = 0; i < 2; i++) {

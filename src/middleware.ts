@@ -136,17 +136,21 @@ const HOOK_FAILURE: Record<Hook, string> = {
 }
 
 /**
- * Reports an option hook that threw or returned something unusable: one WARN per hook per
- * `useLogger()` call, so a hook that fails on every request does not double the log volume.
+ * A "warn once" reporter, one per `useLogger()` call: the first call for each `key` writes one
+ * WARN through the given logger, later calls for that key write nothing, so a callback that
+ * fails on every request does not double the log volume.
  */
-function hookFailureReporter() {
-  const reported = new Set<Hook>()
-  return (logger: Logger, hook: Hook, failure: HookFailure): void => {
-    if (reported.has(hook)) return
-    reported.add(hook)
-    logger.warn({ hook, ...failure }, HOOK_FAILURE[hook])
+function warnOnce() {
+  const warned = new Set<string>()
+  return (logger: Pick<Logger, 'warn'>, key: string, message: string, fields?: object) => {
+    if (warned.has(key)) return
+    warned.add(key)
+    if (fields) logger.warn(fields, message)
+    else logger.warn(message)
   }
 }
+
+type WarnOnce = ReturnType<typeof warnOnce>
 
 /** Why a hook's result was not used: what it threw, or a description of what it returned. */
 type HookFailure = { err: unknown } | { returned: string }
@@ -158,25 +162,38 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
 }
 
 /**
- * Calls an option hook. A throw, or a value `accepts` rejects, becomes a `failure` instead of
- * reaching the app; the hook's result is then not used. A Promise result is never awaited, but
- * its rejection is handled, so an async hook cannot cause an unhandled rejection.
+ * Gives a Promise (or other thenable) an app callback returned a no-op rejection handler, so it
+ * cannot become an unhandled rejection. It is never awaited. A value whose `then` throws when
+ * read or called is left alone.
  */
-function callHook<R>(fn: () => unknown, accepts: (value: unknown) => value is R): HookResult<R> {
-  let value: unknown
+function ignoreRejection(value: unknown): void {
   try {
-    value = fn()
+    if (isThenable(value)) value.then(undefined, () => {})
+  } catch {
+    // Nothing to handle: the value is not a usable thenable.
+  }
+}
+
+/**
+ * Calls an option hook and turns its result into what `useLogger` uses, with `use`. A throw,
+ * from the hook or from reading its result (a throwing getter, a Proxy trap), or a result
+ * `accepts` rejects, becomes a `failure` instead of reaching the app, and nothing of the result
+ * is used. A Promise result is never awaited, but its rejection is handled.
+ */
+function callHook<V, R>(
+  fn: () => unknown,
+  accepts: (value: unknown) => value is V,
+  use: (value: V) => R,
+): HookResult<R> {
+  try {
+    const value = fn()
+    ignoreRejection(value)
+    return accepts(value)
+      ? { value: use(value) }
+      : { failure: { returned: describeReturned(value) } }
   } catch (err) {
     return { failure: { err } }
   }
-  if (isThenable(value)) {
-    try {
-      value.then(undefined, () => {})
-    } catch {
-      // A thenable whose then() throws is still only reported as a failure below.
-    }
-  }
-  return accepts(value) ? { value } : { failure: { returned: describeReturned(value) } }
 }
 
 /** A short description of an unusable hook result, for the WARN. */
@@ -216,11 +233,22 @@ function ownKeys(include: RequestDetailsOptions): readonly string[] {
   return [...OWN_KEYS, ...(include.userAgent ? ['userAgent'] : []), ...(include.cf ? ['cf'] : [])]
 }
 
-/** A hook result without the keys `useLogger` owns. */
-function withoutKeys(fields: LogFields | undefined, keys: readonly string[]): LogFields {
+/** A `fields` / `endFields` result, without the keys `useLogger` owns. */
+interface HookFields {
+  fields: LogFields
+  /** The owned keys the hook returned, which were dropped. Key names only, never values. */
+  dropped: string[]
+}
+
+/**
+ * Copies a hook result without the keys `useLogger` owns. Reading the result can throw (a
+ * getter, a Proxy), so call it only inside `callHook`.
+ */
+function withoutKeys(fields: LogFields | undefined, keys: readonly string[]): HookFields {
   const rest = { ...fields }
-  for (const key of keys) delete rest[key]
-  return rest
+  const dropped = keys.filter((key) => Object.hasOwn(rest, key))
+  for (const key of dropped) delete rest[key]
+  return { fields: rest, dropped }
 }
 
 /**
@@ -333,7 +361,7 @@ interface PickedRequestId {
 function tryCall<R>(fn: () => R, onThrow?: () => void): R | undefined {
   try {
     const value = fn()
-    if (value instanceof Promise) value.catch(() => {})
+    ignoreRejection(value)
     return value
   } catch {
     onThrow?.()
@@ -358,6 +386,7 @@ function matches(pattern: RegExp, value: string): boolean {
  */
 function requestIdPicker(
   options: RequestIdOptions = {},
+  warn: WarnOnce = warnOnce(),
 ): (c: Context, logger: Pick<Logger, 'warn'>) => PickedRequestId {
   const {
     from = DEFAULT_REQUEST_ID_SOURCES,
@@ -387,21 +416,10 @@ function requestIdPicker(
   const accepts = typeof validate === 'function' ? validate : (id: string) => matches(validate, id)
 
   // One WARN of each kind per useLogger() call, written through the Root Logger it was given.
-  let warnedUnsafeGenerated = false
-  let warnedCallbackThrew = false
-  const warnOnce = (logger: Pick<Logger, 'warn'>, kind: 'generate' | 'callback') => {
-    if (kind === 'generate' ? warnedUnsafeGenerated : warnedCallbackThrew) return
-    if (kind === 'generate') warnedUnsafeGenerated = true
-    else warnedCallbackThrew = true
-    logger.warn(
-      kind === 'generate' ? UNSAFE_GENERATED_ID_WARNING : REQUEST_ID_CALLBACK_THREW_WARNING,
-    )
-  }
-
   const generateSafe = (c: Context, logger: Pick<Logger, 'warn'>): string => {
     const id = tryCall(() => generate(c))
     if (typeof id === 'string' && SAFE_HEADER_VALUE.test(id)) return id
-    warnOnce(logger, 'generate')
+    warn(logger, 'requestId.generate', UNSAFE_GENERATED_ID_WARNING)
     return crypto.randomUUID()
   }
 
@@ -412,7 +430,7 @@ function requestIdPicker(
   }
 
   return (c, logger) => {
-    const threw = () => warnOnce(logger, 'callback')
+    const threw = () => warn(logger, 'requestId.callback', REQUEST_ID_CALLBACK_THREW_WARNING)
     let cfRay = readCfRay(c)
     let rejected = false
     for (const { read, isCfRay } of sources) {
@@ -480,10 +498,13 @@ export function useLogger<T extends LogFields = LogFields>(
   loggerOrFactory: Logger<T> | ((c: Context) => Logger<T>),
   options: UseLoggerOptions = {},
 ): MiddlewareHandler {
-  const pickRequestId = requestIdPicker(options.requestId)
+  const warn = warnOnce()
+  const pickRequestId = requestIdPicker(options.requestId, warn)
   const { requestStart = true, level, fields, endFields, include = {} } = options
-  const reportHookFailure = hookFailureReporter()
   const protectedKeys = ownKeys(include)
+  const keepFields = (value: LogFields | undefined) => withoutKeys(value, protectedKeys)
+  const reportHookFailure = (logger: Logger, hook: Hook, failure: HookFailure) =>
+    warn(logger, hook, HOOK_FAILURE[hook], { hook, ...failure })
 
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
@@ -494,7 +515,7 @@ export function useLogger<T extends LogFields = LogFields>(
     const path = new URL(c.req.url).pathname
     const startRoute = expectedRoute(c)
     const details = requestDetails(c, include)
-    const appFields = fields ? callHook(() => fields(c), isFields) : undefined
+    const appFields = fields ? callHook(() => fields(c), isFields, keepFields) : undefined
     const ownFields: LogFields = {
       requestId,
       ...(rejected && { requestIdRejected: true }),
@@ -504,7 +525,7 @@ export function useLogger<T extends LogFields = LogFields>(
     const contextOptions = {
       logger: rootLogger,
       ...extractCarrier((name) => c.req.header(name)),
-      fields: { ...withoutKeys(appFields?.value, protectedKeys), ...ownFields },
+      fields: { ...appFields?.value?.fields, ...ownFields },
     }
     await runWithLogger(contextOptions, async () => {
       const logger = getLogger<T>()
@@ -537,20 +558,26 @@ export function useLogger<T extends LogFields = LogFields>(
       const statusCode = escaped ? 500 : c.res.status
       const err = escaped ? thrownErr(escaped.thrown) : c.error
 
-      const endExtra = endFields ? callHook(() => endFields(c), isFields) : undefined
+      const endExtra = endFields ? callHook(() => endFields(c), isFields, keepFields) : undefined
       if (endExtra?.failure) reportHookFailure(logger, 'endFields', endExtra.failure)
 
       let endLevel: LogLevel = 'error'
       if (!escaped) {
         const caught = c.error
-        const picked = level ? callHook(() => level(statusCode, caught, c), isLevel) : undefined
+        const picked = level
+          ? callHook(
+              () => level(statusCode, caught, c),
+              isLevel,
+              (value) => value,
+            )
+          : undefined
         if (picked?.failure) reportHookFailure(logger, 'level', picked.failure)
         endLevel = picked?.value ?? defaultRequestEndLevel(statusCode, caught)
       }
 
       logger[endLevel](
         {
-          ...withoutKeys(endExtra?.value, protectedKeys),
+          ...endExtra?.value?.fields,
           ...ownFields,
           ...details,
           method,
