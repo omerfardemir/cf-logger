@@ -255,9 +255,13 @@ export default withLogging(SearchWorker, { spans: true, session: true })
 - A direct call has no Trace Carrier, so it starts a new root trace. Callers that move to `withTrace(env.SVC, (s) => s.search(q))` continue their own trace instead; migrate them one at a time. Type the binding as `SearchService & TracedServiceBinding<SearchService>` while both styles are in use.
 - `withLogging` changes nothing a caller sees: same RPC methods, same return values, the same error thrown. It never retries or catches. `session: true` is the one addition: a `session(init)` method. The class must not already have a `session` method or getter, own or inherited.
 - `scheduled`, `queue` and `tail` are not wrapped. Open a Logging Context per unit of work yourself (`runWithLogger`, one per queue message).
+- When `fetch` hands the request to a Hono app that uses `useLogger` (`return app.fetch(req, this.env, this.ctx)`), pass `fetch: false`. `useLogger` opens its own Logging Context and continues `traceparent`; wrapping `fetch` as well splits each request into two root traces.
+- Put every RPC method on the class before wrapping it. A method added or overridden in a subclass of the wrapped class runs outside every Logging Context; extend the wrapped class only to add handlers. The class must extend `WorkerEntrypoint`: wrapping a Durable Object, or anything else, throws.
+- A method named like a handler (`trace`, `test`, `email`, `connect`, `queue`, `tail`, `tailStream`) is never wrapped.
 - Only method calls are wrapped. A getter read over RPC, and the body of an `async *` method (it runs on each `.next()`, after the call has returned), log outside the Logging Context. A sync method that returns an un-awaited `RpcPromise` gets a span that ends at once; make it `async` and `await` the call to time it.
-- A method that calls another public method (`this.search()`) stays in the caller's Logging Context: the child Span is `C.search`, but `rpcMethod` stays the caller's.
-- Wrap a class once. Wrapping the result again with the same options returns it; other options, or wrapping a subclass of it, throw.
+- A method called while any Logging Context is active joins it and adds no `rpcMethod` or `entrypoint`: another public method (`this.search()`) gives a child Span `C.search` with the caller's `rpcMethod`, and a call inside your own `runWithLogger` in `scheduled` logs with that context's fields only.
+- On the `session()` path, caller fields named `rpcMethod` or `entrypoint` are replaced. An anonymous class gets no `entrypoint` field, and its Spans are named by the method alone.
+- Wrap a class once. Wrapping the result again with the same options (`spans`, `session`, `fetch`, `env`) returns it; other options, or wrapping a subclass of it, throw.
 - It takes the same Env Mapping as `tracedWorker`: `withLogging(C, { env: { version: ... } })`. A `TracedEntrypoint` subclass keeps its own `envMapping` instead; passing `env` to it throws.
 
 ### Log call shape
