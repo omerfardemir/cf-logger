@@ -17,6 +17,12 @@
       "binding": "BIND",
       "service": "bind-test",
     },
+    {
+      // A plain WorkerEntrypoint wrapped with withLogging() (dev/math-worker/src/index.ts).
+      "binding": "LOGGED",
+      "service": "math-test",
+      "entrypoint": "LoggedMath",
+    },
   ],
   "vars": {
     "ENVIRONMENT": "development",
