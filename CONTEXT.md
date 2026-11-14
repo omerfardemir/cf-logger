@@ -35,7 +35,7 @@ The Root Logger (or a `.child()` of one with per-process fields only) an isolate
 _Avoid_: global logger, fallback logger
 
 **Logger Options**:
-The per-process configuration a Root Logger is built from: service name, minimum level, environment, version.
+The per-process configuration a Root Logger is built from: service name, minimum level (or `silent`, which writes nothing), environment, version.
 
 **Env Mapping**:
 Where each Logger Options field is read from in a Worker's (or process's) env: a var name or a function of env. Unmapped fields read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`.

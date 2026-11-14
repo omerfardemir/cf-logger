@@ -83,9 +83,10 @@ export interface UseLoggerOptions {
   /**
    * Picks the level of `request.end` from the final status and the error Hono caught
    * (`c.error`), if any. Defaults to `defaultRequestEndLevel`: `error` for an error or a 5xx,
-   * `warn` for a 4xx, `info` otherwise. When it throws or returns an unknown level, the default
-   * is used and one WARN is written. It is not called for a throw that escapes `useLogger` (see
-   * `useLogger`): that `request.end` is always at `error`, because its status is only assumed.
+   * `warn` for a 4xx, `info` otherwise. When it throws or returns an unknown level (`'silent'`
+   * included: `request.end` is never muted this way), the default is used and one WARN is
+   * written. It is not called for a throw that escapes `useLogger` (see `useLogger`): that
+   * `request.end` is always at `error`, because its status is only assumed.
    */
   level?: (statusCode: number, err: Error | undefined, c: Context) => LogLevel
   /**

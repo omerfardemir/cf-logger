@@ -430,7 +430,7 @@ logger.info('charged', { orderId }) // the object is dropped from the line
 
 - `nodejs_compat` is required, because loggercf uses `AsyncLocalStorage` from `node:async_hooks`.
 - `loggerOptionsFromEnv(env)`, `tracedWorker`, `withLogging` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'` for a missing one).
-- `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error` or `fatal`. Any other value (including `DEBUG` and `silent`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value. There is no off switch; the quietest level is `fatal`.
+- `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error`, `fatal` or `silent`. `silent` writes nothing at all. Any other value (including `DEBUG` and `SILENT`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value.
 - To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to an `envMapping` getter on a `TracedEntrypoint` subclass.
 
 ```ts

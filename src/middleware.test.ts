@@ -1290,6 +1290,15 @@ describe('useLogger hook errors', () => {
     expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'string' })
   })
 
+  it("a level hook that returns 'silent' falls back to the default level: request.end is never muted", async () => {
+    const { end, warnings, app } = optionsApp({ level: () => 'silent' as never })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    expect(end()).toMatchObject({ level: 'INFO' })
+    expect(warnings()).toHaveLength(1)
+    expect(warnings()[0]).toMatchObject({ hook: 'level' })
+  })
+
   it('treats an async fields or endFields hook as a failure: no fields, one WARN each', async () => {
     const { entries, ends, warnings, app } = optionsApp({
       fields: (async () => ({ tenant: 't-1' })) as never,
