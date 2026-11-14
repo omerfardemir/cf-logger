@@ -853,24 +853,43 @@ describe('Default Logger from the Workers helpers', () => {
     expect(getLogger()).toBe(explicit)
   })
 
-  it('TracedEntrypoint registers its Root Logger the first time it is read', () => {
+  it('TracedEntrypoint registers its Root Logger when constructed', () => {
     const entries = _captureEntries()
-    const entrypoint = new TracedEntrypoint({} as any, {
+
+    class Entrypoint extends TracedEntrypoint {
+      scheduled() {
+        getLogger().info('scheduled, outside a Logging Context')
+      }
+    }
+
+    const entrypoint = new Entrypoint({} as any, {
       NAME: 'rpc-worker',
       ENVIRONMENT: 'staging',
       VERSION: '1.0.0',
     })
-    expect(getLogger()).not.toBe((entrypoint as any).rootLogger)
+    entrypoint.scheduled()
 
-    const root = (entrypoint as any).rootLogger
-    expect(getLogger()).toBe(root)
-
-    getLogger().info('plain RPC method')
+    expect(getLogger()).toBe((entrypoint as any).rootLogger)
     expect(entries[0]).toMatchObject({
       service: 'rpc-worker',
       environment: 'staging',
       version: '1.0.0',
     })
+    expect(entries[0]).not.toHaveProperty('traceId')
+  })
+
+  it('TracedEntrypoint registers an overridden rootLogger', () => {
+    const custom = createLogger({ service: 'custom-root' })
+
+    class Entrypoint extends TracedEntrypoint {
+      protected override get rootLogger() {
+        return custom
+      }
+    }
+
+    const entrypoint = new Entrypoint({} as any, { NAME: 'ignored' })
+    expect(getLogger()).toBe((entrypoint as any).rootLogger)
+    expect(getLogger()).toBe(custom)
   })
 
   it('tracedWorker() registers its Root Logger; Context Fields never reach the default', () => {
@@ -903,7 +922,8 @@ describe('Default Logger from the Workers helpers', () => {
 
     const explicit = createLogger({ service: 'explicit' })
     setDefaultLogger(explicit)
-    expect((a as any).rootLogger).toBe(first)
+    const again = new TracedEntrypoint({} as any, { NAME: 'first' })
+    expect((again as any).rootLogger).toBe(first)
 
     expect(getLogger()).toBe(explicit)
   })

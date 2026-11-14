@@ -154,9 +154,10 @@ let defaultLogger: Logger | undefined
  * returns outside a Logging Context (module scope, plain RPC methods, `scheduled`,
  * shared packages). `getLogger(service)` with a name keeps its standalone logger.
  *
- * Pass the Root Logger itself. It carries no Context Fields (those live in each
- * Logging Context), so per-request data cannot reach other work through it. A
- * `.child()` of it is accepted, but its bindings appear on every line logged
+ * Pass the Root Logger itself, not a logger taken from inside a Logging Context.
+ * It carries no Context Fields (those live in each Logging Context), so
+ * per-request data cannot reach other work through it. A `.child()` of it is
+ * accepted, but the fields passed to `.child()` appear on every line logged
  * outside a context, so they must be per-process data too.
  *
  * Replaces any default already set, including one `useLogger`, `TracedEntrypoint`,
@@ -198,7 +199,7 @@ export function registerDefaultLogger(logger: Logger): void {
  *   logger (built with `createLogger`) tagged with `service`.
  *
  * @template T - The type of user-defined log fields.
- * @param {string} [service] - Service name used for the standalone fallback logger.
+ * @param {string} [service] - Service name for a standalone logger, used instead of the Default Logger.
  * @returns {Logger<T>} The logger for the current context.
  *
  * @example

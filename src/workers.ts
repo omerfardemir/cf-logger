@@ -42,8 +42,7 @@ export type TracedServiceBinding<T> = {
 const rootLoggers = new Map<string, Logger>()
 
 /**
- * Get the isolate's Root Logger for these Logger Options, creating it once, and
- * register it as the Default Logger unless one is already set (first seen wins).
+ * Get the isolate's Root Logger for these Logger Options, creating it once.
  *
  * @param {LoggerOptions} options - Logger Options (usually from `loggerOptionsFromEnv`).
  * @returns {Logger} The cached Root Logger.
@@ -55,7 +54,6 @@ function rootLoggerFor(options: LoggerOptions): Logger {
     logger = createLogger(options)
     rootLoggers.set(key, logger)
   }
-  registerDefaultLogger(logger)
   return logger
 }
 
@@ -86,7 +84,9 @@ function rootLoggerFor(options: LoggerOptions): Logger {
  * ```
  */
 export function defaultLoggerFromEnv<E = Cloudflare.Env>(mapping?: EnvMapping<E>): Logger {
-  return rootLoggerFor(loggerOptionsFromEnv(workersEnv as E, mapping))
+  const logger = rootLoggerFor(loggerOptionsFromEnv(workersEnv as E, mapping))
+  registerDefaultLogger(logger)
+  return logger
 }
 
 /**
@@ -170,8 +170,13 @@ export class TracedSession<E = unknown> extends RpcTarget {
  *
  * Reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` from env by default.
  * Override the `envMapping` getter to read other vars or derive fields, or the
- * `loggerOptions` getter to build Logger Options yourself. The first `rootLogger`
- * read registers it as the Default Logger unless one is already set.
+ * `loggerOptions` getter to build Logger Options yourself.
+ *
+ * The constructor registers `rootLogger` as the Default Logger unless one is
+ * already set (first seen wins), so `getLogger()` in `scheduled()`, `queue()` or a
+ * plain RPC method logs with its `service`. It reads `rootLogger` before subclass
+ * fields are initialized: build `envMapping` / `loggerOptions` overrides from
+ * `this.env`, not from instance fields.
  *
  * @template E - The worker environment type.
  *
@@ -189,6 +194,15 @@ export class TracedSession<E = unknown> extends RpcTarget {
  * ```
  */
 export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
+  /**
+   * @param {ExecutionContext} ctx - The execution context.
+   * @param {E} env - The worker environment bindings.
+   */
+  constructor(ctx: ExecutionContext, env: E) {
+    super(ctx, env)
+    registerDefaultLogger(this.rootLogger)
+  }
+
   /**
    * Where `loggerOptions` reads each field from. Default: no overrides.
    *
@@ -208,8 +222,7 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
   }
 
   /**
-   * The isolate's Root Logger for `loggerOptions`, created once and shared. Also
-   * registered as the Default Logger unless one is already set (first seen wins).
+   * The isolate's Root Logger for `loggerOptions`, created once and shared.
    *
    * @returns {Logger} The Root Logger.
    */
