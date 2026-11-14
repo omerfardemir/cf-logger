@@ -18,6 +18,10 @@ _Avoid_: bindings, context, metadata
 The Context Field (`requestId`) that names one HTTP request in its Logging Context. The Hono middleware takes it from a configured source (a header such as `X-Request-Id` or `cf-ray`, or `c.var.requestId` from an earlier middleware) only when it passes validation, and generates one otherwise. `cf-ray`, when present, is also recorded as its own Context Field, `cfRay`.
 _Avoid_: correlation ID, trace ID (that is the Trace Context's)
 
+**Request Lines**:
+The lines the Hono middleware writes about one HTTP request itself: an optional `request.start`, and one `request.end` that records the outcome (`statusCode`, `duration`, `route`, and `err` when Hono caught an error) at a level chosen from it. `route` is the matched route pattern, not the concrete path; the query string is never on them.
+_Avoid_: access log, `request.error` (folded into `request.end`)
+
 **Root Logger**:
 The logger built once per process or isolate from Logger Options, carrying only per-process data (`service`, `environment`, `version`). It never holds per-unit-of-work data, because an isolate serves many requests concurrently.
 _Avoid_: base logger, factory

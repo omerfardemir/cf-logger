@@ -85,7 +85,7 @@ app.use(useLogger((c) => createLogger(loggerOptionsFromEnv(c.env)))) // a new Ro
 
 ### Per-request data goes in Context Fields
 
-Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `runWithLogger`, or call `setLoggerContext({ ... })` inside the Logging Context. Every later line in that context carries them, including `useLogger`'s `request.end` and lines from code that calls `getLogger()`. `useLogger` already adds `requestId`, and `cfRay` when the request has a `cf-ray` header.
+Pass `requestId`, `userId`, tenant, message id and similar data as `fields` to `runWithLogger`, or call `setLoggerContext({ ... })` inside the Logging Context. Every later line in that context carries them, including `useLogger`'s `request.end` and lines from code that calls `getLogger()`. `useLogger` already adds `requestId`, and `cfRay` when the request has a `cf-ray` header. In Hono, data known from the request alone can come from `useLogger`'s `fields` option, so `request.start` has it too (see [Request lines in Hono](#request-lines-in-hono)).
 
 ```ts
 import { Hono } from 'hono'
@@ -134,6 +134,38 @@ app.use(
 
 export default app
 ```
+
+### Request lines in Hono
+
+`useLogger` writes `request.start` and one `request.end` per request. `request.end` has `method`, `path` (never the query string), `route` (the matched pattern, such as `/users/:id`; group by it, not by `path`), `statusCode`, `duration`, and `err` when Hono caught an error. There is no `request.error` line: find failed requests by the level of `request.end` (`error` for a caught error or a 5xx, `warn` for a 4xx, `info` otherwise) or by `err`. Use the options instead of logging your own per-request summary line:
+
+```ts
+import { Hono } from 'hono'
+import { createLogger } from 'loggercf'
+import { useLogger } from 'loggercf/hono'
+
+const app = new Hono<{ Variables: { userId?: string } }>()
+app.use(
+  useLogger(createLogger({ service: 'api' }), {
+    requestStart: false, // default true; false: request.end only
+    fields: (c) => ({ tenant: c.req.header('x-tenant-id') }), // Context Fields: every line
+    endFields: (c) => ({ userId: c.get('userId') }), // request.end only, after the handlers
+    include: { userAgent: true, cf: true }, // userAgent and cf: { colo, country, asn }; off by default
+    // level: (status, err, c) => LogLevel, for request.end
+  }),
+)
+
+export default app
+```
+
+```ts wrong
+app.use(async (c, next) => {
+  await next()
+  c.var.logger.info({ status: c.res.status, url: c.req.url }, 'request done') // duplicates request.end, and logs the query string
+})
+```
+
+A `fields`, `endFields` or `level` option that throws does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`.
 
 ### Context helpers need a Logging Context
 
