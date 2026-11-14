@@ -18,6 +18,7 @@ import {
   type LogRecord,
   type Sink,
 } from './output'
+import { _resetEnvWarnings } from './env'
 
 const als = new AsyncLocalStorage<ALSStore>()
 
@@ -423,11 +424,12 @@ export function _captureLines(): string[] {
 }
 
 /**
- * Reset isolate-level state (standalone logger cache, one-time warning). Does not change the sink.
+ * Reset isolate-level state (standalone logger cache, one-time warnings). Does not change the sink.
  *
  * Used internally by tests to clear state between runs.
  */
 export function _reset(): void {
   _cache.clear()
   warnedOutsideContext = false
+  _resetEnvWarnings()
 }

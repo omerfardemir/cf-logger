@@ -25,6 +25,10 @@ _Avoid_: base logger, factory
 **Logger Options**:
 The per-process configuration a Root Logger is built from: service name, minimum level, environment, version.
 
+**Env Mapping**:
+Where each Logger Options field is read from in a Worker's (or process's) env: a var name or a function of env. Unmapped fields read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`.
+_Avoid_: env config, var map
+
 ### Tracing
 
 **Trace Context**:

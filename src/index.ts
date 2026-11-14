@@ -19,4 +19,5 @@ export {
   tracedFetch,
 } from './logger'
 export { loggerOptionsFromEnv } from './env'
-export type { TracedServiceBinding, SessionInit } from './workers'
+export type { EnvMapping, EnvSource } from './env'
+export type { TracedServiceBinding, SessionInit, TracedWorkerOptions } from './workers'

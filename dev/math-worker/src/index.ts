@@ -4,7 +4,7 @@ import type { MathService } from '../../services'
 
 interface Env {
   ENVIRONMENT: string
-  VERSION: string
+  CF_VERSION_METADATA: WorkerVersionMetadata
   NAME: string
   LOG_LEVEL: LogLevel
 }
@@ -31,4 +31,6 @@ class MathSession extends TracedSession<Env> implements MathService {
   }
 }
 
-export default tracedWorker(MathSession)
+export default tracedWorker(MathSession, {
+  env: { version: (env) => env.CF_VERSION_METADATA.tag || env.CF_VERSION_METADATA.id },
+})

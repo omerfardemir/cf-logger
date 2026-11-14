@@ -8,9 +8,10 @@ import {
   recordSpan,
   runWithLogger,
 } from './logger'
-import { loggerOptionsFromEnv } from './env'
+import { loggerOptionsFromEnv, type EnvMapping } from './env'
 
 export { loggerOptionsFromEnv } from './env'
+export type { EnvMapping, EnvSource } from './env'
 
 /**
  * What a caller hands a Traced Session: its Trace Carrier plus any Context
@@ -134,14 +135,19 @@ export class TracedSession<E = unknown> extends RpcTarget {
 /**
  * Base class for RPC worker entrypoints that build Traced Sessions by hand.
  *
- * Expects `env.NAME` and `env.LOG_LEVEL` by convention. Override the
- * `loggerOptions` getter for custom behavior.
+ * Reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` from env by default.
+ * Override the `envMapping` getter to read other vars or derive fields, or the
+ * `loggerOptions` getter to build Logger Options yourself.
  *
  * @template E - The worker environment type.
  *
  * @example
  * ```ts
  * export default class extends TracedEntrypoint<Env> {
+ *   protected override get envMapping(): EnvMapping<Env> {
+ *     return { version: (env) => env.CF_VERSION_METADATA?.id }
+ *   }
+ *
  *   session(init: SessionInit) {
  *     return new MySession(init, this.rootLogger, this.env)
  *   }
@@ -150,12 +156,21 @@ export class TracedSession<E = unknown> extends RpcTarget {
  */
 export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
   /**
-   * Logger Options derived from `env.NAME`, `env.LOG_LEVEL`, `env.ENVIRONMENT`, and `env.VERSION`.
+   * Where `loggerOptions` reads each field from. Default: no overrides.
+   *
+   * @returns {EnvMapping<E>} The per-field var name or derive function.
+   */
+  protected get envMapping(): EnvMapping<E> {
+    return {}
+  }
+
+  /**
+   * Logger Options from env through `envMapping` (see `loggerOptionsFromEnv`).
    *
    * @returns {LoggerOptions} The Logger Options.
    */
   protected get loggerOptions(): LoggerOptions {
-    return loggerOptionsFromEnv(this.env)
+    return loggerOptionsFromEnv(this.env, this.envMapping)
   }
 
   /**
@@ -169,13 +184,32 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
 }
 
 /**
+ * Options for `tracedWorker()`.
+ *
+ * @template E - The worker environment type.
+ */
+export interface TracedWorkerOptions<E = unknown> {
+  /** Where the Root Logger's options come from in env (see `loggerOptionsFromEnv`). */
+  env?: EnvMapping<E>
+}
+
+/**
+ * The env type of a `TracedSession` subclass.
+ *
+ * @template S - The `TracedSession` subclass.
+ */
+type SessionEnv<S> = S extends TracedSession<infer E> ? E : unknown
+
+/**
  * Create a `WorkerEntrypoint` class that auto-implements `session()` for
  * the given `TracedSession` subclass. Zero boilerplate.
  *
- * Expects `env.NAME` and `env.LOG_LEVEL` by convention.
+ * Reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` from env by default;
+ * pass `options.env` to read other vars or derive fields.
  *
  * @template S - The `TracedSession` subclass.
  * @param {new (...args: any[]) => S} SessionClass - The session class to wrap.
+ * @param {TracedWorkerOptions<SessionEnv<S>>} [options] - `env`: the Env Mapping for the Root Logger.
  * @returns A `WorkerEntrypoint` class with `session()` and `fetch()` implemented.
  *
  * @example
@@ -189,6 +223,11 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
  * // Zero-config entrypoint:
  * export default tracedWorker(BindSession)
  *
+ * // Read the version from a `version_metadata` binding:
+ * export default tracedWorker(BindSession, {
+ *   env: { version: (env) => env.CF_VERSION_METADATA?.id },
+ * })
+ *
  * // Or extend if you need scheduled(), etc.:
  * export default class extends tracedWorker(BindSession) {
  *   scheduled() { /* ... *\/ }
@@ -197,13 +236,18 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
  */
 export function tracedWorker<S extends TracedSession>(
   SessionClass: new (init: SessionInit, rootLogger: Logger, env: any) => S,
+  options: TracedWorkerOptions<SessionEnv<S>> = {},
 ): {
   new (...args: any[]): {
     session(init: SessionInit): S
     fetch(): Response | Promise<Response>
   }
 } {
-  return class extends TracedEntrypoint {
+  return class extends TracedEntrypoint<SessionEnv<S>> {
+    protected override get envMapping(): EnvMapping<SessionEnv<S>> {
+      return options.env ?? {}
+    }
+
     /**
      * Cloudflare Workers entrypoints must include a `fetch` method.
      *
