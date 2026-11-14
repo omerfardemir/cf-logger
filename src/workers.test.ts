@@ -1,7 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
+// The `env` that `import { env } from 'cloudflare:workers'` returns; tests set its vars.
+const workersEnv = vi.hoisted((): Record<string, unknown> => ({}))
+
 // Mock cloudflare:workers not available in Node/vitest
 vi.mock('cloudflare:workers', () => ({
+  env: workersEnv,
   RpcTarget: class RpcTarget {},
   WorkerEntrypoint: class WorkerEntrypoint {
     env: unknown
@@ -18,6 +22,7 @@ import {
   TracedEntrypoint,
   tracedWorker,
   loggerOptionsFromEnv,
+  defaultLoggerFromEnv,
 } from './workers'
 import type { EnvMapping, SessionInit, TracedServiceBinding } from './workers'
 import {
@@ -26,6 +31,7 @@ import {
   getLogger,
   _reset,
   createLogger,
+  setDefaultLogger,
   _captureEntries,
 } from './logger'
 import { resolveTrace, buildTraceparent } from './trace'
@@ -780,5 +786,125 @@ describe('traceFlags sampling', () => {
 
     const spanEntry = entries.find((e) => (e.message as string)?.includes('span.end'))
     expect(spanEntry).toBeDefined()
+  })
+})
+
+describe('Default Logger from the Workers helpers', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    _reset()
+    for (const key of Object.keys(workersEnv)) delete workersEnv[key]
+  })
+
+  it('defaultLoggerFromEnv() builds the Root Logger from env and registers it', () => {
+    const entries = _captureEntries()
+    Object.assign(workersEnv, {
+      NAME: 'cron-worker',
+      LOG_LEVEL: 'debug',
+      ENVIRONMENT: 'production',
+      VERSION: '4.0.0',
+    })
+
+    const logger = defaultLoggerFromEnv()
+    expect(getLogger()).toBe(logger)
+
+    getLogger().debug('outside any Logging Context')
+    expect(entries[0]).toMatchObject({
+      level: 'DEBUG',
+      service: 'cron-worker',
+      environment: 'production',
+      version: '4.0.0',
+    })
+    expect(entries[0]).not.toHaveProperty('traceId')
+  })
+
+  it('defaultLoggerFromEnv(mapping) reads vars through an Env Mapping', () => {
+    const entries = _captureEntries()
+    Object.assign(workersEnv, {
+      SERVICE_NAME: 'mapped',
+      CF_VERSION_METADATA: { id: 'v-id' },
+    })
+
+    defaultLoggerFromEnv<{ CF_VERSION_METADATA: { id: string } }>({
+      service: 'SERVICE_NAME',
+      version: (e) => e.CF_VERSION_METADATA.id,
+    })
+    getLogger().info('hello')
+
+    expect(entries[0]).toMatchObject({ service: 'mapped', version: 'v-id' })
+  })
+
+  it('defaultLoggerFromEnv() returns the same Root Logger as TracedEntrypoint for the same env', () => {
+    Object.assign(workersEnv, { NAME: 'shared' })
+    const entrypoint = new TracedEntrypoint({} as any, { NAME: 'shared' })
+
+    expect(defaultLoggerFromEnv()).toBe(defaultLoggerFromEnv())
+    expect(defaultLoggerFromEnv()).toBe((entrypoint as any).rootLogger)
+  })
+
+  it('defaultLoggerFromEnv() does not replace a default set with setDefaultLogger()', () => {
+    Object.assign(workersEnv, { NAME: 'from-env' })
+    const explicit = createLogger({ service: 'explicit' })
+    setDefaultLogger(explicit)
+
+    const logger = defaultLoggerFromEnv()
+
+    expect(logger).not.toBe(explicit)
+    expect(getLogger()).toBe(explicit)
+  })
+
+  it('TracedEntrypoint registers its Root Logger the first time it is read', () => {
+    const entries = _captureEntries()
+    const entrypoint = new TracedEntrypoint({} as any, {
+      NAME: 'rpc-worker',
+      ENVIRONMENT: 'staging',
+      VERSION: '1.0.0',
+    })
+    expect(getLogger()).not.toBe((entrypoint as any).rootLogger)
+
+    const root = (entrypoint as any).rootLogger
+    expect(getLogger()).toBe(root)
+
+    getLogger().info('plain RPC method')
+    expect(entries[0]).toMatchObject({
+      service: 'rpc-worker',
+      environment: 'staging',
+      version: '1.0.0',
+    })
+  })
+
+  it('tracedWorker() registers its Root Logger; Context Fields never reach the default', () => {
+    const entries = _captureEntries()
+
+    class TestSession extends TracedSession {
+      hello() {
+        return this.traced(() => this.logger.info('inside'))
+      }
+    }
+
+    const instance = new (tracedWorker(TestSession))(undefined, { NAME: 'bind' })
+    instance.session({ fields: { requestId: 'req-1' } }).hello()
+    getLogger().info('outside')
+
+    expect(entries.find((e) => e.message === 'inside')).toMatchObject({ requestId: 'req-1' })
+    const outside = entries.find((e) => e.message === 'outside')!
+    expect(outside).toMatchObject({ service: 'bind' })
+    expect(outside).not.toHaveProperty('requestId')
+    expect(outside).not.toHaveProperty('traceId')
+  })
+
+  it('first seen wins, and setDefaultLogger() overrides a registered default', () => {
+    const a = new TracedEntrypoint({} as any, { NAME: 'first' })
+    const b = new TracedEntrypoint({} as any, { NAME: 'second' })
+    const first = (a as any).rootLogger
+    expect((b as any).rootLogger).not.toBe(first)
+
+    expect(getLogger()).toBe(first)
+
+    const explicit = createLogger({ service: 'explicit' })
+    setDefaultLogger(explicit)
+    expect((a as any).rootLogger).toBe(first)
+
+    expect(getLogger()).toBe(explicit)
   })
 })

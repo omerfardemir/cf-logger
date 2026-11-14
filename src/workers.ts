@@ -1,4 +1,4 @@
-import { RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
+import { RpcTarget, WorkerEntrypoint, env as workersEnv } from 'cloudflare:workers'
 import type { LogFields, Logger, LoggerOptions, TraceCarrier } from './types'
 import {
   createLogger,
@@ -6,6 +6,7 @@ import {
   getTraceCarrier,
   getTraceContext,
   recordSpan,
+  registerDefaultLogger,
   runWithLogger,
 } from './logger'
 import { loggerOptionsFromEnv, type EnvMapping } from './env'
@@ -41,7 +42,8 @@ export type TracedServiceBinding<T> = {
 const rootLoggers = new Map<string, Logger>()
 
 /**
- * Get the isolate's Root Logger for these Logger Options, creating it once.
+ * Get the isolate's Root Logger for these Logger Options, creating it once, and
+ * register it as the Default Logger unless one is already set (first seen wins).
  *
  * @param {LoggerOptions} options - Logger Options (usually from `loggerOptionsFromEnv`).
  * @returns {Logger} The cached Root Logger.
@@ -53,7 +55,38 @@ function rootLoggerFor(options: LoggerOptions): Logger {
     logger = createLogger(options)
     rootLoggers.set(key, logger)
   }
+  registerDefaultLogger(logger)
   return logger
+}
+
+/**
+ * The isolate's Root Logger, built from the Worker's `env` (read through
+ * `import { env } from 'cloudflare:workers'`, so it works at module scope and
+ * anywhere without a handler's `env`), and registered as the Default Logger.
+ *
+ * Reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` by default; pass an Env
+ * Mapping to read other vars or derive fields (see `loggerOptionsFromEnv`). The
+ * Root Logger is created once per Logger Options and shared with `TracedEntrypoint`
+ * and `tracedWorker`. It becomes the Default Logger unless one is already set
+ * (first seen wins); `setDefaultLogger()` always replaces it.
+ *
+ * @template E - The worker environment type.
+ * @param {EnvMapping<E>} [mapping] - Per-field var name or derive function.
+ * @returns {Logger} The Root Logger.
+ *
+ * @example
+ * ```ts
+ * import { getLogger } from 'loggercf'
+ * import { useLogger } from 'loggercf/hono'
+ * import { defaultLoggerFromEnv } from 'loggercf/workers'
+ *
+ * const logger = defaultLoggerFromEnv({ version: (env) => env.CF_VERSION_METADATA.id })
+ * app.use(useLogger(logger))
+ * getLogger().info('module scope') // service, environment, version from env
+ * ```
+ */
+export function defaultLoggerFromEnv<E = Cloudflare.Env>(mapping?: EnvMapping<E>): Logger {
+  return rootLoggerFor(loggerOptionsFromEnv(workersEnv as E, mapping))
 }
 
 /**
@@ -137,7 +170,8 @@ export class TracedSession<E = unknown> extends RpcTarget {
  *
  * Reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` from env by default.
  * Override the `envMapping` getter to read other vars or derive fields, or the
- * `loggerOptions` getter to build Logger Options yourself.
+ * `loggerOptions` getter to build Logger Options yourself. The first `rootLogger`
+ * read registers it as the Default Logger unless one is already set.
  *
  * @template E - The worker environment type.
  *
@@ -174,7 +208,8 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
   }
 
   /**
-   * The isolate's Root Logger for `loggerOptions`, created once and shared.
+   * The isolate's Root Logger for `loggerOptions`, created once and shared. Also
+   * registered as the Default Logger unless one is already set (first seen wins).
    *
    * @returns {Logger} The Root Logger.
    */
