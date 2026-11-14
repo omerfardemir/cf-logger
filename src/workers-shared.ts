@@ -9,6 +9,7 @@ import {
   registerDefaultLogger,
   runWithLogger,
 } from './logger'
+import { loggerOptionsFromEnv, type EnvMapping } from './env'
 
 /**
  * Root Loggers keyed by their Logger Options, one per isolate.
@@ -24,7 +25,7 @@ const rootLoggers = new Map<string, Logger>()
  * @param {LoggerOptions} options - Logger Options (usually from `loggerOptionsFromEnv`).
  * @returns {Logger} The cached Root Logger.
  */
-export function rootLoggerFor(options: LoggerOptions): Logger {
+export function cachedRootLogger(options: LoggerOptions): Logger {
   const key = JSON.stringify([options.service, options.level, options.environment, options.version])
   let logger = rootLoggers.get(key)
   if (!logger) {
@@ -32,6 +33,17 @@ export function rootLoggerFor(options: LoggerOptions): Logger {
     rootLoggers.set(key, logger)
   }
   return logger
+}
+
+/**
+ * The isolate's cached Root Logger for a Worker env read through an Env Mapping.
+ *
+ * @param {unknown} env - The Worker's env.
+ * @param {EnvMapping} [mapping] - The Env Mapping.
+ * @returns {Logger} The cached Root Logger.
+ */
+export function envRootLogger(env: unknown, mapping: EnvMapping<any> | undefined): Logger {
+  return cachedRootLogger(loggerOptionsFromEnv(env, mapping))
 }
 
 /**
@@ -85,6 +97,68 @@ export function defineMethod(target: object, name: string, fn: Method): void {
     enumerable: false,
     configurable: true,
   })
+}
+
+/**
+ * The methods JSRPC can see on a class: functions on its prototype chain below
+ * `base` (`WorkerEntrypoint.prototype`, `DurableObject.prototype` or
+ * `WorkflowEntrypoint.prototype`), nearest definition first, without `constructor`,
+ * accessors, or a method an accessor or field-like value shadows.
+ *
+ * @param {Function} Class - The class.
+ * @param {object} base - The runtime base class's prototype, where the walk stops.
+ * @returns {Map<string, Method>} Method name to the class's implementation.
+ */
+export function prototypeMethods(Class: Function, base: object): Map<string, Method> {
+  const methods = new Map<string, Method>()
+  const seen = new Set<string>(['constructor'])
+  for (
+    let proto: object | null = Class.prototype;
+    proto && proto !== base && proto !== Object.prototype;
+    proto = Object.getPrototypeOf(proto)
+  ) {
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (seen.has(name)) continue
+      seen.add(name)
+      const { value } = Object.getOwnPropertyDescriptor(proto, name)!
+      if (typeof value === 'function') methods.set(name, value as Method)
+    }
+  }
+  return methods
+}
+
+/**
+ * The double-wrap guards shared by `withLogging()` and `withWorkflow()`: a class the
+ * helper already returned is accepted again only with the same options, and a
+ * subclass of one is rejected.
+ *
+ * @template O - The helper's options.
+ * @param {Function} Class - The class being wrapped.
+ * @param {WeakMap<object, O>} wrapped - The classes the helper returned, with their options.
+ * @param {(previous: O) => boolean} sameAs - Whether the new options match a class's.
+ * @param {string} where - The helper call, for error messages (`withLogging(Name)`).
+ * @returns {boolean} `true` when `Class` is already wrapped with the same options.
+ */
+export function alreadyWrapped<O>(
+  Class: Function,
+  wrapped: WeakMap<object, O>,
+  sameAs: (previous: O) => boolean,
+  where: string,
+): boolean {
+  const helper = where.slice(0, where.indexOf('('))
+  const previous = wrapped.get(Class)
+  if (previous !== undefined) {
+    if (sameAs(previous)) return true
+    throw new TypeError(`${where}: ${Class.name} is already wrapped with other options`)
+  }
+  for (let base = Object.getPrototypeOf(Class); base; base = Object.getPrototypeOf(base)) {
+    if (wrapped.has(base)) {
+      throw new TypeError(
+        `${where}: ${Class.name} extends a class already wrapped by ${helper}(); wrap one of them, not both`,
+      )
+    }
+  }
+  return false
 }
 
 /**

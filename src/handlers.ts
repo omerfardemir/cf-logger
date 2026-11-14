@@ -18,12 +18,14 @@ import {
 } from 'cloudflare:workers'
 import type { LogFields, Logger } from './types'
 import { captureLoggingContext, setLoggerContext, withSpan } from './logger'
-import { loggerOptionsFromEnv, type EnvMapping } from './env'
+import type { EnvMapping } from './env'
 import {
+  alreadyWrapped,
   carrierFromBody,
   defineMethod,
+  envRootLogger,
+  prototypeMethods,
   registerRootLogger,
-  rootLoggerFor,
   runLogged,
   sameEnvMapping,
   type Method,
@@ -40,15 +42,15 @@ export interface HandlerOptions<E = Cloudflare.Env> {
 }
 
 /**
- * The isolate's Root Logger for `env` and an Env Mapping, registered as the Default
- * Logger unless one is already set (first seen wins).
+ * The isolate's cached Root Logger for `env` and an Env Mapping, registered as the
+ * Default Logger unless one is already set (first seen wins).
  *
  * @param {unknown} env - The Worker's env.
  * @param {EnvMapping} [mapping] - The Env Mapping.
  * @returns {Logger} The Root Logger.
  */
-function rootLoggerFromEnv(env: unknown, mapping: EnvMapping<any> | undefined): Logger {
-  const logger = rootLoggerFor(loggerOptionsFromEnv(env, mapping))
+function registeredEnvRootLogger(env: unknown, mapping: EnvMapping<any> | undefined): Logger {
+  const logger = envRootLogger(env, mapping)
   registerRootLogger(() => logger)
   return logger
 }
@@ -101,7 +103,7 @@ export function withScheduled<E = Cloudflare.Env, R = void | Promise<void>>(
   return function scheduled(this: unknown, controller, env, ctx) {
     return runLogged(
       {
-        logger: rootLoggerFromEnv(env, mapping),
+        logger: registeredEnvRootLogger(env, mapping),
         fields: { cron: controller.cron, scheduledTime: controller.scheduledTime },
       },
       () => handler.call(this, controller, env, ctx),
@@ -162,7 +164,7 @@ export function withQueueMessage<R, E = Cloudflare.Env>(
 ): R {
   return runLogged(
     {
-      logger: rootLoggerFromEnv(workersEnv, options.env),
+      logger: registeredEnvRootLogger(workersEnv, options.env),
       ...carrierFromBody(message.body),
       fields: { queue: batch.queue, messageId: message.id, attempts: message.attempts },
     },
@@ -233,19 +235,10 @@ export function withWorkflow<C extends WorkflowClass>(
   if (!(Class.prototype instanceof WorkflowEntrypoint)) {
     throw new TypeError(`${where}: ${name || 'the class'} does not extend WorkflowEntrypoint`)
   }
-  const previous = workflowClasses.get(Class)
-  if (previous) {
-    if (sameEnvMapping(previous.env, options.env)) return Class
-    throw new TypeError(`${where}: ${name} is already wrapped with other options`)
+  if (alreadyWrapped(Class, workflowClasses, (p) => sameEnvMapping(p.env, options.env), where)) {
+    return Class
   }
-  for (let base = Object.getPrototypeOf(Class); base; base = Object.getPrototypeOf(base)) {
-    if (workflowClasses.has(base)) {
-      throw new TypeError(
-        `${where}: ${name} extends a class already wrapped by withWorkflow(); wrap one of them, not both`,
-      )
-    }
-  }
-  const run = ownRun(Class)
+  const run = prototypeMethods(Class, WorkflowEntrypoint.prototype).get('run')
   if (!run) {
     throw new TypeError(
       `${where}: ${name} has no run() method; define run as a method, not a field`,
@@ -254,13 +247,13 @@ export function withWorkflow<C extends WorkflowClass>(
 
   const mapping = options.env
   /** The Root Logger for one Workflow instance, from its env. */
-  const rootLoggerOf = (target: object) =>
-    rootLoggerFor(loggerOptionsFromEnv((target as { env: unknown }).env, mapping as EnvMapping))
+  const instanceRootLogger = (target: object) =>
+    envRootLogger((target as { env: unknown }).env, mapping)
 
   const Logged = class extends (Class as WorkflowClass) {
     constructor(ctx: ExecutionContext, env: unknown) {
       super(ctx, env)
-      registerRootLogger(() => rootLoggerOf(this))
+      registerRootLogger(() => instanceRootLogger(this))
     }
   }
   Object.defineProperty(Logged, 'name', { value: name, configurable: true })
@@ -276,7 +269,7 @@ export function withWorkflow<C extends WorkflowClass>(
     const fields: LogFields =
       typeof event?.instanceId === 'string' ? { workflowInstanceId: event.instanceId } : {}
     return runLogged(
-      { logger: rootLoggerOf(this), ...carrierFromBody(event?.payload), fields },
+      { logger: instanceRootLogger(this), ...carrierFromBody(event?.payload), fields },
       () => run.apply(this, args),
     )
   }
@@ -284,25 +277,6 @@ export function withWorkflow<C extends WorkflowClass>(
 
   workflowClasses.set(Logged, { env: mapping })
   return Logged as unknown as C
-}
-
-/**
- * The `run` method a Workflow class defines, nearest first, below
- * `WorkflowEntrypoint.prototype`.
- *
- * @param {WorkflowClass} Class - The Workflow class.
- * @returns {Method | undefined} The method, or `undefined` when no class defines one.
- */
-function ownRun(Class: WorkflowClass): Method | undefined {
-  for (
-    let proto: object | null = Class.prototype;
-    proto && proto !== WorkflowEntrypoint.prototype && proto !== Object.prototype;
-    proto = Object.getPrototypeOf(proto)
-  ) {
-    const descriptor = Object.getOwnPropertyDescriptor(proto, 'run')
-    if (descriptor) return typeof descriptor.value === 'function' ? descriptor.value : undefined
-  }
-  return undefined
 }
 
 /**
