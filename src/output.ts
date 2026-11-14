@@ -1,4 +1,3 @@
-import { functionText, isPlainObject } from './route'
 import type { LogFields, TraceContext } from './types'
 
 /**
@@ -20,6 +19,29 @@ export interface Sink {
 export interface RecordContext {
   trace: TraceContext
   fields: LogFields
+}
+
+/**
+ * Whether `value` is a plain object literal (`{}`, `Object.create(null)`),
+ * as opposed to an array, a class instance, a `Date`, a `Map`...
+ *
+ * @param {unknown} value - Any value.
+ * @returns {boolean} `true` when its prototype is `Object.prototype` or `null`.
+ */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/**
+ * How a function appears in a log line: `[Function: name]`.
+ *
+ * @param {{ name: string }} fn - The function.
+ * @returns {string} Its text.
+ */
+export function functionText(fn: { name: string }): string {
+  return `[Function: ${fn.name || 'anonymous'}]`
 }
 
 /** How many `cause` levels are serialized before the chain is cut off. */

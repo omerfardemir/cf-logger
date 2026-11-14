@@ -1,4 +1,4 @@
-import type { LogRecord } from './output'
+import { functionText, isPlainObject, type LogRecord } from './output'
 
 /**
  * Record keys a log call's object arguments cannot set: their values for these
@@ -38,16 +38,6 @@ export interface RoutedArgs {
   args?: unknown[]
 }
 
-/**
- * Whether `value` is a plain object literal (`{}`, `Object.create(null)`),
- * as opposed to an array, a class instance, a `Date`, a `Map`...
- */
-export function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null) return false
-  const proto = Object.getPrototypeOf(value)
-  return proto === Object.prototype || proto === null
-}
-
 /** Values `console.log('a', 'b', 3)` would print as words: appended to the message. */
 function isPrimitive(
   value: unknown,
@@ -56,16 +46,6 @@ function isPrimitive(
     value === null ||
     (typeof value !== 'object' && typeof value !== 'function' && typeof value !== 'symbol')
   )
-}
-
-/**
- * How a function appears in a log line: `[Function: name]`.
- *
- * @param {{ name: string }} fn - The function.
- * @returns {string} Its text.
- */
-export function functionText(fn: { name: string }): string {
-  return `[Function: ${fn.name || 'anonymous'}]`
 }
 
 /** Sentinel: the placeholder could not render its argument. */
@@ -163,14 +143,15 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
  *
  * Each `%` sequence takes the next argument in order. When it cannot print
  * that argument (`%d` with `null`, `%j` with `undefined`, `%s %d %i %f` with
- * an object or array, `%d %i %f` with a function, `%j %o %O` with an `Error` or a value JSON cannot write
- * other than a cycle, an unknown sequence such as `% ` or `%c`), the sequence
- * stays in the text and the argument is returned in `unprinted` instead.
- * `%%` becomes `%` only when there are arguments, like `console.log`.
+ * an object or array, `%d %i %f` with a function, `%j %o %O` with an `Error`
+ * or a value JSON cannot write other than a cycle, an unknown sequence such
+ * as `% ` or `%c`), the sequence stays in the text and the argument is
+ * returned in `unprinted` instead. `%%` becomes `%` only when there are
+ * arguments, like `console.log`.
  *
  * @param {string} template - The message template.
  * @param {readonly unknown[]} args - The arguments after the template.
- * @returns The formatted message, and every argument it did not print, in call order.
+ * @returns {{ message: string, unprinted: unknown[] }} The formatted message, and every argument it did not print, in call order.
  */
 export function formatMessage(
   template: string,
@@ -179,7 +160,7 @@ export function formatMessage(
   if (args.length === 0 || !template.includes('%'))
     return { message: template, unprinted: [...args] }
 
-  const kept: unknown[] = []
+  const unprinted: unknown[] = []
   let message = ''
   let last = 0
   let next = 0
@@ -196,7 +177,7 @@ export function formatMessage(
     const value = args[next++]
     const text = render(code, value)
     if (text === UNRENDERED) {
-      kept.push(value)
+      unprinted.push(value)
       continue
     }
     message += template.slice(last, i) + text
@@ -204,7 +185,8 @@ export function formatMessage(
     i++
   }
   message += template.slice(last)
-  return { message, unprinted: [...kept, ...args.slice(next)] }
+  unprinted.push(...args.slice(next))
+  return { message, unprinted }
 }
 
 /**
