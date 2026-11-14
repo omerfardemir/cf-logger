@@ -12,23 +12,7 @@ import {
 } from './logger'
 import { tracedFetch } from './fetch'
 import { buildTraceparent } from './trace'
-import type { Logger } from './types'
-
-/** Throws, as a hand-written Logger's method might. */
-const loggerBroke = (): never => {
-  throw new Error('logger broke')
-}
-
-/** A hand-written Logger whose every level throws, and whose `child` is itself. */
-const brokenLogger: Logger = {
-  trace: loggerBroke,
-  debug: loggerBroke,
-  info: loggerBroke,
-  warn: loggerBroke,
-  error: loggerBroke,
-  fatal: loggerBroke,
-  child: () => brokenLogger,
-}
+import { brokenLogger } from './test-helpers'
 
 describe('getLogger outside ALS context', () => {
   beforeEach(() => {

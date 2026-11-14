@@ -11,6 +11,7 @@ import {
   _reset,
 } from './logger'
 import { nodeSink, workersSink, serializeError, stringifyRecord, type Sink } from './output'
+import { messageAfterLevel } from './test-helpers'
 
 const TRACEPARENT = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
 
@@ -277,7 +278,8 @@ const normalizeAll = (line: string) =>
 /**
  * Lines written for the scenario below by the pino-based logger (main at
  * 15a214a, pino 10), captured by running the same calls against that build.
- * Key order included: the internal core must match.
+ * Key order included: the internal core must match, except that it writes
+ * `message` right after `level` (`messageAfterLevel()`).
  */
 const BASELINE_LINES = [
   String.raw`{"time":"<t>","level":"INFO","service":"svc","environment":"test","version":"1.0.0","region":"eu","message":"outside"}`,
@@ -323,7 +325,7 @@ describe('same lines as the pino-based logger', () => {
         }).catch(() => {})
       },
     )
-    expect(lines.map(normalizeAll)).toEqual(BASELINE_LINES)
+    expect(lines.map(normalizeAll)).toEqual(BASELINE_LINES.map(messageAfterLevel))
   })
 })
 

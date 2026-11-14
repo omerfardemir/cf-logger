@@ -621,13 +621,56 @@ function errorGraph(levels: number, width: number): Error {
   return next!
 }
 
-/** An `AggregateError` holding `inner` 1,001 times, where `inner`'s cause loops back to it. */
-const loopsBack = (inner: Error) => {
+/**
+ * An `AggregateError` holding one inner Error 1,001 times, where that
+ * Error's cause loops back to it.
+ *
+ * @param makeInner - Builds the inner Error, given the root to use as its `cause`.
+ */
+const loopsBack = (makeInner: (root: AggregateError) => Error) => {
   const root = new AggregateError([], 'root')
-  inner.cause = root
+  const inner = makeInner(root)
   root.errors.push(...Array.from({ length: 1001 }, () => inner))
   return root
 }
+
+/**
+ * `count` copies of a cycle that one copy of an Error cannot show right
+ * everywhere: `x -> z -> x`, and `y -> z`, held by the root as `p<i>: x` and
+ * `q<i>: y`. Under `x`, the cause of `z` is `"[Circular]"`; under `y` it is
+ * `x`, so `z` is serialized again there, while that fits its budget.
+ *
+ * @param count - How many copies.
+ * @param stack - The `stack` of each Error.
+ * @param zProps - Own properties for each `z`.
+ */
+function crossed(count: number, stack: string, zProps: Record<string, unknown> = {}): Error {
+  const root = new Error('root') as Error & Record<string, unknown>
+  for (let i = 0; i < count; i++) {
+    const z = Object.assign(new Error('z'), zProps)
+    const x = new Error('x', { cause: z })
+    const y = new Error('y', { cause: z })
+    z.cause = x
+    for (const error of [x, y, z]) error.stack = stack
+    root[`p${i}`] = x
+    root[`q${i}`] = y
+  }
+  return root
+}
+
+/**
+ * How many `y -> z` of a serialized `crossed()` got a copy of `z` of their
+ * own, which shows `x` as its cause, instead of the copy made under `x`,
+ * which shows `"[Circular]"` there.
+ *
+ * @param out - The serialized root.
+ * @param count - How many copies `crossed()` made.
+ */
+const ownCopies = (out: unknown, count: number) =>
+  Array.from(
+    { length: count },
+    (_, i) => (out as Record<string, { cause: { cause: unknown } }>)[`q${i}`].cause.cause,
+  ).filter((cause) => cause !== '[Circular]').length
 
 describe('an Error is serialized once per line', () => {
   beforeEach(() => _reset())
@@ -698,14 +741,18 @@ describe('an Error is serialized once per line', () => {
     expect(JSON.parse(lines[0]).logError).toBeUndefined()
   })
 
-  it('a wide Error whose cause loops back, 1,001 times: serialized again only within a budget', () => {
+  it('a wide Error whose cause loops back, 1,001 times: one copy, written again within the budget', () => {
     const lines: string[] = []
     _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
-    const inner = new AggregateError(
-      Array.from({ length: 100_000 }, () => 1),
-      'inner',
+    const root = loopsBack(
+      (cause) =>
+        new AggregateError(
+          Array.from({ length: 100_000 }, () => 1),
+          'inner',
+          { cause },
+        ),
     )
-    const ms = elapsed(() => createLogger({ service: 'svc' }).error(loopsBack(inner)))
+    const ms = elapsed(() => createLogger({ service: 'svc' }).error(root))
     expect(ms).toBeLessThan(500)
     expect(lines[0].length).toBeLessThan(1_000_000)
     const errors = JSON.parse(lines[0]).err.errors as unknown[]
@@ -717,13 +764,48 @@ describe('an Error is serialized once per line', () => {
   it('an Error with 10,000 own properties whose cause loops back, 1,001 times: the same', () => {
     const lines: string[] = []
     _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
-    const inner = Object.assign(new Error('inner'), wide(10_000))
-    const ms = elapsed(() => createLogger({ service: 'svc' }).error(loopsBack(inner)))
+    const root = loopsBack((cause) => Object.assign(new Error('inner', { cause }), wide(10_000)))
+    const ms = elapsed(() => createLogger({ service: 'svc' }).error(root))
     expect(ms).toBeLessThan(500)
     expect(lines[0].length).toBeLessThan(1_000_000)
     const errors = JSON.parse(lines[0]).err.errors as unknown[]
     expect(errors[0]).toMatchObject({ message: 'inner', k9999: 9_999, cause: '[Circular]' })
     expect(errors.at(-1)).toBe('[Repeated]')
+  })
+
+  it('a copy cut off at the same Errors above it is reused, and spends nothing', () => {
+    // The cause of each kid is the root: above it, at the same depth, every time.
+    const root = new AggregateError([], 'root')
+    const kids = Array.from({ length: 3000 }, (_, i) => {
+      const kid = new Error(`k${i}`, { cause: root })
+      kid.stack = 'short'
+      return kid
+    })
+    root.errors.push(...kids, ...kids, crossed(1, 'short'))
+    const out = serializeError(root) as { errors: unknown[] }
+    expect(out.errors[3000]).toBe(out.errors[0]) // the same copy, so the walk sees a repeat
+    expect(out.errors[5999]).toBe(out.errors[2999])
+    // So the budget is still there for the cycle that needs a copy of its own.
+    expect(ownCopies(out.errors[6000], 1)).toBe(1)
+  })
+
+  it('serializing Errors again spends one budget, summed over every copy', () => {
+    // Each copy of z: 104 values (type, message, stack, k0..k99, cause) and 328 characters.
+    const out = serializeError(crossed(1001, 's', wide(100)))
+    expect(ownCopies(out, 1001)).toBe(Math.floor(10_000 / 104))
+  })
+
+  it('a copy is charged the digits of its BigInt when it is serialized again', () => {
+    // Each copy of z: 5 values (type, message, stack, b, cause) and 1,040 characters.
+    const out = serializeError(crossed(500, 's', { b: 10n ** 1000n }))
+    expect(ownCopies(out, 500)).toBe(Math.floor(65_536 / 1040))
+  })
+
+  it('a stack under 1,024 characters is charged when serialized again; a longer one is not', () => {
+    // With 200-character stacks each copy of z costs 237 characters: 276 of 500 fit.
+    expect(ownCopies(serializeError(crossed(500, 's'.repeat(200))), 500)).toBe(276)
+    // A long stack is bounded as a repeated long string instead: each copy costs 37.
+    expect(ownCopies(serializeError(crossed(500, 's'.repeat(1100))), 500)).toBe(500)
   })
 
   it('an AggregateError writes its errors, nested like cause', () => {
@@ -1018,6 +1100,9 @@ describe('a placeholder that gave up spends nothing', () => {
   })
 })
 
+/** How many times `text` is in `line`. */
+const copies = (line: string, text: string) => line.split(text).length - 1
+
 describe('long strings in the message count against the budget', () => {
   beforeEach(() => _reset())
 
@@ -1052,13 +1137,30 @@ describe('long strings in the message count against the budget', () => {
     // Untyped: an `Error`, then a number where the types expect the message.
     const error = createLogger({ service: 'svc' }).error as (...args: unknown[]) => void
     error(new Error(big), 1, ...Array(2000).fill(big))
-    // One copy in the message, one in `err.message`, one in `err.stack`, plus the budget.
-    expect(lines[0].length).toBeLessThan(3.5 * big.length)
+    // Three copies: in the message, `err.message` and `err.stack`. 100 kB is more than the whole
+    // budget, so no word adds a fourth; the rest is 2,000 "[Repeated]" and the stack's frames.
+    expect(copies(lines[0], big)).toBe(3)
+    expect(lines[0].length).toBeLessThan(3 * big.length + 40_000)
     const line = JSON.parse(lines[0])
     expect(line.message).toBe(`${big} 1`)
     expect(line.err.message).toBe(big)
     expect(line.args).toHaveLength(2000)
+    expect(line.args[0]).toBe('[Repeated]')
     expect(line.args.at(-1)).toBe('[Repeated]')
+  })
+
+  it('a long string shorter than the budget left is put in again at most twice', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    const long = 'c'.repeat(30_000) // twice is 60,000 characters, of 65,536
+    const error = createLogger({ service: 'svc' }).error as (...args: unknown[]) => void
+    error(new Error(long), 1, ...Array(2000).fill(long))
+    const line = JSON.parse(lines[0])
+    expect(line.message).toBe(`${long} 1 ${long} ${long}`)
+    expect(line.args).toHaveLength(1998)
+    expect(line.args[0]).toBe('[Repeated]')
+    // The three in the message, plus `err.message` and `err.stack`.
+    expect(copies(lines[0], long)).toBe(5)
   })
 
   it('a long string is printed again while it fits', () => {
@@ -1067,5 +1169,153 @@ describe('long strings in the message count against the budget', () => {
     createLogger({ service: 'svc' }).info('%s %j', long, long, long)
     expect(entries[0].message).toBe(`${long} '${long}' ${long}`)
     expect(entries[0].args).toBeUndefined()
+  })
+})
+
+/** Log through `log` once, and return the line and how long it took. */
+const timed = (log: (logger: Logger) => void) => {
+  let line = ''
+  _setSink({ write: (record) => (line = stringifyRecord(record)) })
+  const ms = elapsed(() => log(createLogger({ service: 'svc' })))
+  return { line, ms }
+}
+
+/** A named function, written as `[Function: named]`. */
+function named() {}
+
+/** A function whose `name` is 100,000 characters. */
+const longNamed = () => Object.defineProperty(() => 0, 'name', { value: 'f'.repeat(100_000) })
+
+describe('the text of a BigInt, a function or a symbol counts against the budget', () => {
+  beforeEach(() => _reset())
+
+  it.each([
+    ['a BigInt of 100,000 digits', () => 10n ** 100_000n],
+    ['a symbol with a 100,000-character description', () => Symbol('d'.repeat(100_000))],
+    ['a function with a 100,000-character name', longNamed],
+  ])('%s on an Error whose cause loops back, 1,001 times: the line is bounded', (_kind, make) => {
+    const value = make()
+    const { line, ms } = timed((log) =>
+      log.error(loopsBack((cause) => Object.assign(new Error('inner', { cause }), { b: value }))),
+    )
+    expect(ms).toBeLessThan(500)
+    expect(line.length).toBeLessThan(1_000_000)
+    const errors = JSON.parse(line).err.errors as { b: unknown }[]
+    expect(errors[0].b).toBe(
+      typeof value === 'function' ? `[Function: ${value.name}]` : String(value),
+    )
+    expect(errors.at(-1)).toBe('[Repeated]')
+  })
+
+  it('one object holding a BigInt of 20,000 digits, 10,000 times: the line is bounded', () => {
+    const big = 10n ** 20_000n
+    const shared = { b: big }
+    const { line, ms } = timed((log) =>
+      log.info({ a: Array.from({ length: 10_000 }, () => shared) }, 'm'),
+    )
+    expect(ms).toBeLessThan(500)
+    expect(line.length).toBeLessThan(1_000_000)
+    const a = JSON.parse(line).a as unknown[]
+    expect(a[0]).toEqual({ b: String(big) })
+    expect(a.at(-1)).toBe('[Repeated]')
+  })
+
+  it.each([
+    ['a BigInt of 20,000 digits', () => 10n ** 20_000n],
+    ['a symbol with a 20,000-character description', () => Symbol('d'.repeat(20_000))],
+    ['a function with a 100,000-character name', longNamed],
+  ])('%s, 10,000 times: a repeat, like a long string', (_kind, make) => {
+    const value = make()
+    const { line, ms } = timed((log) => log.info({ a: Array(10_000).fill(value) }, 'm'))
+    expect(ms).toBeLessThan(500)
+    expect(line.length).toBeLessThan(1_000_000)
+    const a = JSON.parse(line).a as unknown[]
+    expect(a[0]).toBe(typeof value === 'function' ? `[Function: ${value.name}]` : String(value))
+    expect(a.at(-1)).toBe('[Repeated]')
+  })
+
+  it('a BigInt of 2,000 digits 2,000 times as words and under %d: a repeat, like a long string', () => {
+    const big = 10n ** 2000n
+    for (const template of ['m', '%d '.repeat(2000)]) {
+      const { line } = timed((log) => log.info(template, ...Array(2000).fill(big)))
+      expect(line.length).toBeLessThan(1_000_000)
+      const { message, args } = JSON.parse(line)
+      expect(message.startsWith(template === 'm' ? `m ${big}` : `${big} `)).toBe(true)
+      expect(args[0]).toBe(String(big)) // nothing is dropped
+      expect(args.at(-1)).toBe('[Repeated]')
+    }
+  })
+
+  it('a short BigInt, function or symbol repeats freely', () => {
+    const sym = Symbol('s')
+    const line = JSON.parse(
+      lineFor({ a: Array.from({ length: 30_000 }, () => [12n, named, sym]).flat() }),
+    )
+    expect(line.a).toHaveLength(90_000)
+    expect(line.a.slice(-3)).toEqual(['12', '[Function: named]', 'Symbol(s)'])
+  })
+})
+
+describe('the message is written in full, before a field that repeats it', () => {
+  beforeEach(() => _reset())
+
+  const L = 'L'.repeat(70_000) // more than the budget: it is written again nowhere
+
+  it('log.error(new Error(L)): the message is L, and err.message the repeat', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    createLogger({ service: 'svc' }).error(new Error(L))
+    const line = JSON.parse(lines[0])
+    expect(Object.keys(line).slice(0, 3)).toEqual(['time', 'level', 'message'])
+    expect(line.message).toBe(L)
+    expect(line.err.message).toBe('[Repeated]')
+  })
+
+  it("log.info({ payload: L }, '%s', L): the message is L, and payload the repeat", () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    createLogger({ service: 'svc' }).info({ payload: L }, '%s', L)
+    const line = JSON.parse(lines[0])
+    expect(line.message).toBe(L)
+    expect(line.payload).toBe('[Repeated]')
+  })
+})
+
+describe('an ordinary large line stays on the fast path', () => {
+  beforeEach(() => _reset())
+
+  it('under 1 MiB and 100,000 values, a getter on it runs once', () => {
+    let reads = 0
+    const fields = {
+      rows: Array.from({ length: 5000 }, (_, i) => ({ id: i, a: 'aa', b: 'bb', c: 3, d: true })),
+      body: 'x'.repeat(500_000),
+      // Nested: a top-level field's getter is read once, when the call is routed.
+      nested: {
+        get counted() {
+          return ++reads
+        },
+      },
+    }
+    const line = JSON.parse(lineFor(fields))
+    expect(line.nested.counted).toBe(1)
+    expect(reads).toBe(1) // the walk would read it again
+    expect(line.rows).toHaveLength(5000)
+  })
+
+  it('an object a getter returns goes to the walk: the getter runs again', () => {
+    let reads = 0
+    const shared = { k: 1 }
+    const line = JSON.parse(
+      lineFor({
+        nested: {
+          get counted() {
+            reads++
+            return shared
+          },
+        },
+      }),
+    )
+    expect(line.nested.counted).toEqual({ k: 1 })
+    expect(reads).toBe(2)
   })
 })

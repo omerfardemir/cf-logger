@@ -36,23 +36,8 @@ import {
 } from './workers'
 import { DurableObject, RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
 import type { EnvMapping, SessionInit, TracedServiceBinding } from './workers'
-import type { Logger } from './types'
+import { brokenLogger } from './test-helpers'
 
-/** Throws, as a hand-written Logger's method might. */
-const loggerBroke = (): never => {
-  throw new Error('logger broke')
-}
-
-/** A hand-written Logger whose every level throws, and whose `child` is itself. */
-const brokenLogger: Logger = {
-  trace: loggerBroke,
-  debug: loggerBroke,
-  info: loggerBroke,
-  warn: loggerBroke,
-  error: loggerBroke,
-  fatal: loggerBroke,
-  child: () => brokenLogger,
-}
 import {
   runWithLogger,
   getTraceContext,
@@ -1285,17 +1270,29 @@ describe('withLogging', () => {
         return 1
       }
     }
-    for (const spans of [true, false]) {
-      const worker = new (withLogging(Broken, { spans }))({} as any, ENV)
+    /** The calls one path makes, each rethrowing or returning the method's own value. */
+    const expectOwnValues = async (target: Pick<Broken, 'fail' | 'failAsync' | 'ok'>) => {
       let thrown: unknown
       try {
-        worker.fail()
+        target.fail()
       } catch (err) {
         thrown = err
       }
       expect(thrown).toBe(failure)
-      await expect(worker.failAsync()).rejects.toBe(failure)
-      expect(worker.ok()).toBe(1) // with spans, `span.end` at INFO throws too
+      await expect(target.failAsync()).rejects.toBe(failure)
+      expect(target.ok()).toBe(1) // with spans and a sampled trace, `span.end` at INFO throws too
+    }
+    for (const spans of [true, false]) {
+      await expectOwnValues(new (withLogging(Broken, { spans }))({} as any, ENV))
+    }
+    // A Traced Session continuing a sampled and an unsampled caller trace.
+    const Worker = withLogging(Broken, { spans: true, session: true })
+    for (const traceparent of [CALLER_TRACEPARENT, `${CALLER_TRACEPARENT_BASE}-00`]) {
+      await expectOwnValues(new Worker({} as any, ENV).session({ traceparent }))
+      // Joining a Logging Context that is already active, whose logger throws.
+      await runWithLogger({ logger: brokenLogger, traceparent }, () =>
+        expectOwnValues(new Worker({} as any, ENV)),
+      )
     }
   })
 

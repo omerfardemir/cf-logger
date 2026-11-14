@@ -88,9 +88,10 @@ function dateText(date: Date): string {
  * never render a function or a non-numeric string (`NaN`); `%d` and `%i`
  * write a `BigInt` exactly. `%j %o %O` never render an `Error` (`{}` would
  * hide its stack) or a value `printer.json` cannot print (a `BigInt`, a
- * cycle, a getter that throws...). A long string the message already holds
- * renders only while it fits the line's budget (`printer.admit`). Whatever is
- * not rendered is routed like a trailing argument instead.
+ * cycle, a getter that throws...). A long string or `BigInt` the message
+ * already holds renders only while it fits the Re-write Budget
+ * (`printer.admit`). Whatever is not rendered is routed like a trailing
+ * argument instead.
  *
  * @param {string} code - The character after `%`.
  * @param {unknown} value - The placeholder's argument.
@@ -103,7 +104,10 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
     case 'd':
     case 'i':
     case 'f': {
-      if (code !== 'f' && typeof value === 'bigint') return String(value)
+      if (code !== 'f' && typeof value === 'bigint') {
+        const digits = String(value)
+        return printer.admit(digits) ? digits : UNRENDERED
+      }
       const number = numberFor(value)
       if (number === undefined) return UNRENDERED
       return String(code === 'i' ? Math.floor(number) : number)
@@ -146,7 +150,7 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
  *
  * @param {string} template - The message template.
  * @param {readonly unknown[]} args - The arguments after the template.
- * @param {MessagePrinter} [printer] - The message's printer, holding the line's budget.
+ * @param {MessagePrinter} [printer] - The message's printer, holding the line's Re-write Budget.
  * @returns {{ message: string, unprinted: unknown[] }} The formatted message, and every argument still to route (all it did not print, and each `Error` printed by `%s`), in call order.
  */
 export function formatMessage(
@@ -293,6 +297,7 @@ export function routeArgs(input: readonly unknown[], budget: Budget = newBudget(
     } else if (isPrimitive(first)) {
       overflow.push(first)
       message = String(first)
+      printer.admit(message) // as for a leading `Error`
     } else {
       overflow.push(first)
       takeTemplate()
@@ -315,10 +320,10 @@ export function routeArgs(input: readonly unknown[], budget: Budget = newBudget(
         if (!setErr(value)) errors.push(value)
       } else if (isPlainObject(value)) {
         merge(value)
-      } else if (typeof value === 'string' && !printer.admit(value)) {
-        overflow.push(value) // a long repeat over the budget: `"[Repeated]"` in `args`
       } else if (isPrimitive(value)) {
-        words.push(String(value))
+        const word = String(value)
+        if (printer.admit(word)) words.push(word)
+        else overflow.push(value) // a long repeat over the budget: `"[Repeated]"` in `args`
       } else {
         overflow.push(value)
       }

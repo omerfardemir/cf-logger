@@ -4,6 +4,7 @@ import { HTTPException } from 'hono/http-exception'
 import { createLogger, _captureEntries, _captureLines, _reset, _setSink } from './logger'
 import type { LogFields, Logger } from './types'
 import { useLogger, type UseLoggerOptions } from './middleware'
+import { messageAfterLevel } from './test-helpers'
 
 function setup() {
   const entries = _captureEntries()
@@ -753,7 +754,8 @@ const normalizeRequestLine = (line: string) =>
 /**
  * The request lines written for the scenario below by the pino-based logger
  * (main at 7c22732 with #27's request lines, pino 10), captured by running the same
- * requests against that build. Key order included: the internal core must match.
+ * requests against that build. Key order included: the internal core must match,
+ * except that it writes `message` right after `level` (`messageAfterLevel()`).
  */
 const BASELINE_REQUEST_LINES = [
   String.raw`{"time":"<t>","level":"INFO","requestId":"req-1","cfRay":"8f1c2d3e4a5b6c7d-AMS","service":"gold","environment":"test","version":"1.0.0","method":"GET","path":"/ok","route":"/ok","message":"request.start GET /ok","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
@@ -784,7 +786,7 @@ describe('useLogger lines are the same as with the pino-based logger', () => {
       headers: { traceparent, 'X-Request-Id': 'bad id!' },
     })
 
-    expect(lines.map(normalizeRequestLine)).toEqual(BASELINE_REQUEST_LINES)
+    expect(lines.map(normalizeRequestLine)).toEqual(BASELINE_REQUEST_LINES.map(messageAfterLevel))
   })
 })
 

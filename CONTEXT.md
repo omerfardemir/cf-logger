@@ -62,8 +62,8 @@ The `args` field of a log line: the values of a log call that have no better pla
 _Avoid_: extras, rest, leftovers
 
 **Re-write Budget**:
-What one log line may write again of what it already holds: 10,000 values, or 65,536 characters of keys and strings, inside repeats (an object written before on the line, an object whose `toJSON` was already called, a string of 1,024 characters or more the line already holds). The message and the rest of the line spend from the same one. A repeat that doesn't fit is `"[Repeated]"` as a whole, so a line holds its first copies plus about one budget, however shared its values are. Serializing an `Error` again, in a graph of Errors with cycles, has a budget of its own of the same size.
-_Avoid_: quota, limit, the line's budget (without saying which)
+What one log line may write again of what it already holds: 10,000 values, or 65,536 characters of keys and strings, inside repeats (an object written before on the line, an object whose `toJSON` was already called, a string of 1,024 characters or more the line already holds, or the text of a `BigInt`, a function or a symbol that long). The message and the rest of the line spend from the same one. A repeat that doesn't fit is `"[Repeated]"` as a whole, so a line holds its first copies plus about one budget, however shared its values are. Serializing an `Error` again, in a graph of Errors with cycles, has a budget of its own of the same size.
+_Avoid_: quota, limit, the line's budget
 
 ### Tracing
 
