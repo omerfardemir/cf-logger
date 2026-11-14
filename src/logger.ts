@@ -144,12 +144,58 @@ const OUTSIDE_CONTEXT_WARNING = 'setLoggerContext called outside a Logging Conte
 const DEFAULT_KEY = Symbol('default')
 
 /**
+ * The isolate's Default Logger: what `getLogger()` returns outside a Logging Context.
+ * A Root Logger, so sharing it across concurrent work is safe.
+ */
+let defaultLogger: Logger | undefined
+
+/**
+ * Register a Root Logger as the isolate's Default Logger, the one `getLogger()`
+ * returns outside a Logging Context (module scope, plain RPC methods, `scheduled`,
+ * shared packages). `getLogger(service)` with a name keeps its standalone logger.
+ *
+ * Pass the Root Logger itself. It carries no Context Fields (those live in each
+ * Logging Context), so per-request data cannot reach other work through it. A
+ * `.child()` of it is accepted, but its bindings appear on every line logged
+ * outside a context, so they must be per-process data too.
+ *
+ * Replaces any default already set, including one `useLogger`, `TracedEntrypoint`,
+ * `tracedWorker` or `defaultLoggerFromEnv` registered.
+ *
+ * @template T - The type of user-defined log fields.
+ * @param {Logger<T>} logger - The Root Logger.
+ *
+ * @example
+ * ```ts
+ * const logger = createLogger(loggerOptionsFromEnv(env))
+ * setDefaultLogger(logger)
+ * getLogger().info('outside a Logging Context') // service, environment, version from env
+ * ```
+ */
+export function setDefaultLogger<T extends LogFields = LogFields>(logger: Logger<T>): void {
+  defaultLogger = logger as Logger
+}
+
+/**
+ * Register `logger` as the Default Logger unless one is already set: first seen wins.
+ * Used by `useLogger` and the Workers helpers; `setDefaultLogger()` always overrides it.
+ *
+ * @internal Not exported from the package entry points.
+ */
+export function registerDefaultLogger(logger: Logger): void {
+  defaultLogger ??= logger
+}
+
+/**
  * Get a logger for the current context.
  *
  * - **Inside a Logging Context** (`runWithLogger`, `useLogger`, Traced Sessions):
  *   returns the context's logger. `service` is ignored.
- * - **Outside a Logging Context**: returns a cached standalone logger (built with
- *   `createLogger`) tagged with `service`, or `'unknown'` when omitted.
+ * - **Outside a Logging Context**, with no `service`: returns the Default Logger
+ *   (see `setDefaultLogger`), or a cached standalone logger with `service: 'unknown'`
+ *   when none is registered.
+ * - **Outside a Logging Context**, with `service`: returns a cached standalone
+ *   logger (built with `createLogger`) tagged with `service`.
  *
  * @template T - The type of user-defined log fields.
  * @param {string} [service] - Service name used for the standalone fallback logger.
@@ -164,6 +210,7 @@ const DEFAULT_KEY = Symbol('default')
 export function getLogger<T extends LogFields = LogFields>(service?: string): Logger<T> {
   const store = als.getStore()
   if (store) return store.logger as Logger<T>
+  if (service === undefined && defaultLogger) return defaultLogger as Logger<T>
 
   const key = service ?? DEFAULT_KEY
   let logger = _cache.get(key)
@@ -424,12 +471,14 @@ export function _captureLines(): string[] {
 }
 
 /**
- * Reset isolate-level state (standalone logger cache, one-time warnings). Does not change the sink.
+ * Reset isolate-level state (standalone logger cache, Default Logger, one-time warnings).
+ * Does not change the sink.
  *
  * Used internally by tests to clear state between runs.
  */
 export function _reset(): void {
   _cache.clear()
+  defaultLogger = undefined
   warnedOutsideContext = false
   _resetEnvWarnings()
 }
