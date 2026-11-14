@@ -83,9 +83,23 @@ function errorMessage(error: Error): string {
 }
 
 /**
+ * How `%s` prints a `Date`: its ISO string, or `Invalid Date`. Reads it
+ * through `Date.prototype`, so no user code runs.
+ *
+ * @param {Date} date - Any `Date`.
+ * @returns {string} Its text.
+ * @throws When `date` is not a real `Date` (`Object.create(Date.prototype)`, a `Proxy`).
+ */
+function dateText(date: Date): string {
+  const time = Date.prototype.getTime.call(date)
+  return Number.isNaN(time) ? 'Invalid Date' : Date.prototype.toISOString.call(date)
+}
+
+/**
  * Render one argument for placeholder `code`. `%s %d %i %f` never render an
- * object or an array (`[object Object]`, `NaN` would hide its fields).
- * `%d %i %f`
+ * object or an array (`[object Object]`, `NaN` would hide its fields), with
+ * two exceptions under `%s`: an `Error` prints its `message` (and is still
+ * routed, see `formatMessage()`) and a `Date` its ISO string. `%d %i %f`
  * never render a function or a non-numeric string (`NaN`); `%d` and `%i`
  * write a `BigInt` exactly. `%j %o %O` never render an `Error` (`{}` would
  * hide its stack) or a value `printer.json` cannot print (a `BigInt`, a
@@ -117,8 +131,11 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
       if (typeof value === 'function') return functionName(value) || functionText(value)
       return printer.json(value) ?? UNRENDERED
     case 's': {
-      if (typeof value === 'object' && value !== null) return UNRENDERED
-      const text = String(value)
+      let text: string
+      if (isError(value)) text = errorMessage(value)
+      else if (value instanceof Date) text = dateText(value)
+      else if (typeof value === 'object' && value !== null) return UNRENDERED
+      else text = String(value)
       return printer.fits(text) ? text : UNRENDERED
     }
     default:
@@ -135,7 +152,9 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
  * `%j %o %O` with an `Error` or a value JSON cannot write as it is, such as a
  * cycle or a `BigInt`, an unknown sequence such as `% ` or `%c`), the
  * sequence stays in the text and the argument is returned in `unprinted`
- * instead. Never throws. `%%` becomes `%` only when there
+ * instead. `%s` prints an `Error`'s `message` and still returns the `Error`
+ * in `unprinted`, so it is routed to `err` with its stack; it prints a
+ * `Date` as its ISO string. Never throws. `%%` becomes `%` only when there
  * are arguments, like `console.log`. Everything printed spends from the
  * line's re-write budget through `printer`, all placeholders together: a
  * repeated object under `%j`, or a long string the message already holds.
@@ -143,7 +162,7 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
  * @param {string} template - The message template.
  * @param {readonly unknown[]} args - The arguments after the template.
  * @param {MessagePrinter} [printer] - The message's printer, holding the line's budget.
- * @returns {{ message: string, unprinted: unknown[] }} The formatted message, and every argument it did not print, in call order.
+ * @returns {{ message: string, unprinted: unknown[] }} The formatted message, and every argument still to route (all it did not print, and each `Error` printed by `%s`), in call order.
  */
 export function formatMessage(
   template: string,
@@ -175,10 +194,8 @@ export function formatMessage(
     } catch {
       text = UNRENDERED // e.g. `%s` with a function whose toString throws
     }
-    if (text === UNRENDERED) {
-      unprinted.push(value)
-      continue
-    }
+    if (text === UNRENDERED || (code === 's' && isError(value))) unprinted.push(value)
+    if (text === UNRENDERED) continue
     message += template.slice(last, i) + text
     last = i + 2
     i++

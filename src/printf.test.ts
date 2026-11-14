@@ -85,10 +85,61 @@ describe('printf placeholders', () => {
     expect(entries[0]).toMatchObject(routed)
   })
 
-  it('routes an Error under %s to err and keeps printing primitives', () => {
+  it("%s prints an Error's message and still routes the Error to err, with its stack", () => {
     const entries = _captureEntries()
-    createLogger({ service: 'svc' }).info('%s then %s, %d', new Error('e'), 'x', 3)
-    expect(entries[0]).toMatchObject({ message: '%s then x, 3', err: { message: 'e' } })
+    createLogger({ service: 'svc' }).error('failed: %s then %s, %d', new Error('boom'), 'x', 3)
+    expect(entries[0]).toMatchObject({
+      message: 'failed: boom then x, 3',
+      err: { type: 'Error', message: 'boom', stack: expect.stringContaining('boom') },
+    })
+    expect(entries[0].args).toBeUndefined()
+  })
+
+  it('%s with a second Error: its message is printed, and it goes to errors', () => {
+    const entries = _captureEntries()
+    const first = new Error('one')
+    createLogger({ service: 'svc' }).error('%s, %s', first, new TypeError('two'))
+    expect(entries[0]).toMatchObject({
+      message: 'one, two',
+      err: { message: 'one' },
+      errors: [{ type: 'TypeError', message: 'two' }],
+    })
+  })
+
+  it('%s with an Error whose message is not a string, or cannot be read', () => {
+    const entries = _captureEntries()
+    const numbered = Object.assign(new Error(), { message: 42 })
+    const unreadable = Object.defineProperty(new Error(), 'message', {
+      get() {
+        throw new Error('no message')
+      },
+    })
+    createLogger({ service: 'svc' }).error('%s | %s', numbered, unreadable)
+    expect(entries[0].message).toBe('42 | [Unserializable: Error: no message]')
+    expect(entries[0].err).toMatchObject({ message: 42 })
+    expect(entries[0].errors).toHaveLength(1)
+  })
+
+  it('%d %i %f leave an Error unprinted, and route it', () => {
+    const entries = _captureEntries()
+    createLogger({ service: 'svc' }).error('n=%d', new Error('e'))
+    expect(entries[0]).toMatchObject({ message: 'n=%d', err: { message: 'e' } })
+  })
+
+  it('%s prints a Date as its ISO string, and does not route it', () => {
+    const entries = _captureEntries()
+    createLogger({ service: 'svc' }).info('at %s, then %s', new Date(0), new Date(Number.NaN))
+    expect(entries[0].message).toBe('at 1970-01-01T00:00:00.000Z, then Invalid Date')
+    expect(entries[0].args).toBeUndefined()
+  })
+
+  it('%s leaves a fake Date unprinted, and routes it', () => {
+    const entries = _captureEntries()
+    const fake = Object.create(Date.prototype) as Date
+    createLogger({ service: 'svc' }).info('at %s', fake)
+    expect(entries[0].message).toBe('at %s')
+    // Routed like any class instance; on the line, its own `toJSON` throws.
+    expect(entries[0].args).toEqual([expect.stringMatching(/^\[Unserializable: TypeError/)])
   })
 
   it('formats the message after a leading Error', () => {

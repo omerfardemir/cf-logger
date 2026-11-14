@@ -683,6 +683,8 @@ type Kind =
   | 'percent'
   | 'protoObject'
   | 'toJSONObject'
+  | 'date'
+  | 'placeholder'
 const KINDS: Kind[] = [
   'string',
   'number',
@@ -701,6 +703,8 @@ const KINDS: Kind[] = [
   'percent',
   'protoObject',
   'toJSONObject',
+  'date',
+  'placeholder',
 ]
 const MOVED = [...MOVED_KEYS]
 
@@ -748,7 +752,8 @@ function generator(seed: number) {
       case 'instance':
         return { value: new Point(300000 + n, 0), token: String(300000 + n) }
       case 'function':
-        return { value: Object.defineProperty(() => {}, 'name', { value: t }), token: t }
+        // Named `t`, with `t` in its source too: `%s` prints a function's source.
+        return { value: new Function(`return function ${t}() {}`)() as unknown, token: t }
       case 'symbol':
         return { value: Symbol(t), token: t }
       case 'undefined':
@@ -760,6 +765,14 @@ function generator(seed: number) {
         return { value: `${t} 100%% %c 50% off`, token: t }
       case 'protoObject':
         return { value: JSON.parse(`{"__proto__":{"err":"${t}"},"key_${t}":1}`), token: t }
+      case 'date': {
+        // `%s` prints its ISO string; anywhere else, the line does.
+        const date = new Date(Date.UTC(2000, 0, 1) + n * 1000)
+        return { value: date, token: date.toISOString() }
+      }
+      case 'placeholder':
+        // As the template, `%s` takes the next argument: an Error's message, a Date's ISO string...
+        return { value: `${t} %s`, token: t }
       case 'toJSONObject':
         return {
           value: {
