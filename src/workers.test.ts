@@ -1207,6 +1207,32 @@ describe('withLogging', () => {
     }
   })
 
+  it('a thrown value that String() and instanceof cannot handle is rethrown as is, spans or not', async () => {
+    const odd = Object.create(null) as unknown
+    class Odd extends WorkerEntrypoint<typeof ENV> {
+      fail(): never {
+        throw odd
+      }
+      async failAsync(): Promise<never> {
+        await Promise.resolve()
+        throw odd
+      }
+    }
+    for (const spans of [true, false]) {
+      const entries = _captureEntries()
+      const worker = new (withLogging(Odd, { spans }))({} as any, ENV)
+      let thrown: unknown
+      try {
+        worker.fail()
+      } catch (err) {
+        thrown = err
+      }
+      expect(thrown).toBe(odd)
+      await expect(worker.failAsync()).rejects.toBe(odd)
+      expect(entries.filter((e) => e.level === 'ERROR')).toHaveLength(2)
+    }
+  })
+
   it('writes no span.end without spans: true', () => {
     const entries = _captureEntries()
     const worker = new (withLogging(SearchWorker))({} as any, ENV)

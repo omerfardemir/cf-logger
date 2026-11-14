@@ -547,6 +547,55 @@ describe('withSpan', () => {
     }
   })
 
+  it.each([
+    ['a null-prototype object', () => Object.create(null) as unknown],
+    [
+      'a revoked Proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {})
+        revoke()
+        return proxy as unknown
+      },
+    ],
+  ])(
+    'a thrown value String() and instanceof cannot handle (%s) is rethrown as is, sampled or not',
+    async (_name, make) => {
+      for (const traceparent of [SAMPLED, UNSAMPLED]) {
+        const entries = _captureEntries()
+        const thrown = make()
+        await runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent }, async () => {
+          let caught: unknown
+          try {
+            withSpan('sync', () => {
+              throw thrown
+            })
+          } catch (err) {
+            caught = err
+          }
+          expect(caught).toBe(thrown)
+          await expect(
+            withSpan('async', async () => {
+              throw thrown
+            }),
+          ).rejects.toBe(thrown)
+        })
+        expect(entries).toHaveLength(2)
+        for (const entry of entries) {
+          expect(entry.level).toBe('ERROR')
+          expect((entry.span as { error: unknown }).error).toMatch(/^\[Unserializable: .*\]$/)
+        }
+      }
+    },
+  )
+
+  it('a returned revoked Proxy is returned as is', () => {
+    const { proxy, revoke } = Proxy.revocable({}, {})
+    revoke()
+    runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent: SAMPLED }, () => {
+      expect(withSpan('ret', () => proxy)).toBe(proxy)
+    })
+  })
+
   it('copies Context Fields in; fields set inside stay inside', () => {
     const entries = _captureEntries()
     const context = { logger: createLogger({ service: 'svc' }), fields: { requestId: 'req-1' } }

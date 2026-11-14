@@ -20,6 +20,7 @@ import {
   nodeSink,
   stringifyRecord,
   takeRecordKeys,
+  unserializable,
   workersSink,
   type LogRecord,
   type Sink,
@@ -522,9 +523,37 @@ export function withSpan<R>(operation: string, fn: () => R): R {
   return als.run(store, () => recordSpan(operation, fn))
 }
 
-/** The text a Span records as its `error`. */
+/**
+ * The text a Span records as its `error`. Never throws, so the caller always
+ * gets its own thrown value back: a value `String()` or `instanceof` throws on
+ * (`Object.create(null)`, a revoked `Proxy`) is `unserializable()`.
+ *
+ * @param {unknown} error - What the Span's work threw.
+ * @returns {string} The error's message, or the value as text.
+ */
 function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  try {
+    if (!(error instanceof Error)) return String(error)
+    const message: unknown = error.message
+    return typeof message === 'string' ? message : String(message)
+  } catch (thrown) {
+    return unserializable(thrown)
+  }
+}
+
+/**
+ * Whether `value` is a `Promise`, never throwing (a revoked `Proxy` returned
+ * by the Span's work is returned as is).
+ *
+ * @param {unknown} value - What the Span's work returned.
+ * @returns {boolean} `true` for a `Promise`.
+ */
+function isPromise(value: unknown): value is Promise<unknown> {
+  try {
+    return value instanceof Promise
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -547,7 +576,15 @@ export function recordSpan<R>(operation: string, fn: () => R, timed = true): R {
   const sampled = timed && (store.trace.traceFlags & 0x01) === 0x01
   const startTime = Date.now()
 
+  // Never throws, so `fn`'s own value is always what is returned or rethrown.
   const emit = (status: SpanContext['status'], error?: unknown) => {
+    try {
+      logSpan(status, error)
+    } catch {
+      // Only a hand-written Logger can throw here; the Span's outcome still wins.
+    }
+  }
+  const logSpan = (status: SpanContext['status'], error?: unknown) => {
     if (!sampled) {
       if (status === 'ERROR') {
         const span = { operation, status, error: errorText(error) }
@@ -578,7 +615,7 @@ export function recordSpan<R>(operation: string, fn: () => R, timed = true): R {
     emit('ERROR', err)
     throw err
   }
-  if (result instanceof Promise) {
+  if (isPromise(result)) {
     return result.then(
       (value) => {
         emit('OK')
