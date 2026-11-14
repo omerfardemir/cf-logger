@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { Hono } from 'hono'
 import {
   createLogger,
   getLogger,
@@ -8,6 +9,7 @@ import {
   _captureEntries,
   _reset,
 } from './logger'
+import { useLogger } from './middleware'
 import { tracedFetch, tracedFetcher } from './fetch'
 import { parseTraceparent } from './trace'
 
@@ -17,24 +19,54 @@ const TRACEPARENT = `00-${TRACE_ID}-${CALLER_SPAN}-01`
 
 const rootLogger = () => createLogger({ service: 'fetch-svc' })
 
-/** A Fetcher-shaped mock that records every call. */
-function mockBinding(respond: () => Promise<Response> = async () => new Response('ok')) {
-  const fetch = vi.fn((..._args: unknown[]) => respond())
+/**
+ * A `fetch` that does what a real one does with its arguments: builds `new Request(...args)`
+ * (rejecting when that throws), and records it. `sent` holds what would go on the wire.
+ */
+function recordingFetch(respond: (request: Request) => Promise<Response>) {
+  const sent: Request[] = []
+  const fetch = vi.fn((...args: unknown[]): Promise<Response> => {
+    let request: Request
+    try {
+      request = new Request(...(args as [RequestInfo | URL, RequestInit?]))
+    } catch (err) {
+      return Promise.reject(err)
+    }
+    sent.push(request)
+    return respond(request)
+  })
+  return { fetch, sent }
+}
+
+/** A Fetcher-shaped mock: a recording `fetch`, plus a `connect` that returns its `this`. */
+function mockBinding(
+  respond: (request: Request) => Promise<Response> = async () => new Response('ok'),
+) {
   const connect = vi.fn(function (this: unknown) {
     return this
   })
-  return { fetch, connect }
-}
-
-/** The headers the binding would send for a call: init's headers, else the Request's. */
-function sentHeaders(args: unknown[]): Headers {
-  const [input, init] = args as [unknown, RequestInit | undefined]
-  if (init?.headers !== undefined) return new Headers(init.headers)
-  return input instanceof Request ? input.headers : new Headers()
+  return { ...recordingFetch(respond), connect }
 }
 
 function inContext<R>(fn: () => R, fields?: Record<string, string>): R {
   return runWithLogger({ logger: rootLogger(), traceparent: TRACEPARENT, fields }, fn)
+}
+
+function streamOf(text: string): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode(text))
+      controller.close()
+    },
+  })
+}
+
+/** A gateway that never trusts the client's X-Request-Id and forwards `c.req.raw` to API. */
+function gateway(binding: ReturnType<typeof mockBinding>, forwardRequestId: boolean) {
+  const app = new Hono<{ Bindings: { API: typeof binding } }>()
+  app.use(useLogger(rootLogger(), { requestId: { trustIncoming: false } }))
+  app.all('*', (c) => tracedFetcher(c.env.API, { forwardRequestId }).fetch(c.req.raw))
+  return app
 }
 
 describe('tracedFetcher', () => {
@@ -51,7 +83,7 @@ describe('tracedFetcher', () => {
       await tracedFetcher(binding).fetch('https://svc/api')
     })
 
-    const parsed = parseTraceparent(sentHeaders(binding.fetch.mock.calls[0]).get('traceparent')!)
+    const parsed = parseTraceparent(binding.sent[0].headers.get('traceparent')!)
     expect(parsed?.traceId).toBe(TRACE_ID)
     expect(parsed?.spanId).toBe(spanId)
   })
@@ -62,7 +94,23 @@ describe('tracedFetcher', () => {
       { logger: rootLogger(), traceparent: TRACEPARENT, tracestate: 'congo=t61rcWkgMzE' },
       () => tracedFetcher(binding).fetch('https://svc/api'),
     )
-    expect(sentHeaders(binding.fetch.mock.calls[0]).get('tracestate')).toBe('congo=t61rcWkgMzE')
+    expect(binding.sent[0].headers.get('tracestate')).toBe('congo=t61rcWkgMzE')
+  })
+
+  it("drops the caller's own tracestate when the trace has none: it belongs to another traceparent", async () => {
+    const binding = mockBinding()
+    const forwarded = new Request('https://svc/api', {
+      headers: { traceparent: `00-${'1'.repeat(32)}-${'2'.repeat(16)}-01`, tracestate: 'old=1' },
+    })
+    await inContext(async () => {
+      await tracedFetcher(binding).fetch(forwarded)
+      await tracedFetcher(binding).fetch('https://svc/api', { headers: { tracestate: 'old=2' } })
+    })
+    for (const request of binding.sent) {
+      expect(request.headers.get('traceparent')).toMatch(new RegExp(`^00-${TRACE_ID}-`))
+      expect(request.headers.has('tracestate')).toBe(false)
+    }
+    expect(forwarded.headers.get('tracestate')).toBe('old=1')
   })
 
   it('fetch(input, init): keeps init and its headers, without mutating init or its Headers', async () => {
@@ -84,26 +132,28 @@ describe('tracedFetcher', () => {
     expect(init.headers).toBe(callerHeaders)
     expect([...callerHeaders]).toEqual([['authorization', 'Bearer abc']])
 
-    const [input, sent] = binding.fetch.mock.calls[0] as [string, RequestInit]
+    const [input, passed] = binding.fetch.mock.calls[0] as [string, RequestInit]
     expect(input).toBe('https://svc/api')
-    expect(sent).not.toBe(init)
-    expect(sent).toMatchObject({ method: 'POST', body: '{"a":1}', redirect: 'manual', signal })
-    const headers = new Headers(sent.headers)
-    expect(headers.get('authorization')).toBe('Bearer abc')
-    expect(headers.get('traceparent')).toMatch(new RegExp(`^00-${TRACE_ID}-`))
+    expect(passed).not.toBe(init)
+    const [sent] = binding.sent
+    expect(sent.method).toBe('POST')
+    expect(sent.redirect).toBe('manual')
+    expect(await sent.text()).toBe('{"a":1}')
+    expect(sent.headers.get('authorization')).toBe('Bearer abc')
+    expect(sent.headers.get('traceparent')).toMatch(new RegExp(`^00-${TRACE_ID}-`))
   })
 
   it('fetch(request): keeps the request and its streaming body, without mutating it', async () => {
-    const binding = mockBinding()
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(new TextEncoder().encode('streamed'))
-        controller.close()
-      },
-    })
+    const recorded: unknown[][] = []
+    const binding = {
+      fetch: vi.fn(async (...args: unknown[]) => {
+        recorded.push(args)
+        return new Response('ok')
+      }),
+    }
     const request = new Request('https://svc/upload', {
       method: 'PUT',
-      body: stream,
+      body: streamOf('streamed'),
       headers: { 'X-Custom': 'v' },
       redirect: 'manual',
       duplex: 'half',
@@ -115,50 +165,75 @@ describe('tracedFetcher', () => {
     expect([...request.headers]).toEqual([['x-custom', 'v']])
     expect(request.bodyUsed).toBe(false)
 
-    const [input, sent] = binding.fetch.mock.calls[0] as [Request, RequestInit]
+    const [input, init] = recorded[0] as [Request, RequestInit]
     expect(input).toBe(request)
     // Only headers are overridden; method, body, redirect, signal (and cf) come from the Request.
-    expect(Object.keys(sent)).toEqual(['headers'])
-    const headers = new Headers(sent.headers)
-    expect(headers.get('x-custom')).toBe('v')
-    expect(headers.get('traceparent')).toMatch(new RegExp(`^00-${TRACE_ID}-`))
+    expect(Object.keys(init)).toEqual(['headers'])
 
-    // What the binding builds from these arguments keeps the body and method.
-    const built = new Request(input, sent)
-    expect(built.method).toBe('PUT')
-    expect(built.redirect).toBe('manual')
-    expect(await built.text()).toBe('streamed')
+    // What a fetch builds from these arguments keeps the body, method and headers.
+    const sent = new Request(input, init)
+    expect(sent.method).toBe('PUT')
+    expect(sent.redirect).toBe('manual')
+    expect(sent.headers.get('x-custom')).toBe('v')
+    expect(sent.headers.get('traceparent')).toMatch(new RegExp(`^00-${TRACE_ID}-`))
+    expect(await sent.text()).toBe('streamed')
   })
 
   it('fetch(request, init): init headers win over the Request headers, as in fetch()', async () => {
     const binding = mockBinding()
     const request = new Request('https://svc/api', { headers: { 'X-From': 'request' } })
     await inContext(() => tracedFetcher(binding).fetch(request, { headers: { 'X-From': 'init' } }))
-    const headers = sentHeaders(binding.fetch.mock.calls[0])
-    expect(headers.get('x-from')).toBe('init')
-    expect(headers.get('traceparent')).toBeTruthy()
+    const [sent] = binding.sent
+    expect(sent.headers.get('x-from')).toBe('init')
+    expect(sent.headers.get('traceparent')).toBeTruthy()
   })
 
-  it('fetch(url, request): uses a Request passed as init without mutating it', async () => {
-    const binding = mockBinding()
+  it('fetch(url, request): uses a Request passed as init without mutating it or taking its body', async () => {
     const forwarded = new Request('https://old/api', {
       method: 'POST',
       body: 'payload',
       headers: { 'X-Custom': 'v' },
+      redirect: 'manual',
     })
+    let bodyUsedWhenCalled: boolean | undefined
+    let args: unknown[] = []
+    const binding = {
+      fetch: vi.fn(async (...a: unknown[]) => {
+        bodyUsedWhenCalled = forwarded.bodyUsed
+        args = a
+        return new Response('ok')
+      }),
+    }
+
     await inContext(() => tracedFetcher(binding).fetch('https://svc/api', forwarded))
 
+    // The binding gets the body untouched, as with plain fetch(url, request).
+    expect(bodyUsedWhenCalled).toBe(false)
+    expect(forwarded.bodyUsed).toBe(false)
     expect([...forwarded.headers]).toEqual([
       ['content-type', 'text/plain;charset=UTF-8'],
       ['x-custom', 'v'],
     ])
-    const [input, sent] = binding.fetch.mock.calls[0] as [string, Request]
-    expect(input).toBe('https://svc/api')
-    const built = new Request(input, sent)
-    expect(built.method).toBe('POST')
-    expect(built.headers.get('x-custom')).toBe('v')
-    expect(built.headers.get('traceparent')).toBeTruthy()
-    expect(await built.text()).toBe('payload')
+
+    // What the binding builds matches what plain fetch(url, request) would send.
+    const plainSource = new Request('https://old/api', {
+      method: 'POST',
+      body: 'payload',
+      headers: { 'X-Custom': 'v' },
+      redirect: 'manual',
+    })
+    const plain = new Request('https://svc/api', plainSource)
+    const sent = new Request(...(args as [string, RequestInit]))
+    expect(args[0]).toBe('https://svc/api')
+    expect(sent.url).toBe(plain.url)
+    expect(sent.method).toBe(plain.method)
+    expect(sent.redirect).toBe(plain.redirect)
+    expect(sent.headers.get('x-custom')).toBe('v')
+    expect(sent.headers.get('content-type')).toBe(plain.headers.get('content-type'))
+    expect(sent.headers.get('traceparent')).toBeTruthy()
+    expect(await sent.text()).toBe(await plain.text())
+    // Reading it takes the caller's body, as plain fetch does.
+    expect(forwarded.bodyUsed).toBe(plainSource.bodyUsed)
   })
 
   it('outside a Logging Context, passes the same arguments through and returns the same promise', async () => {
@@ -199,15 +274,17 @@ describe('tracedFetcher', () => {
       { logger: rootLogger(), traceparent: TRACEPARENT, tracestate: 'bad\nvalue' },
       () => tracedFetcher(binding).fetch('https://svc/api'),
     )
-    const headers = sentHeaders(binding.fetch.mock.calls[0])
-    expect(headers.get('traceparent')).toBeTruthy()
-    expect(headers.has('tracestate')).toBe(false)
+    const [sent] = binding.sent
+    expect(sent.headers.get('traceparent')).toBeTruthy()
+    expect(sent.headers.has('tracestate')).toBe(false)
   })
 
   it('invalid caller headers reach the binding unchanged, so it throws its own error', async () => {
     const binding = mockBinding()
     const init = { headers: [['bad header', 'v']] } as unknown as RequestInit
-    await inContext(() => tracedFetcher(binding).fetch('https://svc/api', init))
+    await inContext(async () => {
+      await expect(tracedFetcher(binding).fetch('https://svc/api', init)).rejects.toThrow(TypeError)
+    })
     expect(binding.fetch.mock.calls[0]).toEqual(['https://svc/api', init])
     expect(binding.fetch.mock.calls[0][1]).toBe(init)
   })
@@ -216,7 +293,7 @@ describe('tracedFetcher', () => {
     it('is off by default', async () => {
       const binding = mockBinding()
       await inContext(() => tracedFetcher(binding).fetch('https://svc/api'), { requestId: 'r-1' })
-      expect(sentHeaders(binding.fetch.mock.calls[0]).has('x-request-id')).toBe(false)
+      expect(binding.sent[0].headers.has('x-request-id')).toBe(false)
     })
 
     it('sends the requestId Context Field as X-Request-Id', async () => {
@@ -224,8 +301,8 @@ describe('tracedFetcher', () => {
       const svc = tracedFetcher(binding, { forwardRequestId: true })
       await inContext(() => svc.fetch('https://svc/api'), { requestId: 'r-1' })
       await inContext(() => svc.fetch(new Request('https://svc/api')), { requestId: 'r-2' })
-      expect(sentHeaders(binding.fetch.mock.calls[0]).get('x-request-id')).toBe('r-1')
-      expect(sentHeaders(binding.fetch.mock.calls[1]).get('x-request-id')).toBe('r-2')
+      expect(binding.sent[0].headers.get('x-request-id')).toBe('r-1')
+      expect(binding.sent[1].headers.get('x-request-id')).toBe('r-2')
     })
 
     it('reads requestId when the call is made, after setLoggerContext', async () => {
@@ -234,30 +311,63 @@ describe('tracedFetcher', () => {
         setLoggerContext({ requestId: 'set-later' })
         return tracedFetcher(binding, { forwardRequestId: true }).fetch('https://svc/api')
       })
-      expect(sentHeaders(binding.fetch.mock.calls[0]).get('x-request-id')).toBe('set-later')
+      expect(binding.sent[0].headers.get('x-request-id')).toBe('set-later')
     })
 
-    it('never overwrites an X-Request-Id the caller set, in init or on the Request', async () => {
+    it('replaces an X-Request-Id already on the call, in init or on the Request', async () => {
       const binding = mockBinding()
       const svc = tracedFetcher(binding, { forwardRequestId: true })
+      const request = new Request('https://svc/api', { headers: { 'X-Request-Id': 'mine-2' } })
+      const init = { headers: { 'x-request-id': 'mine' } }
       await inContext(
         async () => {
-          await svc.fetch('https://svc/api', { headers: { 'x-request-id': 'mine' } })
-          await svc.fetch(new Request('https://svc/api', { headers: { 'X-Request-Id': 'mine-2' } }))
+          await svc.fetch('https://svc/api', init)
+          await svc.fetch(request)
         },
         { requestId: 'context-id' },
       )
-      expect(sentHeaders(binding.fetch.mock.calls[0]).get('x-request-id')).toBe('mine')
-      expect(sentHeaders(binding.fetch.mock.calls[1]).get('x-request-id')).toBe('mine-2')
+      expect(binding.sent[0].headers.get('x-request-id')).toBe('context-id')
+      expect(binding.sent[1].headers.get('x-request-id')).toBe('context-id')
+      // ...without changing what the caller passed.
+      expect(init).toEqual({ headers: { 'x-request-id': 'mine' } })
+      expect(request.headers.get('x-request-id')).toBe('mine-2')
     })
 
-    it('sends nothing when there is no requestId, or it is not a safe header value', async () => {
+    it('leaves the headers alone when there is no requestId, or it is not a safe header value', async () => {
       const binding = mockBinding()
       const svc = tracedFetcher(binding, { forwardRequestId: true })
+      const headers = { 'X-Request-Id': 'caller-id' }
       await inContext(() => svc.fetch('https://svc/api'))
       await inContext(() => svc.fetch('https://svc/api'), { requestId: 'a\r\nb' })
-      expect(sentHeaders(binding.fetch.mock.calls[0]).has('x-request-id')).toBe(false)
-      expect(sentHeaders(binding.fetch.mock.calls[1]).has('x-request-id')).toBe(false)
+      await inContext(() => svc.fetch('https://svc/api', { headers }))
+      expect(binding.sent[0].headers.has('x-request-id')).toBe(false)
+      expect(binding.sent[1].headers.has('x-request-id')).toBe(false)
+      expect(binding.sent[2].headers.get('x-request-id')).toBe('caller-id')
+    })
+
+    describe('a gateway forwarding c.req.raw', () => {
+      it("sends the gateway's Request ID, not the client's X-Request-Id", async () => {
+        const binding = mockBinding()
+        const res = await gateway(binding, true).request(
+          '/api',
+          { headers: { 'X-Request-Id': 'client-id' } },
+          { API: binding },
+        )
+        const gatewayId = res.headers.get('X-Request-Id')
+        expect(gatewayId).toBeTruthy()
+        expect(gatewayId).not.toBe('client-id')
+        expect(binding.sent[0].headers.get('x-request-id')).toBe(gatewayId)
+      })
+
+      it("without the option, the client's X-Request-Id passes through unchanged", async () => {
+        const binding = mockBinding()
+        await gateway(binding, false).request(
+          '/api',
+          { headers: { 'X-Request-Id': 'client-id' } },
+          { API: binding },
+        )
+        expect(binding.sent[0].headers.get('x-request-id')).toBe('client-id')
+      })
     })
   })
 
@@ -297,7 +407,7 @@ describe('tracedFetcher', () => {
       const binding = mockBinding()
       await inContext(() => tracedFetcher(binding, { spans: true }).fetch('https://svc/api'))
 
-      const sent = parseTraceparent(sentHeaders(binding.fetch.mock.calls[0]).get('traceparent')!)
+      const sent = parseTraceparent(binding.sent[0].headers.get('traceparent')!)
       expect(entries[0].traceId).toBe(TRACE_ID)
       expect(entries[0].spanId).toBe(sent?.spanId)
       expect(entries[0].parentSpanId).not.toBe(sent?.spanId)
@@ -337,6 +447,24 @@ describe('tracedFetcher', () => {
         span: { status: 'ERROR', error: 'Network connection lost.' },
       })
       expect(entries[0].statusCode).toBeUndefined()
+    })
+
+    it("never shows the caller's host, path or statusCode Context Fields on its span", async () => {
+      const entries = _captureEntries()
+      const binding = mockBinding()
+      const outer = { method: 'PATCH', host: 'gateway', path: '/outer', statusCode: '418' }
+      await runWithLogger(
+        { logger: rootLogger(), traceparent: TRACEPARENT, fields: outer },
+        async () => {
+          // A relative URL can't be parsed: the binding rejects it.
+          await expect(
+            tracedFetcher(binding, { spans: true }).fetch('/relative?token=abc'),
+          ).rejects.toThrow(TypeError)
+        },
+      )
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({ level: 'ERROR', method: 'GET' })
+      for (const key of ['host', 'path', 'statusCode']) expect(entries[0]).not.toHaveProperty(key)
     })
 
     it('a binding that throws synchronously still throws synchronously, after an ERROR span', () => {
@@ -400,25 +528,42 @@ describe('tracedFetcher', () => {
       tracedFetcher(binding, { spans: true })
       expect(binding.fetch).toBe(original)
     })
+
+    it('wraps a frozen binding too', async () => {
+      const recorded = recordingFetch(async () => new Response('ok'))
+      const connect = vi.fn(function (this: unknown) {
+        return this
+      })
+      const binding = Object.freeze({ fetch: recorded.fetch, connect, name: 'svc' })
+      const svc = tracedFetcher(binding)
+
+      await inContext(() => svc.fetch('https://svc/api'))
+      expect(recorded.sent[0].headers.get('traceparent')).toMatch(new RegExp(`^00-${TRACE_ID}-`))
+      expect(svc.connect()).toBe(binding)
+      expect(svc.name).toBe('svc')
+      expect('connect' in svc).toBe(true)
+      expect(Object.isFrozen(binding)).toBe(true)
+    })
   })
 })
 
 describe('tracedFetch options', () => {
   beforeEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     _reset()
   })
 
   it('records a span with spans: true', async () => {
     const entries = _captureEntries()
-    const mockFetch = vi.fn(async (..._args: unknown[]) => new Response(null, { status: 404 }))
-    vi.stubGlobal('fetch', mockFetch)
+    const mock = recordingFetch(async () => new Response(null, { status: 404 }))
+    vi.stubGlobal('fetch', mock.fetch)
 
     await inContext(() =>
       tracedFetch('https://api.example.com/v1/items?page=2', undefined, { spans: true }),
     )
 
-    expect(mockFetch).toHaveBeenCalledOnce()
+    expect(mock.fetch).toHaveBeenCalledOnce()
     expect(entries).toHaveLength(1)
     expect(entries[0]).toMatchObject({
       message: 'span.end fetch',
@@ -445,15 +590,15 @@ describe('tracedFetch options', () => {
   })
 
   it('keeps the headers of a Request passed on its own', async () => {
-    const mockFetch = vi.fn(async (..._args: unknown[]) => new Response('ok'))
-    vi.stubGlobal('fetch', mockFetch)
+    const mock = recordingFetch(async () => new Response('ok'))
+    vi.stubGlobal('fetch', mock.fetch)
     const request = new Request('https://api.example.com/', { headers: { Authorization: 'x' } })
 
     await inContext(() => tracedFetch(request))
 
-    const headers = sentHeaders(mockFetch.mock.calls[0])
-    expect(headers.get('authorization')).toBe('x')
-    expect(headers.get('traceparent')).toBeTruthy()
+    const [sent] = mock.sent
+    expect(sent.headers.get('authorization')).toBe('x')
+    expect(sent.headers.get('traceparent')).toBeTruthy()
     expect([...request.headers]).toEqual([['authorization', 'x']])
   })
 })

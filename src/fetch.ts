@@ -8,15 +8,19 @@ export interface TracedFetchOptions {
   /**
    * Record each call as a Span (`span.end fetch`), with `method`, `host`, `path` (the pathname
    * only: the query string can carry tokens) and the response `statusCode`. A call that throws
-   * or rejects (a network failure) is logged at `ERROR` and the same error is rethrown. Any
-   * response, 5xx included, is a completed call: the Span's status is `OK` and `statusCode`
-   * says what came back. Written only inside a Logging Context, when the trace is sampled.
+   * or rejects (a network failure) is logged at `ERROR` and the same error is rethrown. The
+   * error is logged as it is: if its message quotes the URL (e.g. `Failed to parse URL from
+   * /x?token=abc`), so does the line. Any response, 5xx included, is a completed call: the
+   * Span's status is `OK` and `statusCode` says what came back. Written only inside a Logging
+   * Context, when the trace is sampled.
    */
   spans?: boolean
   /**
-   * Send the current `requestId` Context Field as `X-Request-Id`, so the receiver's
-   * `useLogger` can reuse it (subject to its own validation). Never overwrites an
-   * `X-Request-Id` the caller set, in `init` or on the `Request`.
+   * Send the current Request ID (the `requestId` Context Field) as `X-Request-Id`, so the
+   * receiver's `useLogger` can reuse it (subject to its own validation). It replaces any
+   * `X-Request-Id` already on the call, in `init` or on the `Request`, so a gateway forwarding
+   * the client's Request sends its own ID, not the client's. With no `requestId`, the headers
+   * are left alone. On `tracedFetch` the ID goes to whatever host you call.
    */
   forwardRequestId?: boolean
 }
@@ -24,8 +28,21 @@ export interface TracedFetchOptions {
 /** The shape `tracedFetcher` needs: anything with a `fetch` like a service binding's. */
 type FetchLike = (...args: any[]) => Promise<unknown>
 
+/** One outgoing call, as `fetch` reads its arguments. */
+interface Call {
+  /** The arguments exactly as the caller passed them. */
+  args: unknown[]
+  input: unknown
+  init: RequestInit | undefined
+  /** `input`, when it is a `Request`. */
+  request: Request | undefined
+}
+
 /** The Span operation name for an outgoing call. */
 const SPAN_OPERATION = 'fetch'
+
+/** The header `forwardRequestId` sends the Request ID in. */
+const REQUEST_ID_HEADER = 'X-Request-Id'
 
 /**
  * A value `Headers#set` accepts and sends unchanged: printable ASCII with no leading or
@@ -33,8 +50,65 @@ const SPAN_OPERATION = 'fetch'
  */
 const SAFE_HEADER_VALUE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/
 
+/**
+ * The `RequestInit` members `fetch(url, request)` reads from a `Request` used as `init`
+ * (besides `headers`, which are rebuilt). A member the runtime's `Request` does not have is
+ * `undefined` there and is left out, as `fetch` itself would.
+ */
+const REQUEST_INIT_KEYS = [
+  'method',
+  'body',
+  'redirect',
+  'signal',
+  'cf',
+  'integrity',
+  'keepalive',
+  'cache',
+  'credentials',
+  'mode',
+  'priority',
+  'referrer',
+  'referrerPolicy',
+  'duplex',
+] as const
+
+/**
+ * @param {unknown} value - Any value.
+ * @returns {boolean} Whether `value` is a `Request`.
+ */
 function isRequest(value: unknown): value is Request {
   return typeof Request !== 'undefined' && value instanceof Request
+}
+
+/**
+ * @param {unknown[]} args - The arguments the caller passed to `fetch`.
+ * @returns {Call} The arguments as `fetch` reads them.
+ */
+function readCall(args: unknown[]): Call {
+  const [input, init] = args as [unknown, RequestInit | undefined]
+  return { args, input, init, request: isRequest(input) ? input : undefined }
+}
+
+/**
+ * A plain `RequestInit` with the fields `fetch(url, request)` reads from `request`, and
+ * `headers` in place of its own. Unlike `new Request(request, { headers })`, building it does
+ * not take the Request's body, so the body is untouched until the binding reads it.
+ *
+ * @param {Request} request - A `Request` the caller passed as `init`.
+ * @param {Headers} headers - The headers to send instead of the Request's.
+ * @returns {RequestInit} The init to pass on.
+ */
+function initFromRequest(request: Request, headers: Headers): RequestInit {
+  const source = request as unknown as Record<string, unknown>
+  const init: Record<string, unknown> = {}
+  for (const key of REQUEST_INIT_KEYS) {
+    const value = source[key]
+    if (value !== undefined) init[key] = value
+  }
+  // Node requires `duplex` with a stream body, and a Request's body is always a stream.
+  if (init.body != null && init.duplex === undefined) init.duplex = 'half'
+  init.headers = headers
+  return init as RequestInit
 }
 
 /**
@@ -44,57 +118,66 @@ function isRequest(value: unknown): value is Request {
  * or not) is neither read nor teed and its `method`, `redirect`, `signal` and `cf` still apply.
  *
  * The headers start from what `fetch` itself would send: `init.headers` when given, otherwise
- * the `Request`'s. When they cannot be read (invalid caller headers), the arguments are returned
- * unchanged, so the binding rejects them with its own error.
+ * the `Request`'s. A `tracestate` already there is dropped, because it belongs to another
+ * `traceparent`. When the headers cannot be read (invalid caller headers), the caller's
+ * arguments are returned unchanged, so the binding rejects them with its own error.
+ *
+ * @param {Call} call - The outgoing call.
+ * @param {TracedFetchOptions} options - The options the wrapper was given.
+ * @returns {unknown[]} The arguments to call `fetch` with.
  */
-function propagate(args: unknown[], options: TracedFetchOptions): unknown[] {
-  const [input, init] = args as [unknown, RequestInit | undefined]
+function withCarrier({ args, input, init, request }: Call, options: TracedFetchOptions): unknown[] {
   let headers: Headers
   try {
-    const base =
-      init?.headers !== undefined ? init.headers : isRequest(input) ? input.headers : undefined
-    headers = new Headers(base)
+    headers = new Headers(init?.headers !== undefined ? init.headers : request?.headers)
   } catch {
     return args
   }
 
-  injectCarrier(getTraceCarrier(), (name, value) => {
+  const carrier = getTraceCarrier()
+  if (carrier.traceparent) headers.delete('tracestate')
+  injectCarrier(carrier, (name, value) => {
     if (SAFE_HEADER_VALUE.test(value)) headers.set(name, value)
   })
-  if (options.forwardRequestId && !headers.has('x-request-id')) {
+  if (options.forwardRequestId) {
     const requestId = getContextField('requestId')
     if (typeof requestId === 'string' && SAFE_HEADER_VALUE.test(requestId)) {
-      headers.set('X-Request-Id', requestId)
+      headers.set(REQUEST_ID_HEADER, requestId)
     }
   }
 
-  if (isRequest(init)) {
-    // `fetch(url, request)`: a Request's fields are getters a spread would drop.
-    try {
-      return [input, new Request(init, { headers })]
-    } catch {
-      return args
-    }
-  }
+  // `fetch(url, request)`: a Request's fields are getters a spread would drop.
+  if (isRequest(init)) return [input, initFromRequest(init, headers)]
   return [input, { ...init, headers }]
 }
 
-/** The Span fields for a call. URL parts are left out when the URL cannot be parsed. */
-function describe(args: unknown[]): { method: string; host?: string; path?: string } {
-  const [input, init] = args as [unknown, RequestInit | undefined]
+/**
+ * The Span fields for a call. All four are always set, `undefined` when unknown (a URL that
+ * cannot be parsed, no response yet), so the caller's own Context Fields of the same names
+ * never show on the Span's line.
+ *
+ * @param {Call} call - The outgoing call.
+ * @returns The Span's `method`, `host`, `path` and `statusCode`.
+ */
+function spanFields({ input, init, request }: Call): {
+  method: string
+  host: string | undefined
+  path: string | undefined
+  statusCode: number | undefined
+} {
+  let method = 'GET'
   try {
-    const request = isRequest(input) ? input : undefined
-    const method = String(init?.method ?? request?.method ?? 'GET').toUpperCase()
-    let url: URL | undefined
-    try {
-      url = new URL(request ? request.url : String(input))
-    } catch {
-      // relative or invalid: fetch will reject it
-    }
-    return { method, ...(url && { host: url.host, path: url.pathname }) }
+    method = String(init?.method ?? request?.method ?? 'GET').toUpperCase()
   } catch {
-    return { method: 'GET' }
+    // a method whose toString throws: fetch will reject it
   }
+  let url: URL | undefined
+  try {
+    url = new URL(request ? request.url : String(input))
+  } catch {
+    // relative or invalid: fetch will reject it
+  }
+  return { method, host: url?.host, path: url?.pathname, statusCode: undefined }
 }
 
 /**
@@ -102,6 +185,11 @@ function describe(args: unknown[]): { method: string; host?: string; path?: stri
  * Outside a Logging Context, calls it with exactly `args` and returns its result.
  * Never retries and never handles an error: what `doFetch` returns or throws is what the
  * caller gets.
+ *
+ * @param {(...args: unknown[]) => Promise<R>} doFetch - The `fetch` to call.
+ * @param {unknown[]} args - The arguments the caller passed.
+ * @param {TracedFetchOptions} options - The options the wrapper was given.
+ * @returns {Promise<R>} What `doFetch` returns.
  */
 function tracedCall<R>(
   doFetch: (...args: unknown[]) => Promise<R>,
@@ -109,14 +197,15 @@ function tracedCall<R>(
   options: TracedFetchOptions,
 ): Promise<R> {
   if (!getTraceCarrier().traceparent) return doFetch(...args)
-  if (!options.spans) return doFetch(...propagate(args, options))
+  const call = readCall(args)
+  if (!options.spans) return doFetch(...withCarrier(call, options))
 
-  const fields = describe(args)
+  const fields = spanFields(call)
   return withSpan(SPAN_OPERATION, () => {
     // Context Fields set inside a Span stay on that Span's lines (its `span.end`).
     setLoggerContext(fields)
     // Inside the Span, so the downstream work's parent is this Span.
-    return doFetch(...propagate(args, options)).then((response) => {
+    return doFetch(...withCarrier(call, options)).then((response) => {
       const status = (response as { status?: unknown } | null)?.status
       if (typeof status === 'number') setLoggerContext({ statusCode: status })
       return response
@@ -134,6 +223,7 @@ function tracedCall<R>(
  * @param {RequestInfo | URL} input - The fetch URL or Request.
  * @param {RequestInit} [init] - Optional fetch init options. Never mutated.
  * @param {TracedFetchOptions} [options] - `spans`, `forwardRequestId`. All off by default.
+ *   `forwardRequestId` sends the Request ID to whatever host you call.
  * @returns {Promise<Response>} The fetch response, or the rejection `fetch` gave.
  *
  * @example
@@ -160,6 +250,9 @@ export function tracedFetch(
  * the binding with exactly the same arguments. Wrap once and reuse it; pass the original
  * binding (not the wrapper) when handing it on to another Worker.
  *
+ * With `forwardRequestId`, the current Request ID replaces any `X-Request-Id` on the call, so
+ * forwarding `c.req.raw` sends this Worker's ID, not the client's.
+ *
  * @template T - The binding type (e.g. `Fetcher`, or `Service<MyEntrypoint>`).
  * @param {T} binding - The service binding.
  * @param {TracedFetchOptions} [options] - `spans`, `forwardRequestId`. All off by default.
@@ -181,15 +274,19 @@ export function tracedFetcher<T extends { fetch: FetchLike }>(
   // other `this`). Wrapped in a Proxy so properties on them, like RPC pipelining, still work.
   const methods = new WeakMap<object, unknown>()
 
-  return new Proxy(binding, {
-    get(target, prop) {
+  // A Proxy must return a frozen (non-configurable, read-only) property's own value, so a
+  // frozen or sealed binding is proxied through an empty shell that inherits from it.
+  // Service bindings are extensible platform objects, so they are proxied directly.
+  const target = Object.isExtensible(binding) ? binding : (Object.create(binding) as T)
+  return new Proxy(target, {
+    get(_target, prop) {
       if (prop === 'fetch') return fetch
-      const value: unknown = Reflect.get(target, prop)
+      const value: unknown = Reflect.get(binding, prop)
       if (typeof value !== 'function') return value
       let method = methods.get(value)
       if (!method) {
         method = new Proxy(value, {
-          apply: (fn, _this, args) => Reflect.apply(fn, target, args),
+          apply: (fn, _this, args) => Reflect.apply(fn, binding, args),
         })
         methods.set(value, method)
       }
