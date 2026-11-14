@@ -788,11 +788,16 @@ const NEEDS_WALK = new Error('needs walk')
 
 /**
  * How many values the fast path writes before it hands the line to the
- * walk. The fast path sees what a `toJSON` returns, not the object it was
- * called on, so it can't tell a shared object whose `toJSON` returns a new
- * object each time; the walk can, and charges it to the budget.
+ * walk, which writes the same line but bounds every repeat by the budget.
+ * A safety net: the fast path already gives up on every repeat it can see.
  */
 const MAX_FAST_VALUES = 100_000
+
+/**
+ * How many characters of keys and strings the fast path writes before it
+ * hands the line to the walk (see `MAX_FAST_VALUES`).
+ */
+const MAX_FAST_CHARS = 1024 * 1024
 
 /**
  * Serialize a record to one JSON line. Never throws for a value in it: a
@@ -802,10 +807,11 @@ const MAX_FAST_VALUES = 100_000
  * budget, which its message's placeholders may already have spent from.
  *
  * Most lines take a fast path: native `JSON.stringify`, which gives up on
- * the first object or long string seen twice (a repeat or a cycle), boxed
- * symbol, or getter or `toJSON` that throws, and after `MAX_FAST_VALUES`
- * values. Those lines are written again by the `toJSONValue()` walk, so a
- * getter on them runs twice.
+ * the first object or long string seen twice (a repeat or a cycle, an object
+ * whose `toJSON` was already called included), boxed symbol, or getter or
+ * `toJSON` that throws, and after `MAX_FAST_VALUES` values or
+ * `MAX_FAST_CHARS` characters. Those lines are written again by the
+ * `toJSONValue()` walk, so a getter (and a `toJSON`) on them runs twice.
  *
  * @param {LogRecord} record - The record to serialize.
  * @returns {string} One JSON line.
@@ -816,10 +822,14 @@ export function stringifyRecord(record: LogRecord): string {
     const seen = new WeakSet<object>()
     let strings: Set<string> | undefined
     let values = 0
+    let chars = 0
     try {
-      return JSON.stringify(record, (_key, value: unknown) => {
+      return JSON.stringify(record, function (this: unknown, key: string, value: unknown) {
         if (++values > MAX_FAST_VALUES) throw NEEDS_WALK
+        chars += key.length
         if (typeof value === 'string') {
+          chars += value.length
+          if (chars > MAX_FAST_CHARS) throw NEEDS_WALK
           if (value.length >= LONG_STRING) {
             strings ??= new Set()
             if (strings.has(value)) throw NEEDS_WALK
@@ -827,9 +837,17 @@ export function stringifyRecord(record: LogRecord): string {
           }
           return value
         }
+        if (chars > MAX_FAST_CHARS) throw NEEDS_WALK
         if (typeof value !== 'object' || value === null) return nonJSONText(value) ?? value
         if (seen.has(value)) throw NEEDS_WALK
         seen.add(value)
+        // A `toJSON` result: the object it was called on is what repeats, as in the walk.
+        // Read through the descriptor, so a getter does not run twice.
+        const own = Object.getOwnPropertyDescriptor(this, key)?.value as unknown
+        if (own !== value && typeof own === 'object' && own !== null) {
+          if (seen.has(own)) throw NEEDS_WALK
+          seen.add(own)
+        }
         if (value instanceof Map || value instanceof Set) return Array.from(value)
         if (Object.getPrototypeOf(value) === Symbol.prototype) throw NEEDS_WALK // a boxed symbol: JSON writes `{}`
         return value

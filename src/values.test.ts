@@ -830,3 +830,55 @@ describe('boxed primitives are told by their brand, not their tag', () => {
     expect(JSON.parse(stringifyRecord({ ...boxed, p: sh, q: sh }))).toMatchObject(expected)
   })
 })
+
+describe('the fast path keeps to the budget below its value cap', () => {
+  beforeEach(() => _reset())
+
+  it('a toJSON returning 50 strings of 1,000 characters, shared 1,900 times, is bounded', () => {
+    const fields = Object.fromEntries(
+      Array.from({ length: 50 }, (_, i) => [`k${i}`, String(i).padEnd(1000, 'x')]),
+    )
+    const factory = { toJSON: () => ({ ...fields }) }
+    let line = ''
+    const ms = elapsed(() => (line = lineFor({ a: Array.from({ length: 1900 }, () => factory) })))
+    expect(ms).toBeLessThan(500)
+    expect(line.length).toBeLessThan(1_000_000)
+    const a = JSON.parse(line).a as unknown[]
+    expect(a).toHaveLength(1900)
+    expect(a[0]).toEqual(fields)
+    expect(a.at(-1)).toBe('[Repeated]')
+  })
+
+  it('past 1 MiB of characters, the walk bounds what the fast path cannot see', () => {
+    const fields = Object.fromEntries(
+      Array.from({ length: 50 }, (_, i) => [`k${i}`, String(i).padEnd(1000, 'x')]),
+    )
+    const factory = { toJSON: () => ({ ...fields }) }
+    // A getter's value is not read again, so the fast path cannot tell it is the same object.
+    const holders = Array.from({ length: 1900 }, () => ({
+      get v() {
+        return factory
+      },
+    }))
+    let line = ''
+    const ms = elapsed(() => (line = lineFor({ a: holders })))
+    expect(ms).toBeLessThan(500)
+    expect(line.length).toBeLessThan(2_000_000)
+    const a = JSON.parse(line).a as { v: unknown }[]
+    expect(a[0].v).toEqual(fields)
+    expect(a.at(-1)!.v).toBe('[Repeated]')
+  })
+
+  it('a toJSON returning 2,000 keys, shared 20 times, is written again only within the budget', () => {
+    const big = wide(2_000)
+    const once = JSON.stringify(big).length
+    const factory = { toJSON: () => ({ ...big }) }
+    let line = ''
+    const ms = elapsed(() => (line = lineFor({ items: Array.from({ length: 20 }, () => factory) })))
+    expect(ms).toBeLessThan(500)
+    expect(line.length).toBeLessThan(7 * once) // 1 copy, plus 10,000 values of repeats
+    const items = JSON.parse(line).items as unknown[]
+    expect(items[0]).toEqual(big)
+    expect(items.at(-1)).toBe('[Repeated]')
+  })
+})
