@@ -15,7 +15,7 @@ The per-unit-of-work key-value data attached to every log line inside a Logging 
 _Avoid_: bindings, context, metadata
 
 **Request ID**:
-The Context Field (`requestId`) that names one HTTP request in its Logging Context. The Hono middleware takes it from a configured source (a header such as `X-Request-Id` or `cf-ray`, or `c.var.requestId` from an earlier middleware) only when it passes validation, and generates one otherwise. `cf-ray`, when present, is also recorded as its own Context Field, `cfRay`.
+The Context Field (`requestId`) that names one HTTP request in its Logging Context. The Hono middleware takes it from a configured source (a header such as `X-Request-Id` or `cf-ray`, or `c.var.requestId` from an earlier middleware) only when it passes validation, and generates one otherwise (always, when incoming IDs are not trusted). A rejected incoming value is marked with `requestIdRejected: true`, never logged. `cf-ray`, when present and trusted, is also recorded as its own Context Field, `cfRay`.
 _Avoid_: correlation ID, trace ID (that is the Trace Context's)
 
 **Request Lines**:
