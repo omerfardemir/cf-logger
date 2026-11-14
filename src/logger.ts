@@ -155,8 +155,19 @@ const forwarders = new WeakMap<Logger, () => Logger>()
 
 /** The logger `getLogger()` writes through outside a Logging Context, chosen at call time. */
 function currentOutsideLogger(): Logger {
-  return defaultLogger ?? (unknownLogger ??= createLogger({ service: 'unknown' }))
+  return defaultLogger ?? fallbackLogger()
 }
+
+function fallbackLogger(): Logger {
+  return (unknownLogger ??= createLogger({ service: 'unknown' }))
+}
+
+/**
+ * True while a forwarder is writing a line. A registered default that writes back through
+ * `getLogger()` (a hand-written logger wrapping it) would otherwise recurse until the stack
+ * overflows; the nested line goes to the `'unknown'` logger instead.
+ */
+let forwarding = false
 
 /**
  * A logger that resolves the logger to write through on every call. Its `.child()` is a
@@ -178,7 +189,16 @@ function forwardingLogger(resolve: () => Logger): Logger {
     },
   } as Logger
   for (const level of LEVELS) {
-    logger[level] = (...args: unknown[]) => (resolve()[level] as (...a: unknown[]) => void)(...args)
+    logger[level] = (...args: unknown[]) => {
+      const target = forwarding ? fallbackLogger() : resolve()
+      const outer = forwarding
+      forwarding = true
+      try {
+        ;(target[level] as (...a: unknown[]) => void)(...args)
+      } finally {
+        forwarding = outer
+      }
+    }
   }
   forwarders.set(logger, resolve)
   return logger
@@ -221,11 +241,13 @@ function resolveForRegistration(logger: Logger): Logger | undefined {
  * It carries no Context Fields (those live in each Logging Context), so
  * per-request data cannot reach other work through it. A `.child()` of it is
  * accepted, but the fields passed to `.child()` appear on every line logged
- * outside a context, so they must be per-process data too. Passing the logger
- * `getLogger()` returned outside a context changes nothing.
+ * outside a context, so they must be per-process data too.
  *
  * Replaces any default already set, including one `useLogger`, `TracedEntrypoint`,
- * `tracedWorker` or `defaultLoggerFromEnv` registered.
+ * `tracedWorker` or `defaultLoggerFromEnv` registered. The exception is a logger taken from
+ * `getLogger()` outside a Logging Context: `setDefaultLogger(getLogger())` changes nothing,
+ * and a `.child()` of it is ignored while no default is set (once one is, it registers a
+ * child of that default).
  *
  * @template T - The type of user-defined log fields.
  * @param {Logger<T>} logger - The Root Logger.

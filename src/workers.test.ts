@@ -797,21 +797,34 @@ describe('Default Logger from the Workers helpers', () => {
     for (const key of Object.keys(workersEnv)) delete workersEnv[key]
   })
 
-  it('a TracedEntrypoint whose rootLogger returns getLogger() neither loops nor locks in unknown', () => {
+  it('a TracedEntrypoint whose rootLogger returns getLogger() does not loop', () => {
     const entries = _captureEntries()
     class Forwarding extends TracedEntrypoint {
       protected override get rootLogger() {
         return getLogger()
       }
     }
-    const first = new Forwarding({} as any, {})
-    getLogger().info('before')
-    setDefaultLogger(createLogger({ service: 'orders' }))
-    const second = new Forwarding({} as any, {})
-    getLogger().info('after')
 
-    expect([first, second].every((e) => e instanceof Forwarding)).toBe(true)
-    expect(entries.map((e) => e.service)).toEqual(['unknown', 'orders'])
+    expect(() => new Forwarding({} as any, {})).not.toThrow()
+    expect(_getDefaultLogger()).toBeUndefined()
+    getLogger().info('x')
+    expect(entries.at(-1)).toMatchObject({ service: 'unknown', message: 'x' })
+  })
+
+  it('a TracedEntrypoint whose rootLogger is a child of getLogger() does not lock in unknown', () => {
+    const entries = _captureEntries()
+    class ForwardingChild extends TracedEntrypoint {
+      protected override get rootLogger() {
+        return getLogger().child({ component: 'pkg' })
+      }
+    }
+
+    expect(() => new ForwardingChild({} as any, {})).not.toThrow()
+    expect(_getDefaultLogger()).toBeUndefined()
+    workersEnv.NAME = 'orders'
+    defaultLoggerFromEnv()
+    getLogger().info('x')
+    expect(entries.at(-1)).toMatchObject({ service: 'orders', message: 'x' })
   })
 
   it('defaultLoggerFromEnv() builds the Root Logger from env and registers it', () => {

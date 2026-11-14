@@ -6,7 +6,6 @@ import {
   runWithLogger,
   setDefaultLogger,
   setLoggerContext,
-  registerDefaultLogger,
   _captureEntries,
   _reset,
 } from './logger'
@@ -183,22 +182,29 @@ describe('Default Logger', () => {
     expect(entries.find((e) => e.message === 'outside')).toMatchObject({ service: 'unknown' })
   })
 
-  it('a forwarder registered while no default is set does not lock in service: unknown', () => {
+  it.each([
+    ['a .child() of it', () => setDefaultLogger(getLogger().child({ component: 'pkg' }))],
+    [
+      'the logger inside runWithLogger({ logger: getLogger() })',
+      () => runWithLogger({ logger: getLogger() }, () => setDefaultLogger(getLogger())),
+    ],
+  ])(
+    'a logger from getLogger() outside a context (%s) set before any default is ignored',
+    (_name, register) => {
+      const entries = _captureEntries()
+      register()
+      useLogger(createLogger({ service: 'orders' }))
+
+      expect(outsideService(entries)).toBe('orders')
+    },
+  )
+
+  it('a registered logger that writes back through getLogger() does not recurse', () => {
     const entries = _captureEntries()
-    registerDefaultLogger(getLogger().child({ component: 'pkg' }))
-    registerDefaultLogger(createLogger({ service: 'orders' }))
-    getLogger().info('x')
+    setDefaultLogger({ ...getLogger() })
 
-    expect(entries[0]).toMatchObject({ service: 'orders' })
-  })
-
-  it('registering getLogger() inside runWithLogger({ logger: getLogger() }) is ignored', () => {
-    const entries = _captureEntries()
-    runWithLogger({ logger: getLogger() }, () => registerDefaultLogger(getLogger()))
-    registerDefaultLogger(createLogger({ service: 'orders' }))
-    getLogger().info('x')
-
-    expect(entries[0]).toMatchObject({ service: 'orders' })
+    expect(() => getLogger().info('x')).not.toThrow()
+    expect(entries.at(-1)).toMatchObject({ service: 'unknown', message: 'x' })
   })
 
   it('registering a module-scope child of getLogger() registers a concrete child', () => {
