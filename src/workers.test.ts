@@ -797,6 +797,23 @@ describe('Default Logger from the Workers helpers', () => {
     for (const key of Object.keys(workersEnv)) delete workersEnv[key]
   })
 
+  it('a TracedEntrypoint whose rootLogger returns getLogger() neither loops nor locks in unknown', () => {
+    const entries = _captureEntries()
+    class Forwarding extends TracedEntrypoint {
+      protected override get rootLogger() {
+        return getLogger()
+      }
+    }
+    const first = new Forwarding({} as any, {})
+    getLogger().info('before')
+    setDefaultLogger(createLogger({ service: 'orders' }))
+    const second = new Forwarding({} as any, {})
+    getLogger().info('after')
+
+    expect([first, second].every((e) => e instanceof Forwarding)).toBe(true)
+    expect(entries.map((e) => e.service)).toEqual(['unknown', 'orders'])
+  })
+
   it('defaultLoggerFromEnv() builds the Root Logger from env and registers it', () => {
     const entries = _captureEntries()
     Object.assign(workersEnv, {

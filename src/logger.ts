@@ -194,13 +194,22 @@ function forwardingLogger(resolve: () => Logger): Logger {
 const outsideContextLogger: Logger = forwardingLogger(currentOutsideLogger)
 
 /**
- * The concrete logger to register for `logger`, or `undefined` when registering it would
- * make the Default Logger write through itself (`setDefaultLogger(getLogger())`).
+ * The concrete logger to register for `logger`, or `undefined` when it must not be registered.
+ *
+ * Every forwarder resolves through `outsideContextLogger`. While no default is set, it would
+ * resolve to the `'unknown'` logger (or a child of it), which would then win "first seen" and
+ * keep the isolate at `service: 'unknown'`; and `outsideContextLogger` itself would make the
+ * Default Logger write through itself. Once a default is set, a forwarder child resolves to a
+ * concrete child of it.
+ *
+ * @param {Logger} logger - The logger passed to `setDefaultLogger` or a helper.
+ * @returns {Logger | undefined} What to register, or `undefined` for a no-op.
  */
-function registrable(logger: Logger): Logger | undefined {
-  if (logger === outsideContextLogger) return undefined
+function resolveForRegistration(logger: Logger): Logger | undefined {
   const resolve = forwarders.get(logger)
-  return resolve ? resolve() : logger
+  if (!resolve) return logger
+  if (logger === outsideContextLogger || !defaultLogger) return undefined
+  return resolve()
 }
 
 /**
@@ -229,7 +238,7 @@ function registrable(logger: Logger): Logger | undefined {
  * ```
  */
 export function setDefaultLogger<T extends LogFields = LogFields>(logger: Logger<T>): void {
-  const target = registrable(logger as Logger)
+  const target = resolveForRegistration(logger as Logger)
   if (target) defaultLogger = target
 }
 
@@ -241,7 +250,7 @@ export function setDefaultLogger<T extends LogFields = LogFields>(logger: Logger
  */
 export function registerDefaultLogger(logger: Logger): void {
   if (defaultLogger) return
-  defaultLogger = registrable(logger)
+  defaultLogger = resolveForRegistration(logger)
 }
 
 /**
