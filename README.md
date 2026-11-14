@@ -256,14 +256,16 @@ app.use(
 )
 ```
 
-| Option          | Default               | Effect                                                                                                                               |
-| --------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| `from`          | `['x-request-id']`    | Sources to read, in order. `[]` reads none. `c.var.requestId` is always tried after them.                                            |
-| `trustIncoming` | `true`                | `false` skips every source in `from`, so a client can never choose the ID. `c.var.requestId` is still used, because your app set it. |
-| `validate`      | 1–128 of `\w - = : .` | A `RegExp` or `(id, c) => boolean`. Applies to `from` sources and `c.var.requestId`.                                                 |
-| `generate`      | `crypto.randomUUID()` | `(c) => string`, called only when no source gives a valid ID.                                                                        |
+| Option          | Default               | Effect                                                                                                                                |
+| --------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `from`          | `['x-request-id']`    | Sources to read, in order. `[]` reads none. `c.var.requestId` is always tried after them. An invalid header name throws.              |
+| `trustIncoming` | `true`                | `false` skips every source in `from`, so `useLogger` reads no request header for the ID. `c.var.requestId` is still used (see below). |
+| `validate`      | 1–128 of `\w - = : .` | A `RegExp` or `(id, c) => boolean`. Applies to `from` sources and `c.var.requestId`. Anchor a pattern and bound its length.           |
+| `generate`      | `crypto.randomUUID()` | `(c) => string`, called only when no source gives a valid ID.                                                                         |
 
-When the request has a `cf-ray` header, its value is also recorded as `cfRay` on every line, whether or not it is the request ID and whatever `trustIncoming` says. Use it to look a request up in Cloudflare's own logs. It must pass the default format check above (a custom `validate` does not apply to it); otherwise `cfRay` is left out.
+With `trustIncoming: false`, `c.var.requestId` is still read, because your own middleware set it. A middleware that copies a client header into it, such as `generateId({ contextKey: 'requestId', headerName: 'X-Request-Id' })`, therefore still lets the client choose the ID, subject to `validate`.
+
+When the request has a `cf-ray` header, its value is also recorded as `cfRay` on every line, whether or not it is the request ID and whatever `trustIncoming` says. Use it to look a request up in Cloudflare's own logs. It must pass the default format check above (a custom `validate` does not apply to it); otherwise `cfRay` is left out. Cloudflare sets `cf-ray` at its edge, so it is trustworthy on a deployed Worker; under `wrangler dev`, in tests or on Node.js a client can send any value.
 
 `useLogger()` does not catch, create, or replace error responses. It lets Hono run downstream handlers and app-level `onError()` normally, then checks `c.error` after `await next()`. Failed requests emit `request.error` with the final `c.res.status`; all requests emit `request.end` with the final `c.res.status`.
 

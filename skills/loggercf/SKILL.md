@@ -125,7 +125,7 @@ app.use(
   useLogger(createLogger({ service: 'api' }), {
     requestId: {
       from: ['cf-ray', 'x-request-id'], // header names or (c) => string | undefined, first valid wins
-      trustIncoming: true, // false: ignore `from`, so clients can never choose the ID
+      trustIncoming: true, // false: ignore `from`; c.var.requestId from your own middleware still applies
       // validate: RegExp | (id, c) => boolean, replaces the default check and its 128 cap
       // generate: (c) => string, used when no source is valid
     },

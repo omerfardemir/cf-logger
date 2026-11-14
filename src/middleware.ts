@@ -23,16 +23,19 @@ export interface RequestIdOptions {
   /**
    * Sources to read the incoming ID from, in order. A source is a header name or a function.
    * Defaults to `['x-request-id']`. Use `['cf-ray', 'x-request-id']` to prefer Cloudflare's Ray ID.
+   * `useLogger` throws a `TypeError` for a header name that is not a valid HTTP header name.
    */
   from?: RequestIdSource[]
   /**
-   * `false` ignores every source in `from`, so a client can never choose the ID.
-   * `c.var.requestId` from an earlier middleware is still used, because the app set it.
+   * `false` ignores every source in `from`, so `useLogger` reads no request header for the ID.
+   * `c.var.requestId` from an earlier middleware is still used (validated), because the app set
+   * it; a middleware that copies a client header there (such as `generateId`) passes it through.
    * Defaults to `true`.
    */
   trustIncoming?: boolean
   /**
-   * Accepts or rejects an incoming ID. Replaces the default check, including its length cap.
+   * Accepts or rejects an incoming ID. Replaces the default check, including its length cap,
+   * so anchor a pattern (`^...$`) and bound its length.
    * Defaults to `/^[\w\-=:.]{1,128}$/`: 1 to 128 of `A-Z a-z 0-9 _ - = : .`.
    */
   validate?: RegExp | ((id: string, c: Context) => boolean)
@@ -54,32 +57,49 @@ const DEFAULT_REQUEST_ID_PATTERN = /^[\w\-=:.]{1,128}$/
 
 const DEFAULT_REQUEST_ID_SOURCES: readonly RequestIdSource[] = ['x-request-id']
 
+/** An HTTP header name: one or more RFC 9110 token characters. */
+const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
 function matches(pattern: RegExp, value: string): boolean {
   // A global or sticky RegExp keeps state in lastIndex between test() calls.
   pattern.lastIndex = 0
   return pattern.test(value)
 }
 
-function resolveRequestId(c: Context, options: RequestIdOptions = {}): string {
+/**
+ * Builds the per-request request ID picker from the options, once per middleware.
+ * Throws a `TypeError` for a header name in `from` that no request could carry.
+ */
+function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => string {
   const {
     from = DEFAULT_REQUEST_ID_SOURCES,
     trustIncoming = true,
     validate = DEFAULT_REQUEST_ID_PATTERN,
     generate = () => crypto.randomUUID(),
   } = options
-  const isValid = (id: unknown): id is string =>
-    typeof id === 'string' &&
-    id !== '' &&
-    (typeof validate === 'function' ? validate(id, c) : matches(validate, id))
 
-  if (trustIncoming) {
-    for (const source of from) {
-      const id = typeof source === 'function' ? source(c) : c.req.header(source)
-      if (isValid(id)) return id
+  const readers = (trustIncoming ? from : []).map((source): ((c: Context) => unknown) => {
+    if (typeof source === 'function') return source
+    if (!HEADER_NAME.test(source)) {
+      throw new TypeError(
+        `useLogger: invalid header name in requestId.from: ${JSON.stringify(source)}`,
+      )
     }
+    return (c) => c.req.header(source)
+  })
+  readers.push((c) => c.get('requestId' as never))
+
+  const accepts = typeof validate === 'function' ? validate : (id: string) => matches(validate, id)
+  const isValid = (id: unknown, c: Context): id is string =>
+    typeof id === 'string' && id !== '' && accepts(id, c)
+
+  return (c) => {
+    for (const read of readers) {
+      const id = read(c)
+      if (isValid(id, c)) return id
+    }
+    return generate(c)
   }
-  const fromEarlierMiddleware: unknown = c.get('requestId' as never)
-  return isValid(fromEarlierMiddleware) ? fromEarlierMiddleware : generate(c)
 }
 
 /**
@@ -119,10 +139,12 @@ export function useLogger<T extends LogFields = LogFields>(
   loggerOrFactory: Logger<T> | ((c: Context) => Logger<T>),
   options: UseLoggerOptions = {},
 ): MiddlewareHandler {
+  const pickRequestId = requestIdPicker(options.requestId)
+
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
 
-    const requestId = resolveRequestId(c, options.requestId)
+    const requestId = pickRequestId(c)
     const cfRay = c.req.header('cf-ray')
     const method = c.req.method
     const path = new URL(c.req.url).pathname

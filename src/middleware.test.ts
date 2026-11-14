@@ -404,6 +404,14 @@ describe('useLogger request ID', () => {
     )
   })
 
+  it('throws when useLogger is built with an invalid header name in from', () => {
+    for (const name of ['', 'x request id', 'x-request-id\n']) {
+      expect(() =>
+        useLogger(createLogger({ service: 'test-mw' }), { requestId: { from: [name] } }),
+      ).toThrow(TypeError)
+    }
+  })
+
   it('validates values returned by a function source', async () => {
     expect(await requestIdOf(requestIdApp({ requestId: { from: [() => 'bad id'] } }))).toMatch(
       UUID_RE,
