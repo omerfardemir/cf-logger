@@ -1,9 +1,6 @@
-import { createLogger, type LogLevel } from 'loggercf'
+import { defaultLoggerFromEnv } from 'loggercf/workers'
 export { useLogger } from 'loggercf/hono'
 
-export const logger = createLogger({
-  service: process.env.NAME ?? 'pino-log-test',
-  level: (process.env.LOG_LEVEL ?? 'debug') as LogLevel,
-  environment: process.env.ENVIRONMENT,
-  version: process.env.VERSION,
-})
+// Built at module scope from `env` (cloudflare:workers): NAME, LOG_LEVEL, ENVIRONMENT, VERSION.
+// Also the isolate's Default Logger, for getLogger() outside a Logging Context.
+export const logger = defaultLoggerFromEnv()

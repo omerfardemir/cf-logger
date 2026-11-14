@@ -2,6 +2,7 @@ import type { Context, MiddlewareHandler } from 'hono'
 import type { LogFields, Logger } from './types'
 import { extractCarrier, injectCarrier } from './trace'
 import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './logger'
+import { registerDefaultLogger } from './logger'
 
 /**
  * Where `useLogger` reads an incoming request ID from: a request header name
@@ -243,6 +244,8 @@ export function useLogger<T extends LogFields = LogFields>(
   options: UseLoggerOptions = {},
 ): MiddlewareHandler {
   const pickRequestId = requestIdPicker(options.requestId)
+  // A factory's logger is not registered: nothing guarantees it is a Root Logger.
+  if ('info' in loggerOrFactory) registerDefaultLogger(loggerOrFactory as Logger)
 
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
