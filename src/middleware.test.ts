@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { Hono, type MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
-import { createLogger, _captureEntries, _captureLines, _reset } from './logger'
+import { createLogger, _captureEntries, _captureLines, _reset, _setSink } from './logger'
 import type { LogFields, Logger } from './types'
 import { useLogger, type UseLoggerOptions } from './middleware'
 
@@ -1527,6 +1527,253 @@ describe('useLogger throws that escape Hono', () => {
       expect(entry).not.toHaveProperty('statusCodeAssumed')
       expect(entry).not.toHaveProperty('originalErr')
     }
+  })
+})
+
+/** A value no sink can write: JSON.stringify throws on it. */
+function unwritable(): object {
+  return {
+    toJSON() {
+      throw new Error('cannot write this')
+    },
+  }
+}
+
+/** A value whose `instanceof` check throws. */
+function prototypeTrapProxy(): object {
+  return new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        throw new Error('getPrototypeOf broke')
+      },
+    },
+  )
+}
+
+/** An Error that no sink can write, because one of its own properties is unwritable. */
+function unwritableError(message: string): Error {
+  return Object.assign(new Error(message), { detail: unwritable() })
+}
+
+/** Swaps in a sink that throws on every write, for the length of `run`. */
+async function withThrowingSink(run: () => Promise<void>): Promise<void> {
+  const previous = _setSink({
+    write() {
+      throw new Error('sink broke')
+    },
+  })
+  try {
+    await run()
+  } finally {
+    _setSink(previous)
+  }
+}
+
+const UNUSUAL_THROWN_VALUES: [string, () => unknown][] = [
+  ['an object whose toJSON throws', unwritable],
+  ['a Proxy whose getPrototypeOf trap throws', prototypeTrapProxy],
+  ['an Error with an unwritable property', () => unwritableError('hook broke')],
+]
+
+describe('useLogger diagnostics that cannot be written', () => {
+  beforeEach(() => _reset())
+
+  for (const [name, value] of UNUSUAL_THROWN_VALUES) {
+    it(`a fields hook that throws ${name} leaves the response and both request lines alone`, async () => {
+      const { starts, ends, app } = optionsApp({
+        fields: () => {
+          throw value()
+        },
+      })
+      app.get('/', (c) => c.text('handled'))
+      const res = await app.request('/')
+      expect(res.status).toBe(200)
+      expect(await res.text()).toBe('handled')
+      expect(starts()).toHaveLength(1)
+      expect(ends()).toHaveLength(1)
+    })
+
+    it(`an endFields hook that throws ${name} leaves the response and request.end alone`, async () => {
+      const { ends, app } = optionsApp({
+        endFields: () => {
+          throw value()
+        },
+      })
+      app.get('/', (c) => c.text('handled'))
+      const res = await app.request('/')
+      expect(res.status).toBe(200)
+      expect(await res.text()).toBe('handled')
+      expect(ends()).toHaveLength(1)
+      expect(ends()[0]).toMatchObject({ level: 'INFO', statusCode: 200 })
+    })
+
+    it(`a level hook that throws ${name} falls back to the default level`, async () => {
+      const { ends, app } = optionsApp({
+        level: () => {
+          throw value()
+        },
+      })
+      app.get('/', (c) => c.text('handled'))
+      const res = await app.request('/')
+      expect(res.status).toBe(200)
+      expect(ends()).toHaveLength(1)
+      expect(ends()[0]).toMatchObject({ level: 'INFO', statusCode: 200 })
+    })
+  }
+
+  it('reports a thrown non-Error value as { type, message } in the hook WARN', async () => {
+    const { warnings, app } = optionsApp({
+      fields: () => {
+        throw unwritable()
+      },
+      endFields: () => {
+        throw prototypeTrapProxy()
+      },
+    })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    expect(warnings().map((w) => [w.hook, w.err])).toEqual([
+      ['fields', { type: 'object', message: '[object Object]' }],
+      ['endFields', { type: 'object', message: '{}' }],
+    ])
+  })
+
+  it('never changes the response when the sink throws on every write', async () => {
+    await withThrowingSink(async () => {
+      const app = new Hono()
+      app.use(
+        useLogger(createLogger({ service: 'test-mw' }), {
+          requestId: { from: [throwingHook], generate: () => 'not a safe value\n' },
+          fields: () => ({ requestId: 'forged' }),
+          endFields: throwingHook,
+          level: throwingHook,
+        }),
+      )
+      app.get('/', (c) => c.text('handled'))
+      app.get('/boom', () => {
+        throw new Error('kaboom')
+      })
+      for (let i = 0; i < 2; i++) {
+        const res = await app.request('/')
+        expect(res.status).toBe(200)
+        expect(await res.text()).toBe('handled')
+        expect(res.headers.get('X-Request-Id')).toMatch(UUID_RE)
+        expect((await app.request('/boom')).status).toBe(500)
+      }
+    })
+  })
+
+  it('rethrows an escaped value unchanged when the sink throws on every write', async () => {
+    await withThrowingSink(async () => {
+      const app = new Hono()
+      app.use(useLogger(createLogger({ service: 'test-mw' })))
+      app.get('/x', () => {
+        throw 'boom'
+      })
+      await expect(app.request('/x')).rejects.toBe('boom')
+    })
+  })
+
+  it('rethrows what onError threw even when request.end cannot be written', async () => {
+    // Hono hands an Error that escapes useLogger to onError again, one level up. That second
+    // call must get what onError threw, not the error of the request.end that failed.
+    const { app } = optionsApp()
+    const thrown = unwritableError('onError broke')
+    const seen: unknown[] = []
+    app.onError((err, c) => {
+      seen.push(err)
+      if (seen.length === 1) throw thrown
+      return c.text('answered', 503)
+    })
+    app.get('/x', () => {
+      throw new Error('handler broke')
+    })
+    const res = await app.request('/x')
+    expect(res.status).toBe(503)
+    expect(seen).toHaveLength(2)
+    expect(seen[1] === thrown).toBe(true)
+  })
+
+  it('keeps the response and its headers when request.start and request.end cannot be written', async () => {
+    const { lines, app } = optionsApp({ fields: () => ({ broken: unwritable() as never }) })
+    app.get('/', (c) => c.text('handled'))
+    const res = await app.request('/')
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('handled')
+    expect(res.headers.get('X-Request-Id')).toMatch(UUID_RE)
+    expect(lines).toEqual([])
+  })
+
+  it('keeps the response and its headers when only request.end cannot be written', async () => {
+    const { starts, app } = optionsApp({ endFields: () => ({ broken: unwritable() as never }) })
+    app.get('/', (c) => c.text('handled'))
+    const res = await app.request('/')
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('handled')
+    expect(res.headers.get('X-Request-Id')).toMatch(UUID_RE)
+    expect(starts()).toHaveLength(1)
+  })
+})
+
+describe('useLogger returned values in the hook WARN', () => {
+  beforeEach(() => _reset())
+
+  it('logs only the type of a string a fields or endFields hook returned, never the string', async () => {
+    const { lines, warnings, app } = optionsApp({
+      fields: () => 'secret-token-abc' as never,
+      endFields: () => 'secret-token-def' as never,
+    })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    expect(warnings().map((w) => [w.hook, w.returned])).toEqual([
+      ['fields', 'string'],
+      ['endFields', 'string'],
+    ])
+    for (const line of lines) expect(line).not.toMatch(/secret-token/)
+  })
+
+  it('logs the string a level hook returned as is', async () => {
+    const { warnings, app } = optionsApp({ level: () => 'WARN' as never })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    expect(warnings()).toHaveLength(1)
+    expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'WARN' })
+  })
+
+  it('cuts a long string a level hook returned to 32 characters, marked with …', async () => {
+    const { warnings, app } = optionsApp({ level: () => 'x'.repeat(40) as never })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    expect(warnings()).toHaveLength(1)
+    expect(warnings()[0]).toMatchObject({ hook: 'level', returned: `${'x'.repeat(32)}…` })
+  })
+})
+
+describe('useLogger thenables', () => {
+  beforeEach(() => _reset())
+
+  it('never calls then on a thenable that is not a Promise, and treats it as a failure', async () => {
+    const then = vi.fn()
+    // A lazy query builder returned by mistake: a thenable whose then must never run.
+    // oxlint-disable-next-line unicorn/no-thenable
+    const thenable = () => ({ then }) as never
+    const { ends, warnings, app } = optionsApp({
+      requestId: { from: [thenable], validate: thenable },
+      fields: thenable,
+      endFields: thenable,
+      level: thenable,
+    })
+    app.get('/', (c) => c.text('ok'))
+    const res = await app.request('/', { headers: { 'x-request-id': 'abc' } })
+    expect(res.status).toBe(200)
+    expect(then).not.toHaveBeenCalled()
+    expect(ends()).toHaveLength(1)
+    expect(warnings().map((w) => [w.hook, w.returned])).toEqual([
+      ['fields', 'thenable'],
+      ['endFields', 'thenable'],
+      ['level', 'thenable'],
+    ])
   })
 })
 
