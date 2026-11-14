@@ -507,12 +507,21 @@ describe('TracedEntrypoint', () => {
     _reset()
   })
 
-  it('loggerOptions reads NAME and LOG_LEVEL from env', () => {
-    const entrypoint = new TracedEntrypoint({} as any, { NAME: 'my-svc', LOG_LEVEL: 'warn' })
+  it('loggerOptions reads NAME, LOG_LEVEL, ENVIRONMENT and VERSION from env by default', () => {
+    const entrypoint = new TracedEntrypoint({} as any, {
+      NAME: 'my-svc',
+      LOG_LEVEL: 'warn',
+      ENVIRONMENT: 'staging',
+      VERSION: '1.2.3',
+    })
 
     const opts = (entrypoint as any).loggerOptions
-    expect(opts.service).toBe('my-svc')
-    expect(opts.level).toBe('warn')
+    expect(opts).toEqual({
+      service: 'my-svc',
+      level: 'warn',
+      environment: 'staging',
+      version: '1.2.3',
+    })
   })
 
   it('loggerOptions defaults when env vars missing', () => {
@@ -678,6 +687,55 @@ describe('tracedWorker', () => {
       environment: 'canary',
       version: 'tag-1',
     })
+  })
+
+  it('the documented version_metadata recipe falls back to id when tag is empty, and tolerates a missing binding', () => {
+    const entries = _captureEntries()
+
+    interface Env {
+      CF_VERSION_METADATA?: { id: string; tag: string }
+    }
+
+    class TestSession extends TracedSession<Env> {
+      hello() {
+        return this.traced(() => this.logger.info('hello'))
+      }
+    }
+
+    const Worker = tracedWorker(TestSession, {
+      env: { version: (e) => e.CF_VERSION_METADATA?.tag || e.CF_VERSION_METADATA?.id },
+    })
+    new Worker(undefined, { NAME: 'w', CF_VERSION_METADATA: { id: 'id-1', tag: '' } })
+      .session({})
+      .hello()
+    // Without the binding the recipe must not throw; version is just left off.
+    new Worker(undefined, { NAME: 'w2' }).session({}).hello()
+
+    expect(entries[0]).toMatchObject({ service: 'w', version: 'id-1' })
+    expect(entries[1]).toMatchObject({ service: 'w2' })
+    expect(entries[1]).not.toHaveProperty('version')
+  })
+
+  it('an invalid LOG_LEVEL warns once per isolate across repeated session() calls', () => {
+    const entries = _captureEntries()
+
+    class TestSession extends TracedSession {
+      hello() {
+        return this.traced(() => this.logger.info('hello'))
+      }
+    }
+
+    const instance = new (tracedWorker(TestSession))(undefined, {
+      NAME: 'bad-level',
+      LOG_LEVEL: 'verbose',
+    })
+    instance.session({}).hello()
+    instance.session({}).hello()
+
+    const warns = entries.filter((e) => e.level === 'WARN')
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toMatchObject({ invalidLevel: 'verbose', service: 'bad-level' })
+    expect(entries.filter((e) => e.message === 'hello')).toHaveLength(2)
   })
 
   it('tracedWorker() without options reads the default vars', () => {

@@ -64,7 +64,7 @@ Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 | `ENVIRONMENT` | `environment` | left off every log line |
 | `VERSION`     | `version`     | left off every log line |
 
-`LOG_LEVEL` must be one of `trace`, `debug`, `info`, `warn`, `error` or `fatal` (lowercase). Any other value falls back to `'info'` and writes one `WARN` per isolate with `invalidLevel` and `validLevels`.
+`LOG_LEVEL` must be one of `trace`, `debug`, `info`, `warn`, `error` or `fatal` (lowercase). A missing or empty value means `'info'`. Any other value falls back to `'info'` and writes one `WARN` per isolate with `invalidLevel` and `validLevels`.
 
 Using other var names, or deriving a field from a binding, takes a mapping (see [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)). To use Cloudflare's [version metadata](https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/) as `version`, add the binding under a name of your choice and map it with a function:
 
@@ -76,9 +76,21 @@ Using other var names, or deriving a field from a binding, takes a mapping (see 
 
 ```ts
 export default tracedWorker(MySession, {
-  env: { version: (env) => env.CF_VERSION_METADATA.id }, // or .tag, set by `wrangler versions upload --tag`
+  env: { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id },
 })
 ```
+
+Use this exact form. `tag` is `""` for a deploy without `--tag` (on `wrangler deploy` or `wrangler versions upload`) and in local dev, and an empty string counts as absent, so `.tag` alone would silently drop `version`; `.id` is always set. Keep the `?.`: without it, a missing binding throws inside the Root Logger getter, so every `session()` call on the entrypoint fails. Note that `version` is then a tag on tagged deploys and a version UUID on untagged ones, and under `wrangler dev` the ID is a new random UUID on every start; tag every deploy if you query by `version`.
+
+### Upgrading from 0.0.1
+
+Changes to the Logger Options read from env:
+
+- An absent `ENVIRONMENT` or `VERSION` is left off every log line; 0.0.1 logged `'unknown'` (an empty one was already left off). Update any query or alert on `environment = "unknown"` or `version = "unknown"`.
+- An empty `NAME` gives `service: 'unknown'` (0.0.1: `service: ""`).
+- A numeric `VERSION` is logged as a string (`2` becomes `"2"`), and `VERSION: 0`, which 0.0.1 left off, is now logged as `"0"`.
+- An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw.
+- `LOG_LEVEL: "silent"` is no longer accepted. In 0.0.1 it muted all logs; now it falls back to `'info'` with a `WARN`, so **a Worker that had `"silent"` starts writing info-level logs**. Change it before upgrading. The quietest level is `fatal`: only `logger.fatal()` lines are written. There is no off switch.
 
 ## Core API (`loggercf`)
 
@@ -217,7 +229,11 @@ const logger = createLogger(loggerOptionsFromEnv(env))
 createLogger(loggerOptionsFromEnv(env, { version: 'RELEASE' }))
 
 // Or derive it, e.g. from a `version_metadata` binding:
-createLogger(loggerOptionsFromEnv(env, { version: (e) => e.CF_VERSION_METADATA?.id }))
+createLogger(
+  loggerOptionsFromEnv(env, {
+    version: (e) => e.CF_VERSION_METADATA?.tag || e.CF_VERSION_METADATA?.id,
+  }),
+)
 ```
 
 The `EnvMapping<Env>` type describes the mapping.
@@ -360,7 +376,10 @@ export default tracedWorker(MySession)
 
 // Read other vars for the Root Logger:
 export default tracedWorker(MySession, {
-  env: { service: 'SERVICE_NAME', version: (env) => env.CF_VERSION_METADATA.id },
+  env: {
+    service: 'SERVICE_NAME',
+    version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id,
+  },
 })
 
 // Or extend it if you need scheduled(), queue(), etc:
@@ -437,7 +456,7 @@ class MySession extends TracedSession<Env> {
 
 export default class extends TracedEntrypoint<Env> {
   protected override get envMapping(): EnvMapping<Env> {
-    return { version: (env) => env.CF_VERSION_METADATA.id }
+    return { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id }
   }
 
   session(init: SessionInit) {

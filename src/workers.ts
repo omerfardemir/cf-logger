@@ -145,7 +145,7 @@ export class TracedSession<E = unknown> extends RpcTarget {
  * ```ts
  * export default class extends TracedEntrypoint<Env> {
  *   protected override get envMapping(): EnvMapping<Env> {
- *     return { version: (env) => env.CF_VERSION_METADATA?.id }
+ *     return { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id }
  *   }
  *
  *   session(init: SessionInit) {
@@ -225,7 +225,7 @@ type SessionEnv<S> = S extends TracedSession<infer E> ? E : unknown
  *
  * // Read the version from a `version_metadata` binding:
  * export default tracedWorker(BindSession, {
- *   env: { version: (env) => env.CF_VERSION_METADATA?.id },
+ *   env: { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id },
  * })
  *
  * // Or extend if you need scheduled(), etc.:
