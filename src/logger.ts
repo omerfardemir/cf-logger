@@ -131,34 +131,89 @@ export function createLogger<T extends LogFields = LogFields>(
  * Cached standalone loggers keyed by service name, shared by the whole isolate.
  * Safe only because nothing mutates them after creation.
  */
-const _cache = new Map<string | symbol, Logger>()
+const _cache = new Map<string, Logger>()
 
 /** Whether the outside-a-Logging-Context warning has been written in this isolate. */
 let warnedOutsideContext = false
 
 const OUTSIDE_CONTEXT_WARNING = 'setLoggerContext called outside a Logging Context; fields ignored'
 
-/**
- * Default key when no service name is provided.
- */
-const DEFAULT_KEY = Symbol('default')
+/** The standalone `service: 'unknown'` logger used outside a Logging Context while no default is set. */
+let unknownLogger: Logger | undefined
 
 /**
- * The isolate's Default Logger: what `getLogger()` returns outside a Logging Context.
+ * The isolate's Default Logger: what `getLogger()` writes through outside a Logging Context.
  * A Root Logger, so sharing it across concurrent work is safe.
  */
 let defaultLogger: Logger | undefined
 
 /**
- * Register a Root Logger as the isolate's Default Logger, the one `getLogger()`
- * returns outside a Logging Context (module scope, plain RPC methods, `scheduled`,
+ * Loggers returned by `getLogger()` outside a Logging Context (and their `.child()`ren),
+ * mapped to how they resolve to a concrete logger when a line is written.
+ */
+const forwarders = new WeakMap<Logger, () => Logger>()
+
+/** The logger `getLogger()` writes through outside a Logging Context, chosen at call time. */
+function currentOutsideLogger(): Logger {
+  return defaultLogger ?? (unknownLogger ??= createLogger({ service: 'unknown' }))
+}
+
+/**
+ * A logger that resolves the logger to write through on every call. Its `.child()` is a
+ * forwarder too, built again from the resolved logger whenever that logger changes.
+ */
+function forwardingLogger(resolve: () => Logger): Logger {
+  const logger = {
+    child: (bindings: Record<string, unknown>) => {
+      let base: Logger | undefined
+      let child: Logger | undefined
+      return forwardingLogger(() => {
+        const current = resolve()
+        if (current !== base) {
+          base = current
+          child = current.child(bindings)
+        }
+        return child!
+      })
+    },
+  } as Logger
+  for (const level of LEVELS) {
+    logger[level] = (...args: unknown[]) => (resolve()[level] as (...a: unknown[]) => void)(...args)
+  }
+  forwarders.set(logger, resolve)
+  return logger
+}
+
+/**
+ * What `getLogger()` returns outside a Logging Context: one stable logger that writes
+ * through the Default Logger registered *when each line is logged*. So a shared package
+ * that keeps `const log = getLogger()` (or `getLogger().child({ ... })`) at module scope,
+ * which runs before the app registers its default, still logs with the app's `service`
+ * once it is registered.
+ */
+const outsideContextLogger: Logger = forwardingLogger(currentOutsideLogger)
+
+/**
+ * The concrete logger to register for `logger`, or `undefined` when registering it would
+ * make the Default Logger write through itself (`setDefaultLogger(getLogger())`).
+ */
+function registrable(logger: Logger): Logger | undefined {
+  if (logger === outsideContextLogger) return undefined
+  const resolve = forwarders.get(logger)
+  return resolve ? resolve() : logger
+}
+
+/**
+ * Register a Root Logger as the isolate's Default Logger, the one `getLogger()` writes
+ * through outside a Logging Context (module scope, plain RPC methods, `scheduled`,
  * shared packages). `getLogger(service)` with a name keeps its standalone logger.
  *
  * Pass the Root Logger itself, not a logger taken from inside a Logging Context.
  * It carries no Context Fields (those live in each Logging Context), so
  * per-request data cannot reach other work through it. A `.child()` of it is
  * accepted, but the fields passed to `.child()` appear on every line logged
- * outside a context, so they must be per-process data too.
+ * outside a context, so they must be per-process data too. Passing the logger
+ * `getLogger()` returned outside a context changes nothing.
  *
  * Replaces any default already set, including one `useLogger`, `TracedEntrypoint`,
  * `tracedWorker` or `defaultLoggerFromEnv` registered.
@@ -174,7 +229,8 @@ let defaultLogger: Logger | undefined
  * ```
  */
 export function setDefaultLogger<T extends LogFields = LogFields>(logger: Logger<T>): void {
-  defaultLogger = logger as Logger
+  const target = registrable(logger as Logger)
+  if (target) defaultLogger = target
 }
 
 /**
@@ -184,12 +240,13 @@ export function setDefaultLogger<T extends LogFields = LogFields>(logger: Logger
  * @internal Not exported from the package entry points.
  */
 export function registerDefaultLogger(logger: Logger): void {
-  defaultLogger ??= logger
+  if (defaultLogger) return
+  defaultLogger = registrable(logger)
 }
 
 /**
- * Whether a Default Logger is registered. Lets the Workers helpers skip building a
- * Root Logger once one is set.
+ * Whether a Default Logger is registered. Lets the Workers helpers skip working out
+ * their Logger Options once one is set.
  *
  * @internal Not exported from the package entry points.
  */
@@ -204,38 +261,6 @@ export function hasDefaultLogger(): boolean {
  */
 export function _getDefaultLogger(): Logger | undefined {
   return defaultLogger
-}
-
-/** The logger `getLogger()` writes through outside a Logging Context, chosen at call time. */
-function currentOutsideLogger(): Logger {
-  if (defaultLogger) return defaultLogger
-  let logger = _cache.get(DEFAULT_KEY)
-  if (!logger) {
-    logger = createLogger({ service: 'unknown' })
-    _cache.set(DEFAULT_KEY, logger)
-  }
-  return logger
-}
-
-/**
- * What `getLogger()` returns outside a Logging Context: one stable logger that writes
- * through the Default Logger registered *when each line is logged*. So a shared package
- * that keeps `const log = getLogger()` at module scope, which runs before the app
- * registers its default, still logs with the app's `service` once it is registered.
- * `.child()` picks the logger current at the time of the `.child()` call.
- */
-const outsideContextLogger: Logger = {
-  trace: (...args: unknown[]) =>
-    (currentOutsideLogger().trace as (...a: unknown[]) => void)(...args),
-  debug: (...args: unknown[]) =>
-    (currentOutsideLogger().debug as (...a: unknown[]) => void)(...args),
-  info: (...args: unknown[]) => (currentOutsideLogger().info as (...a: unknown[]) => void)(...args),
-  warn: (...args: unknown[]) => (currentOutsideLogger().warn as (...a: unknown[]) => void)(...args),
-  error: (...args: unknown[]) =>
-    (currentOutsideLogger().error as (...a: unknown[]) => void)(...args),
-  fatal: (...args: unknown[]) =>
-    (currentOutsideLogger().fatal as (...a: unknown[]) => void)(...args),
-  child: (bindings) => currentOutsideLogger().child(bindings),
 }
 
 /**
@@ -530,6 +555,7 @@ export function _captureLines(): string[] {
  */
 export function _reset(): void {
   _cache.clear()
+  unknownLogger = undefined
   defaultLogger = undefined
   warnedOutsideContext = false
   _resetEnvWarnings()

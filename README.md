@@ -104,7 +104,7 @@ logger.info({ userId: 'u-42' }, 'Request started')
 
 ### `getLogger(service?)`
 
-Get the current Logging Context's logger. Outside any Logging Context, `getLogger()` returns the **Default Logger** (see [`setDefaultLogger`](#setdefaultloggerlogger)), or, when none is registered, a standalone logger with `service: 'unknown'`. `getLogger(service)` with a name returns a standalone logger cached per `service`, with no `environment` or `version`, whether or not a default is set. This suits code that doesn't know whether it runs inside a context. Where you do know, prefer your Root Logger or `runWithLogger`.
+Get the current Logging Context's logger. Outside any Logging Context, `getLogger()` returns a logger that writes through the **Default Logger** (see [`setDefaultLogger`](#setdefaultloggerlogger)) registered when each line is written, or, while none is registered, through a standalone logger with `service: 'unknown'`. `getLogger(service)` with a name returns a standalone logger cached per `service`, with no `environment` or `version`, whether or not a default is set. This suits code that doesn't know whether it runs inside a context. Where you do know, prefer your Root Logger or `runWithLogger`.
 
 ```ts
 import { getLogger } from 'loggercf'
@@ -114,13 +114,13 @@ const log = getLogger() // the Logging Context's logger
 log.info('has traceId automatically')
 
 // Outside a Logging Context:
-const log = getLogger() // the Default Logger, or service: 'unknown' without one
+const log = getLogger() // writes through the Default Logger, or service: 'unknown' without one
 const cron = getLogger('cron') // cached standalone logger
 ```
 
 ### `setDefaultLogger(logger)`
 
-Register a Root Logger as the isolate's **Default Logger**: the logger `getLogger()` returns outside every Logging Context. Code that runs outside a context (module scope, plain `WorkerEntrypoint` RPC methods, `scheduled`, Durable Object methods, shared packages) then logs with that logger's `service`, `environment` and `version` instead of `service: 'unknown'`.
+Register a Root Logger as the isolate's **Default Logger**: the logger `getLogger()` writes through outside every Logging Context. Code that runs outside a context (module scope, plain `WorkerEntrypoint` RPC methods, `scheduled`, Durable Object methods, shared packages) then logs with that logger's `service`, `environment` and `version` instead of `service: 'unknown'`.
 
 ```ts
 import { createLogger, getLogger, loggerOptionsFromEnv, setDefaultLogger } from 'loggercf'
@@ -134,8 +134,8 @@ getLogger().info('starting') // service, environment and version from env
 - Outside a context the line has no trace IDs and no Context Fields. Context Fields live in each Logging Context, never on the logger, so the Default Logger cannot carry one request's data into other work.
 - Pass the Root Logger itself, not a logger taken from inside a Logging Context. A `.child({ ... })` of it is accepted, but the fields passed to `.child()` go on every line logged outside a context, so they must be per-process data too.
 - `setDefaultLogger` always replaces the current default, including one registered automatically. Calling it again replaces it again.
-- The default is looked up when each line is written, not when `getLogger()` is called. A shared package that keeps `const log = getLogger()` at its top level (which runs before your app's module body) still logs with your `service` once the default is registered; only lines written before that say `service: 'unknown'`. `getLogger().child({...})` binds to the logger current at the time of the `.child()` call, so call it after registration.
-- The logger you register, or pass to `useLogger` or a `TracedEntrypoint` that registers it automatically, must not depend on the request or on `ctx.props`: the first one seen stays the default for the isolate.
+- The default is looked up when each line is written, not when `getLogger()` is called. A shared package that keeps `const log = getLogger()` at its top level (which runs before your app's module body) still logs with your `service` once the default is registered; only lines written before that say `service: 'unknown'`. `getLogger().child({...})` at module scope is fine too: the child follows the Default Logger as well. `setDefaultLogger(getLogger())` changes nothing.
+- The logger you register or pass to `useLogger`, and a `TracedEntrypoint`'s `rootLogger` / `envMapping` / `loggerOptions` overrides, must not depend on the request or on `ctx.props`: the first one registered stays the default for the isolate.
 - A Worker that exports several entrypoints with different services should register its default explicitly at module scope (`defaultLoggerFromEnv()` or `setDefaultLogger()`). Otherwise whichever entrypoint class is constructed first in an isolate wins.
 
 `useLogger(rootLogger)`, `TracedEntrypoint`, `tracedWorker` and `defaultLoggerFromEnv` register their Root Logger the first time they see one, unless a default is already set: first seen wins. On Workers, [`defaultLoggerFromEnv()`](#defaultloggerfromenvmapping) builds and registers one from `env` with no setup.
@@ -442,7 +442,7 @@ All workers in the chain share the same `traceId`.
 
 ### `TracedEntrypoint<Env>`
 
-Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Its constructor registers `this.rootLogger` as the [Default Logger](#setdefaultloggerlogger) unless one is already set, so `getLogger()` in `scheduled()`, `queue()` or a plain RPC method logs with its `service`; `tracedWorker()` does the same. Because the constructor reads `rootLogger`, build `envMapping` / `loggerOptions` overrides from `this.env`, not from subclass instance fields. Override the `envMapping` getter to read other vars (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)), or override `loggerOptions` to build the options yourself.
+Alternative to `tracedWorker()` for manual entrypoint setup. Extends `WorkerEntrypoint` and provides `this.loggerOptions` from env vars (`NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`) and `this.rootLogger`, built from them once per isolate. Its constructor registers `this.rootLogger` as the [Default Logger](#setdefaultloggerlogger) unless one is already set, so `getLogger()` in `scheduled()`, `queue()` or a plain RPC method logs with its `service`; `tracedWorker()` does the same. Because the first constructor in an isolate reads `rootLogger`, build `envMapping` / `loggerOptions` overrides from `this.env`, not from subclass instance fields. Override the `envMapping` getter to read other vars (same mapping as [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)), or override `loggerOptions` to build the options yourself.
 
 ```ts
 import {

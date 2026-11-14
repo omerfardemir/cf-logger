@@ -146,12 +146,49 @@ describe('Default Logger', () => {
     expect(entries[0]!.traceId).toBeDefined()
   })
 
-  it('getLogger().child() binds to the logger current at the time of the call', () => {
+  it('getLogger().child() kept at module scope follows a default registered later', () => {
+    const entries = _captureEntries()
+    const early = getLogger().child({ component: 'billing' })
+    early.info('before')
+    setDefaultLogger(createLogger({ service: 'orders' }))
+    early.info('after')
+    early.child({ step: 'charge' }).info('nested')
+
+    expect(entries[0]).toMatchObject({ service: 'unknown', component: 'billing' })
+    expect(entries[1]).toMatchObject({ service: 'orders', component: 'billing' })
+    expect(entries[2]).toMatchObject({ service: 'orders', component: 'billing', step: 'charge' })
+  })
+
+  it('setDefaultLogger(getLogger()) outside a context is a no-op, not a self-loop', () => {
+    const entries = _captureEntries()
+    setDefaultLogger(getLogger())
+    getLogger().info('unknown')
+    setDefaultLogger(createLogger({ service: 'orders' }))
+    setDefaultLogger(getLogger())
+    getLogger().info('still orders')
+
+    expect(entries.map((e) => e.service)).toEqual(['unknown', 'orders'])
+  })
+
+  it('useLogger(getLogger()) at module scope does not register a self-loop', async () => {
+    const entries = _captureEntries()
+    const app = new Hono()
+    app.use(useLogger(getLogger()))
+    app.get('/', (c) => c.text('ok'))
+    const res = await app.request('/')
+    getLogger().info('outside')
+
+    expect(res.status).toBe(200)
+    expect(entries.find((e) => e.message === 'outside')).toMatchObject({ service: 'unknown' })
+  })
+
+  it('registering a module-scope child of getLogger() registers a concrete child', () => {
     const entries = _captureEntries()
     setDefaultLogger(createLogger({ service: 'orders' }))
-    getLogger().child({ component: 'billing' }).info('child')
+    setDefaultLogger(getLogger().child({ region: 'eu' }))
+    getLogger().info('x')
 
-    expect(entries[0]).toMatchObject({ service: 'orders', component: 'billing' })
+    expect(entries[0]).toMatchObject({ service: 'orders', region: 'eu' })
   })
 })
 

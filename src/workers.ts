@@ -205,7 +205,7 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
    */
   constructor(ctx: ExecutionContext, env: E) {
     super(ctx, env)
-    // Once a default is set, skip building the Root Logger on every request or RPC call.
+    // Once a default is set, skip working out the Logger Options on every request or RPC call.
     if (!hasDefaultLogger()) registerDefaultLogger(this.rootLogger)
   }
 

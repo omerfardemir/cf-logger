@@ -16,7 +16,7 @@ Imports come from exactly three entry points:
 ## Terms
 
 - **Root Logger**: built by `createLogger` once per isolate or process. Carries per-process data only (service, environment, version).
-- **Default Logger**: the Root Logger `getLogger()` returns outside every Logging Context. Without one, those lines say `service: 'unknown'`.
+- **Default Logger**: the Root Logger `getLogger()` writes through outside every Logging Context. Without one, those lines say `service: 'unknown'`.
 - **Logging Context**: the scope of one unit of work (HTTP request, RPC call, queue message, cron run). Holds one trace, its Context Fields, and the logger every line is written through. Every line logged inside it gets `traceId`, `spanId` and `parentSpanId` automatically.
 - **Context Fields**: per-unit-of-work data (`requestId`, `userId`, ...) on every line in a Logging Context.
 - **Trace Carrier**: `{ traceparent, tracestate? }`, the wire form of a trace.
@@ -87,7 +87,7 @@ app.use(useLogger((c) => createLogger(loggerOptionsFromEnv(c.env)))) // a new Ro
 
 ### Register a Default Logger
 
-Module scope, plain `WorkerEntrypoint` RPC methods, `scheduled`, Durable Object methods and shared packages often run outside every Logging Context. Their `getLogger()` lines say `service: 'unknown'` unless the isolate has a Default Logger. On Workers, build the Root Logger with `defaultLoggerFromEnv()` from `loggercf/workers`: it reads `env` through `cloudflare:workers` (so it works at module scope), takes the same Env Mapping as `loggerOptionsFromEnv`, and registers the logger as the Default Logger unless one is already set. A mapping function's `env` is typed `Cloudflare.Env`, which `wrangler types` fills in. The default is looked up when each line is written, so a `const log = getLogger()` at a shared package's top level picks it up once registered. A Worker with several entrypoints for different services should call `defaultLoggerFromEnv()` (or `setDefaultLogger`) at module scope rather than rely on whichever entrypoint is constructed first. Never register a logger that depends on the request or on `ctx.props`.
+Module scope, plain `WorkerEntrypoint` RPC methods, `scheduled`, Durable Object methods and shared packages often run outside every Logging Context. Their `getLogger()` lines say `service: 'unknown'` unless the isolate has a Default Logger. On Workers, build the Root Logger with `defaultLoggerFromEnv()` from `loggercf/workers`: it reads `env` through `cloudflare:workers` (so it works at module scope), takes the same Env Mapping as `loggerOptionsFromEnv`, and registers the logger as the Default Logger unless one is already set. A mapping function's `env` is typed `Cloudflare.Env`, which `wrangler types` fills in. The default is looked up when each line is written, so a `const log = getLogger()` (or `getLogger().child({ component })`) at a shared package's top level picks it up once registered. A Worker with several entrypoints for different services should call `defaultLoggerFromEnv()` (or `setDefaultLogger`) at module scope rather than rely on whichever entrypoint is constructed first. Never register a logger that depends on the request or on `ctx.props`.
 
 ```ts
 import { Hono } from 'hono'
@@ -165,7 +165,7 @@ Call these inside `useLogger`, `this.traced`, or `runWithLogger`. Outside a Logg
 - `setLoggerContext` ignores the fields and writes one WARN per isolate: `setLoggerContext called outside a Logging Context; fields ignored`. That WARN in the logs means a call site is outside every Logging Context.
 - `withSpan` just runs the function, with no Span.
 - `getTraceCarrier()` returns `{}`, and `tracedFetch` sends no trace headers.
-- `getLogger()` returns the Default Logger, or without one a standalone logger with `service: 'unknown'` (or the name you pass). Either way the line has no trace IDs and no Context Fields.
+- `getLogger()` writes through the Default Logger, or without one a standalone logger with `service: 'unknown'` (or the name you pass). Either way the line has no trace IDs and no Context Fields.
 
 ### Traced Sessions: every RPC method runs in `this.traced`
 
