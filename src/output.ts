@@ -130,16 +130,26 @@ export function copyBindings(source: unknown): LogRecord {
   }
 }
 
+/** `Error.isError`, where the runtime has it: `true` for a real `Error` from any realm. */
+const nativeIsError = (Error as { isError?: (value: unknown) => boolean }).isError
+
 /**
  * Whether `value` is an `Error`, never throwing: `instanceof` throws on a
- * revoked `Proxy`, or one whose `getPrototypeOf` trap throws.
+ * revoked `Proxy`, or one whose `getPrototypeOf` trap throws. An object that
+ * inherits from `Error.prototype` is one (`Object.create(Error.prototype)`, a
+ * `Proxy` of an `Error`), and so, where the runtime has `Error.isError`, is a
+ * real `Error` from another realm (a `vm` context), which `instanceof` misses.
+ * Only from another realm: an `Error` moved to this realm's `Object.prototype`
+ * is a plain object, so the fast path of `stringifyRecord()` can tell a
+ * plain object or an array from an `Error` by its prototype alone.
  *
  * @param {unknown} value - Any value.
  * @returns {boolean} `true` for an `Error`; `false` for anything else, or when it can't be told.
  */
 export function isError(value: unknown): value is Error {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false
   try {
-    return value instanceof Error
+    return value instanceof Error || (!(value instanceof Object) && nativeIsError?.(value) === true)
   } catch {
     return false // the serializer writes it as `unserializable()`
   }
@@ -161,8 +171,22 @@ export function errorMessage(error: Error): string {
   }
 }
 
-/** How many levels of `cause` (and of `Error`-valued properties) are serialized before the chain is cut off. */
+/**
+ * How many levels of Errors nested in one another are serialized before the
+ * chain is cut off: through `cause`, an `Error`-valued property, `errors`, or
+ * any objects and arrays between them (`{ cause: { attempts: [e] } }`).
+ */
 const MAX_CAUSE_DEPTH = 5
+
+/**
+ * What an `Error` nested deeper than `MAX_CAUSE_DEPTH` is written as.
+ *
+ * @returns {LogRecord} The stand-in.
+ */
+const truncated = (): LogRecord => ({
+  type: 'Truncated',
+  message: `cause chain deeper than ${MAX_CAUSE_DEPTH}`,
+})
 
 /**
  * Read one property of an `Error`, never throwing.
@@ -224,6 +248,15 @@ export interface SerializedErrors {
   /** The Errors the one being serialized is nested in, by depth. */
   path: Error[]
   /**
+   * The same Errors, and their depths. The walk of `stringifyRecord()` keeps
+   * them too, while it writes a copy: an `Error` it meets in a value inside
+   * the copy (`{ cause: { holder: e } }`) is nested in it, one level deeper,
+   * and is `"[Circular]"` there when it is one of them.
+   */
+  ancestors: Map<Error, number>
+  /** The `Error` each copy was made from, so the walk knows which Errors a value is nested in. */
+  owners: Map<LogRecord, Error>
+  /**
    * What serializing Errors again may still write. A new copy is a new
    * object, which `stringifyRecord()` never sees as a repeat, so each one is
    * charged its values and characters, as a repeat would be: a graph of
@@ -241,6 +274,8 @@ export interface SerializedErrors {
 export const newSerializedErrors = (): SerializedErrors => ({
   byDepth: [],
   path: [],
+  ancestors: new Map(),
+  owners: new Map(),
   reserializeBudget: newBudget(),
 })
 
@@ -296,44 +331,35 @@ function spend(budget: Budget, cost: Cost): boolean {
  *
  * Shape: `{ type, message, stack, ...own enumerable props, errors?, cause? }`.
  * `cause`, every own property that is an `Error`, and an `AggregateError`'s
- * `errors` have the same shape, nested up to `MAX_CAUSE_DEPTH` levels. An
- * `Error` nested inside itself (`e.self = e`, a `cause` loop) is
- * `"[Circular]"` there. A property whose getter throws is `unserializable()`.
- * Each `Error` is serialized once per `cache` and depth (see
- * `SerializedErrors`), so a graph of Errors costs its size, not the number
- * of paths through it.
+ * `errors` have the same shape, nested up to `MAX_CAUSE_DEPTH` levels. Any
+ * other value is kept as it is: the walk of `stringifyRecord()` serializes an
+ * `Error` inside one with this same function, nested in this one. An `Error`
+ * nested inside itself (`e.self = e`, a `cause` loop) is `"[Circular]"`
+ * there. A property whose getter throws is `unserializable()`. Each `Error`
+ * is serialized once per `cache` and depth (see `SerializedErrors`), so a
+ * graph of Errors costs its size, not the number of paths through it.
  *
  * @param {Error} error - The error to serialize.
- * @param {number} [depth] - Current nesting depth.
- * @param {Map<Error, number>} [ancestors] - The errors `error` is nested in, and their depths.
- * @param {SerializedErrors} [cache] - The Errors this line has already serialized.
+ * @param {SerializedErrors} [cache] - The Errors this line has already serialized, and the ones `error` is nested in.
  * @returns {LogRecord} The serialized error.
  */
 export function serializeError(
   error: Error,
-  depth = 0,
-  ancestors: Map<Error, number> = new Map(),
   cache: SerializedErrors = newSerializedErrors(),
 ): LogRecord {
-  return serializeErrorAt(error, depth, ancestors, cache).out
+  return serializeErrorAt(error, cache.ancestors.size, cache).out
 }
 
 /**
  * `serializeError()`, with how far up the copy's `"[Circular]"`s point.
  *
  * @param {Error} error - The error to serialize.
- * @param {number} depth - Current nesting depth.
- * @param {Map<Error, number>} ancestors - The errors `error` is nested in, and their depths.
- * @param {SerializedErrors} cache - The Errors this line has already serialized.
+ * @param {number} depth - Its nesting depth: how many Errors it is nested in (`cache.ancestors`).
+ * @param {SerializedErrors} cache - The Errors this line has already serialized, and the ones `error` is nested in.
  * @returns {SerializedError} The serialized error.
  */
-function serializeErrorAt(
-  error: Error,
-  depth: number,
-  ancestors: Map<Error, number>,
-  cache: SerializedErrors,
-): SerializedError {
-  const { path } = cache
+function serializeErrorAt(error: Error, depth: number, cache: SerializedErrors): SerializedError {
+  const { path, ancestors } = cache
   const known = cache.byDepth[depth]?.get(error)
   if (known) {
     // Cut off only inside itself, or at the same Errors above it: right here too.
@@ -345,6 +371,7 @@ function serializeErrorAt(
   const entry: SerializedError = { out: {}, reach: Infinity }
   ;(cache.byDepth[depth] ??= new Map()).set(error, entry)
   const { out } = entry
+  cache.owners.set(out, error)
 
   const nested = (value: unknown): unknown => {
     if (!isError(value)) return value
@@ -354,9 +381,8 @@ function serializeErrorAt(
       entry.reach = Math.min(entry.reach, at)
       return '[Circular]'
     }
-    if (depth >= MAX_CAUSE_DEPTH)
-      return { type: 'Truncated', message: `cause chain deeper than ${MAX_CAUSE_DEPTH}` }
-    const inner = serializeErrorAt(value, depth + 1, ancestors, cache)
+    if (depth >= MAX_CAUSE_DEPTH) return truncated()
+    const inner = serializeErrorAt(value, depth + 1, cache)
     entry.reach = Math.min(entry.reach, inner.reach)
     return inner.out
   }
@@ -392,14 +418,10 @@ function serializeErrorAt(
 }
 
 /**
- * Serialize `value` when it is an `Error`. Never throws.
- *
- * @param {unknown} value - Any value.
- * @param {SerializedErrors} cache - The Errors this line has already serialized.
- * @returns {unknown} `serializeError(value)` for an `Error`; anything else as is.
+ * Serializes `value` when it is an `Error`, through one line's cache, and
+ * returns anything else as is. Never throws.
  */
-const serializeIfError = (value: unknown, cache: SerializedErrors): unknown =>
-  isError(value) ? serializeError(value, 0, new Map(), cache) : value
+type SerializeIfError = (value: unknown) => unknown
 
 /**
  * `serializeIfError` on an overflow value and, one level down, on its items
@@ -407,32 +429,26 @@ const serializeIfError = (value: unknown, cache: SerializedErrors): unknown =>
  * traps throw) is `unserializable()`, and so is an item whose getter throws.
  *
  * @param {unknown} value - One item of `args`.
- * @param {SerializedErrors} cache - The Errors this line has already serialized.
+ * @param {SerializeIfError} serializeIfError - Serializes an `Error` for this line.
  * @returns {unknown} The item, with Errors serialized at its top level and one level down.
  */
-function serializeOverflowItem(value: unknown, cache: SerializedErrors): unknown {
+function serializeOverflowItem(value: unknown, serializeIfError: SerializeIfError): unknown {
   try {
     if (Array.isArray(value)) {
       const out: unknown[] = []
       const length = value.length
-      for (let i = 0; i < length; i++)
-        out.push(
-          serializeIfError(
-            read(() => value[i]),
-            cache,
-          ),
-        )
+      for (let i = 0; i < length; i++) out.push(serializeIfError(read(() => value[i])))
       return out
     }
     if (isPlainObject(value)) {
       const out: LogRecord = Object.create(null) // `value` may have an own `__proto__` key
-      for (const [key, v] of readEntries(value)) out[key] = serializeIfError(v, cache)
+      for (const [key, v] of readEntries(value)) out[key] = serializeIfError(v)
       return out
     }
   } catch (thrown) {
     return unserializable(thrown)
   }
-  return serializeIfError(value, cache)
+  return serializeIfError(value)
 }
 
 /**
@@ -525,10 +541,13 @@ export interface RecordEntry extends RoutedArgs {
  * call → logger bindings (`createLogger` / `.child()`) → Context Fields.
  * A binding or Context Field for one of the Record Keys (trace IDs
  * aside) moves to `args`, after the call's own `args`, bindings first, so it
- * is not dropped. `Error` values are serialized with `serializeError()`: at
- * the top level, in `errors`, and in `args` items (one level down, e.g.
- * `args: [{ err }]`), each `Error` once per line. Never mutates `entry`'s
- * values. `stringifyRecord()` of the result spends from `entry.budget`.
+ * is not dropped. `Error` values are serialized with `serializeError()` here
+ * at the top level, in `errors`, and in `args` items (one level down, e.g.
+ * `args: [{ err }]`), so most lines with an `Error` stay on the fast path of
+ * `stringifyRecord()`. It serializes one at any other depth, through the
+ * same per-line cache, so each `Error` is serialized once per line and
+ * depth. Never mutates `entry`'s values. `stringifyRecord()` of the result
+ * spends from `entry.budget`.
  *
  * @param {RecordEntry} entry - The call: time, level, bindings and the routed arguments.
  * @param {RecordContext} [context] - The current Logging Context, if any.
@@ -548,13 +567,15 @@ export function buildRecord(entry: RecordEntry, context?: RecordContext): LogRec
   const args = [...(entry.args ?? []), ...moved]
   if (args.length > 0) record.args = args
 
-  const cache = newSerializedErrors()
-  for (const [key, value] of Object.entries(record)) record[key] = serializeIfError(value, cache)
-  if (Array.isArray(record.errors))
-    record.errors = record.errors.map((error) => serializeIfError(error, cache))
+  let cache: SerializedErrors | undefined // made for the first `Error`: most lines have none
+  const serializeIfError: SerializeIfError = (value) =>
+    isError(value) ? serializeError(value, (cache ??= newSerializedErrors())) : value
+  for (const [key, value] of Object.entries(record)) record[key] = serializeIfError(value)
+  if (Array.isArray(record.errors)) record.errors = record.errors.map(serializeIfError)
   if (Array.isArray(record.args))
-    record.args = record.args.map((item) => serializeOverflowItem(item, cache))
+    record.args = record.args.map((item) => serializeOverflowItem(item, serializeIfError))
 
+  if (cache) (record as WithLineErrors)[LINE_ERRORS] = cache
   if (context) applyTrace(record, context.trace)
   const { budget } = entry
   if (budget && (budget.values < MAX_REWRITTEN_VALUES || budget.chars < MAX_REWRITTEN_CHARS))
@@ -614,6 +635,17 @@ export const newBudget = (): Budget => ({
 const lineBudgets = new WeakMap<LogRecord, Budget>()
 
 /**
+ * The key a record from `buildRecord()` holds the Errors it already
+ * serialized under, when it serialized any, for `stringifyRecord()`. A symbol,
+ * so JSON and the walk never write it, and set in a few nanoseconds where a
+ * `WeakMap` like `lineBudgets` takes hundreds, on every line with an `Error`.
+ */
+const LINE_ERRORS: unique symbol = Symbol('loggercf.lineErrors')
+
+/** A record, as it holds `LINE_ERRORS`. */
+type WithLineErrors = { [LINE_ERRORS]?: SerializedErrors }
+
+/**
  * What one message already holds, its `%j` / `%o` / `%O` placeholders and
  * its long words and `%s` texts, and the repeats its placeholders gave up on.
  */
@@ -655,6 +687,8 @@ interface Walk {
   inRepeat: number
   /** The line's Re-write Budget. */
   budget: Budget
+  /** The Errors the line has serialized. A strict walk has none: it gives up at an `Error`. */
+  errors?: SerializedErrors
 }
 
 /**
@@ -755,7 +789,9 @@ function standIn(walk: Walk, text: string): string {
  * primitives are unwrapped. Beyond JSON: a `Map` is an array of
  * `[key, value]` pairs, a `Set` an array; a `BigInt` is its digits, a
  * function `[Function: name]`, a symbol `Symbol(description)` (boxed or
- * not); a real cycle is `"[Circular]"` (a `toJSON` result that refers back to
+ * not); an `Error` is its `serializeError()` copy (see `errorToJSONValue()`),
+ * unless it has a `toJSON`, which JSON calls first; a real cycle is
+ * `"[Circular]"` (a `toJSON` result that refers back to
  * its object included); a repeated object (one with a `toJSON` included), or
  * a repeated long string, is written again within the Re-write Budget (see `MAX_REWRITTEN_VALUES` and `MAX_REWRITTEN_CHARS`), then
  * is `"[Repeated]"`; a getter or a `toJSON` that throws is `unserializable()`
@@ -785,7 +821,8 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
     try {
       toJSON = (object as { toJSON?: unknown }).toJSON
     } catch (thrown) {
-      return standIn(walk, unserializable(thrown))
+      // An `Error` whose reads throw (a `Proxy`) is still written as one, as at the top level.
+      if (!isError(object)) return standIn(walk, unserializable(thrown))
     }
     if (typeof toJSON === 'function') {
       // On the path while its result is written, so a result that refers back is a cycle.
@@ -811,7 +848,21 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
     }
   }
 
+  if (isError(object)) return errorToJSONValue(object, key, walk)
+
   walk.ancestors.add(object)
+  // A copy of an `Error`: what is inside it is nested in that `Error`.
+  const { errors } = walk
+  const owner = errors?.owners.get(object as LogRecord)
+  // Entered only when `owner` is not an ancestor already: a reused copy can hold
+  // a copy of an `Error` the walk is inside, and that one keeps its depth.
+  let entered: Error | undefined
+  if (errors && owner && !errors.ancestors.has(owner)) {
+    const depth = errors.ancestors.size
+    errors.path[depth] = owner
+    errors.ancestors.set(owner, depth)
+    entered = owner
+  }
   try {
     if (isRepeat(object, walk))
       return repeatToJSONValue(object, () => objectToJSONValue(object, walk), walk)
@@ -819,7 +870,31 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
     return objectToJSONValue(object, walk)
   } finally {
     walk.ancestors.delete(object)
+    if (entered) errors?.ancestors.delete(entered)
   }
+}
+
+/**
+ * The `Error` part of `toJSONValue()`: its copy from `serializeError()`,
+ * through the line's cache, nested in the Errors whose copies the walk is
+ * inside. So it has the shape of a top-level `Error`, the same `Error` at the
+ * same depth is the same copy (a repeat), an `Error` inside its own copy is
+ * `"[Circular]"`, and `MAX_CAUSE_DEPTH` bounds Errors nested through objects
+ * and arrays too.
+ *
+ * @param {Error} error - An `Error` the walk met inside a value.
+ * @param {string} key - Its key in its parent.
+ * @param {Walk} walk - The state of this walk.
+ * @returns {unknown} The JSON-ready copy, `"[Circular]"`, or `"[Repeated]"`.
+ * @throws `NOT_JSON` in a strict walk: `%j` never prints an `Error`.
+ */
+function errorToJSONValue(error: Error, key: string, walk: Walk): unknown {
+  const { errors } = walk
+  if (!errors) throw NOT_JSON
+  const depth = errors.ancestors.size
+  if (errors.ancestors.has(error)) return '[Circular]'
+  const copy = depth > MAX_CAUSE_DEPTH ? truncated() : serializeErrorAt(error, depth, errors).out
+  return toJSONValue(copy, key, walk, false)
 }
 
 /**
@@ -970,9 +1045,15 @@ function objectToJSONValue(object: object, walk: Walk): unknown {
  * @param {boolean} strict - Whether to give up instead of writing a stand-in.
  * @param {Budget} budget - The line's Re-write Budget.
  * @param {Written} [earlier] - What earlier walks of the same line wrote.
+ * @param {SerializedErrors} [errors] - The Errors the line has serialized; required unless `strict`.
  * @returns {Walk} Its state.
  */
-const newWalk = (strict: boolean, budget: Budget, earlier?: Written): Walk => ({
+const newWalk = (
+  strict: boolean,
+  budget: Budget,
+  earlier?: Written,
+  errors?: SerializedErrors,
+): Walk => ({
   texts: new Map(),
   strict,
   ancestors: new Set(),
@@ -981,6 +1062,7 @@ const newWalk = (strict: boolean, budget: Budget, earlier?: Written): Walk => ({
   earlier,
   inRepeat: 0,
   budget,
+  errors,
 })
 
 /** Thrown by `stringifyRecord()`'s fast path: the line needs the full walk. */
@@ -1012,7 +1094,8 @@ const MAX_FAST_CHARS = 1024 * 1024
  * Most lines take a fast path: native `JSON.stringify`, which gives up on
  * the first object or long text seen twice (a repeat or a cycle, an object
  * whose `toJSON` was already called included), object a getter returns,
- * boxed symbol, or getter or `toJSON` that throws, and after
+ * boxed symbol, `Error` (one `buildRecord()` has not serialized already), or
+ * getter or `toJSON` that throws, and after
  * `MAX_FAST_VALUES` values or `MAX_FAST_CHARS` characters. Those lines are
  * written again by the `toJSONValue()` walk, so a getter (and a `toJSON`) on
  * them runs twice.
@@ -1056,8 +1139,13 @@ export function stringifyRecord(record: LogRecord): string {
           if (seen.has(own)) throw NEEDS_WALK
           seen.add(own)
         }
+        // A plain object or an array, as most are, is none of the values below.
+        const prototype: unknown = Object.getPrototypeOf(value)
+        if (prototype === Object.prototype || prototype === Array.prototype) return value
         if (value instanceof Map || value instanceof Set) return Array.from(value)
-        if (Object.getPrototypeOf(value) === Symbol.prototype) throw NEEDS_WALK // a boxed symbol: JSON writes `{}`
+        if (prototype === Symbol.prototype) throw NEEDS_WALK // a boxed symbol: JSON writes `{}`
+        // An `Error` inside a value: the walk serializes it, nested in the Errors around it.
+        if (isError(value)) throw NEEDS_WALK
         return value
       })
     } catch {
@@ -1065,7 +1153,8 @@ export function stringifyRecord(record: LogRecord): string {
     }
   }
   const budget = lineBudgets.get(record) ?? newBudget()
-  return JSON.stringify(toJSONValue(record, '', newWalk(false, budget), false))
+  const errors = (record as WithLineErrors)[LINE_ERRORS] ?? newSerializedErrors()
+  return JSON.stringify(toJSONValue(record, '', newWalk(false, budget, undefined, errors), false))
 }
 
 /** What `formatMessage()` and `routeArgs()` print a message with. */
@@ -1089,8 +1178,9 @@ export interface MessagePrinter {
  * The printer for one message. `json()` gives the text of a `%j`, `%o` or
  * `%O` placeholder, or `undefined` for anything that would need a stand-in in
  * `stringifyRecord()` (a `BigInt`, a function or a symbol inside, a cycle, a
- * repeat over the budget, a getter or a `toJSON` that throws), or a value
- * JSON writes nothing for. A `Map` prints as `[key, value]` pairs and a `Set`
+ * repeat over the budget, a getter or a `toJSON` that throws), a value
+ * holding an `Error` (JSON would write `{}`), or a value JSON writes nothing
+ * for. A `Map` prints as `[key, value]` pairs and a `Set`
  * as an array, as on the line. `admit()` admits a word or a `%s` text. What
  * the message already holds is a repeat for what comes after, and all of it
  * spends from `budget`; a placeholder that gives up prints nothing and spends

@@ -2,6 +2,7 @@
 // this file, so a call that should compile and doesn't (or a `@ts-expect-error`
 // that no longer errors) fails the build.
 import type { LogFields, Logger } from './types'
+import { setLoggerContext } from './logger'
 
 interface AppFields extends LogFields {
   userId: string
@@ -97,4 +98,12 @@ export function generic<T extends LogFields>(logger: Logger<T>): void {
   logger.error(new Error('boom'), 'error first')
   // @ts-expect-error structured calls need a concrete T
   logger.info({ a: 1 }, 'structured')
+}
+
+/** An `Error` is a field value at any depth: in Context Fields and logger bindings too. */
+export function errorFieldValues(logger: Logger) {
+  const err = new Error('boom')
+  const fields: LogFields = { job: { lastError: err }, attempts: [err] }
+  setLoggerContext({ lastError: err, nested: { err } })
+  logger.child({ boot: { error: err } }).info(fields, 'm')
 }
