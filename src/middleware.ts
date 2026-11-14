@@ -97,10 +97,11 @@ export interface UseLoggerOptions {
    * `err`, `originalErr`, and `userAgent` / `cf` when `include` turns them on. Those keys are
    * dropped from its result, and one WARN names them (never their values). It can set `method`,
    * `path` and `route`, which then appear on the handlers' lines, but `request.start` and
-   * `request.end` always write their own. When it throws, returns anything but a plain object or
-   * `undefined` (a Promise, for
-   * example), or its result throws while it is read (a getter, a Proxy), the request is logged
-   * without these fields and one WARN is written.
+   * `request.end` always write their own. It runs before routing reaches the handler, so
+   * `c.req.routePath` here is `useLogger`'s own pattern: set `route` from the handler with
+   * `setLoggerContext` instead. When it throws, returns anything but a plain object or
+   * `undefined` (a Promise, for example), or its result throws while it is read (a getter, a
+   * Proxy), the request is logged without these fields and one WARN is written.
    */
   fields?: (c: Context) => LogFields | undefined
   /**
@@ -127,6 +128,8 @@ export function defaultRequestEndLevel(statusCode: number, err: Error | undefine
   return err || statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
 }
 
+// The levels a `level` hook may return. `'silent'` is left out on purpose: `request.end`
+// cannot be muted by the hook (a Root Logger at `'silent'` mutes it, as it mutes every line).
 const LOG_LEVELS: ReadonlySet<unknown> = new Set<LogLevel>([
   'trace',
   'debug',
@@ -261,7 +264,8 @@ function describeReturned(value: unknown): string {
  */
 function describeReturnedLevel(value: unknown): string {
   if (typeof value !== 'string') return describeReturned(value)
-  return LOG_LEVELS.has(value.toLowerCase()) ? value : 'string'
+  const level = value.toLowerCase()
+  return LOG_LEVELS.has(level) || level === 'silent' ? value : 'string'
 }
 
 /** A synchronous `fields` / `endFields` result: a plain object, or nothing. */

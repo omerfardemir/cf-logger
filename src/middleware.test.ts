@@ -1296,7 +1296,7 @@ describe('useLogger hook errors', () => {
     await app.request('/')
     expect(end()).toMatchObject({ level: 'INFO' })
     expect(warnings()).toHaveLength(1)
-    expect(warnings()[0]).toMatchObject({ hook: 'level' })
+    expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'silent' })
   })
 
   it('treats an async fields or endFields hook as a failure: no fields, one WARN each', async () => {
