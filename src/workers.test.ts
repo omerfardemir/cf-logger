@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 // The `env` that `import { env } from 'cloudflare:workers'` returns; tests set its vars.
 const workersEnv = vi.hoisted((): Record<string, unknown> => ({}))
@@ -42,6 +42,7 @@ import {
   runWithLogger,
   getTraceContext,
   getLogger,
+  withSpan,
   _reset,
   createLogger,
   setDefaultLogger,
@@ -2245,5 +2246,163 @@ describe('withLogging(DurableObject)', () => {
       method() {}
     }
     expect(() => withLogging(Plain as any)).toThrow(/WorkerEntrypoint or DurableObject/)
+  })
+})
+
+const SPAN_SAMPLED = '00-11111111111111111111111111111111-2222222222222222-01'
+const SPAN_UNSAMPLED = '00-11111111111111111111111111111111-2222222222222222-00'
+const elapse = (ms: number) => vi.setSystemTime(Date.now() + ms)
+
+class SpanSession extends TracedSession {
+  fast() {
+    return this.traced(
+      (span) => {
+        span.set({ rows: 3 })
+        this.logger.info('inside')
+        return 'fast'
+      },
+      'db.fast',
+      { level: 'debug', slowMs: 100, fields: { table: 'users' } },
+    )
+  }
+
+  slow() {
+    return this.traced(() => (elapse(150), 'slow'), 'db.slow', { level: 'debug', slowMs: 100 })
+  }
+
+  fail() {
+    return this.traced(
+      (span) => {
+        span.set({ rows: 0 })
+        throw new Error('db down')
+      },
+      'db.fail',
+      { level: 'debug', fields: { table: 'users' } },
+    )
+  }
+
+  plain() {
+    return this.traced((span) => (span.set({ ignored: true }), 'plain'))
+  }
+
+  defaults() {
+    return this.traced(() => elapse(10), 'db.defaults')
+  }
+}
+
+/** A TracedEntrypoint whose Logger Options hook sets `spans`. */
+const withSpans = (spans: LoggerOptions['spans']) =>
+  class extends TracedEntrypoint {
+    protected override get [TracedEntrypoint.loggerOptions](): LoggerOptions {
+      return { service: 'svc', level: 'trace', spans }
+    }
+    session(init: SessionInit) {
+      return new SpanSession(init, this[TracedEntrypoint.rootLogger], this.env)
+    }
+  }
+
+describe('Span options and Span Defaults in the Workers helpers', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks()
+    vi.useFakeTimers({ toFake: ['Date'], now: 1_000_000 })
+    _reset()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('traced(fn, operation, options): level, slowMs and Span Fields as for withSpan', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc', level: 'trace' })
+    const session = new SpanSession({ traceparent: SPAN_SAMPLED }, logger, {})
+
+    expect(session.fast()).toBe('fast')
+    expect(session.slow()).toBe('slow')
+    expect(() => session.fail()).toThrow('db down')
+    expect(session.plain()).toBe('plain')
+
+    expect(entries.map((e) => [e.level, e.message])).toEqual([
+      ['INFO', 'inside'],
+      ['DEBUG', 'span.end db.fast'],
+      ['WARN', 'span.end db.slow'],
+      ['ERROR', 'span.end db.fail'],
+    ])
+    expect(entries[0]).not.toHaveProperty('table')
+    expect(entries[0]).not.toHaveProperty('rows')
+    expect(entries[1]).toMatchObject({ table: 'users', rows: 3 })
+    expect(entries[3]).toMatchObject({ table: 'users', rows: 0, err: { message: 'db down' } })
+  })
+
+  it('traced() on an unsampled trace: OK writes nothing, a throw writes <op> failed without Span Fields', () => {
+    const entries = _captureEntries()
+    const session = new SpanSession(
+      { traceparent: SPAN_UNSAMPLED },
+      createLogger({ service: 'svc' }),
+      {},
+    )
+
+    session.slow()
+    expect(() => session.fail()).toThrow('db down')
+
+    expect(entries.map((e) => [e.level, e.message])).toEqual([['ERROR', 'db.fail failed']])
+    expect(entries[0]).not.toHaveProperty('table')
+  })
+
+  it("tracedWorker: the Root Logger's Span Defaults come from LOG_SPAN_LEVEL and LOG_SPAN_SLOW_MS", () => {
+    const entries = _captureEntries()
+    const Worker = tracedWorker(SpanSession)
+    const env = { NAME: 'svc', LOG_LEVEL: 'debug', LOG_SPAN_LEVEL: 'debug', LOG_SPAN_SLOW_MS: '5' }
+    const session = new Worker(undefined, env).session({ traceparent: SPAN_SAMPLED })
+
+    session.defaults()
+    expect(entries.map((e) => [e.level, e.message])).toEqual([['WARN', 'span.end db.defaults']])
+  })
+
+  it('withLogging: method Spans and withSpan inside them use the env Span Defaults', () => {
+    const entries = _captureEntries()
+    class Worker extends WorkerEntrypoint {
+      search() {
+        elapse(10)
+        return withSpan('db.query', () => elapse(1))
+      }
+    }
+    const env = { NAME: 'svc', LOG_LEVEL: 'debug', LOG_SPAN_LEVEL: 'debug', LOG_SPAN_SLOW_MS: '10' }
+    new (withLogging(Worker, { spans: true }))({} as any, env).search()
+
+    expect(entries.map((e) => [e.level, e.message])).toEqual([
+      ['DEBUG', 'span.end db.query'],
+      ['WARN', 'span.end Worker.search'],
+    ])
+  })
+
+  it('withLogging without spans: no span.end however slow, and a throw is still <Class>.<method> failed', () => {
+    const entries = _captureEntries()
+    class Worker extends WorkerEntrypoint {
+      slow() {
+        elapse(1000)
+      }
+      fail() {
+        throw new Error('nope')
+      }
+    }
+    const env = { NAME: 'svc', LOG_SPAN_SLOW_MS: '0' }
+    const worker = new (withLogging(Worker))({} as any, env)
+    worker.slow()
+    expect(() => worker.fail()).toThrow('nope')
+
+    expect(entries.map((e) => [e.level, e.message])).toEqual([['ERROR', 'Worker.fail failed']])
+  })
+
+  it('TracedEntrypoint: the Logger Options hook can set spans; each spans config gets its own Root Logger', () => {
+    const entries = _captureEntries()
+    const Debug = withSpans({ level: 'debug' })
+    const Warn = withSpans({ level: 'warn' })
+
+    new Debug({} as any, {}).session({ traceparent: SPAN_SAMPLED }).defaults()
+    new Warn({} as any, {}).session({ traceparent: SPAN_SAMPLED }).defaults()
+    new (withSpans(undefined))({} as any, {}).session({ traceparent: SPAN_SAMPLED }).defaults()
+
+    expect(entries.map((e) => e.level)).toEqual(['DEBUG', 'WARN', 'INFO'])
   })
 })

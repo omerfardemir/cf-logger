@@ -129,6 +129,11 @@ const event = (payload: unknown = {}, instanceId = 'inst-1') => ({
 /** A step callback that logs nothing. */
 const plainCallback = async () => 'plain'
 
+/** A handler whose first parameter is optional: a wrapper that passes it an argument changes what it does. */
+async function handle(dryRun = false) {
+  return dryRun
+}
+
 beforeEach(() => {
   vi.restoreAllMocks()
   _reset()
@@ -182,6 +187,19 @@ describe('withScheduled', () => {
       traceId: traces[0]!.traceId,
       span: { operation: 'scheduled', status: 'OK' },
     })
+  })
+
+  it('the span.end scheduled level follows the env Span Defaults; a throw is still ERROR', async () => {
+    const entries = _captureEntries()
+    const env = { ...ENV, LOG_LEVEL: 'debug', LOG_SPAN_LEVEL: 'debug', LOG_SPAN_SLOW_MS: '60000' }
+    await withScheduled(() => {})(controller(), env, {} as ExecutionContext)
+    await expect(
+      withScheduled(async () => {
+        throw new Error('cron failed')
+      })(controller(), env, {} as ExecutionContext),
+    ).rejects.toThrow('cron failed')
+
+    expect(linesOf(entries, 'span.end scheduled').map((e) => e.level)).toEqual(['DEBUG', 'ERROR'])
   })
 
   it('passes arguments and the return value through unchanged', async () => {
@@ -270,6 +288,11 @@ describe('withScheduled', () => {
 describe('withQueueMessage', () => {
   beforeEach(() => {
     Object.assign(workersEnv, ENV)
+  })
+
+  it('calls fn with no arguments, as without the wrapper', async () => {
+    const m = queueMessage({ n: 1 })
+    await expect(withQueueMessage(batch(m), m, handle)).resolves.toBe(false)
   })
 
   it('opens one Logging Context per message with queue, messageId and attempts', async () => {

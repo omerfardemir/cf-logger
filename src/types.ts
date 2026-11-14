@@ -96,6 +96,68 @@ export interface SpanContext {
 }
 
 /**
+ * The Span Defaults: how a Root Logger writes the `span.end` line of a Span that
+ * succeeds, unless the Span's own `SpanOptions` say otherwise. A Span that throws
+ * always writes at `ERROR`.
+ *
+ * @example
+ * ```ts
+ * const logger = createLogger({ service: 'api', spans: { level: 'debug', slowMs: 500 } })
+ * ```
+ */
+export interface SpanDefaults {
+  /** The level of an OK `span.end`. Defaults to `'info'`. */
+  level?: LogLevel
+  /**
+   * The Slow Threshold, in milliseconds: an OK Span that takes this long or longer
+   * writes its `span.end` at `WARN` (or at `level`, when that is more severe). Unset
+   * by default: every OK Span writes at `level`. `Infinity` turns it off.
+   */
+  slowMs?: number
+}
+
+/**
+ * Options for one Span (`withSpan()`, `TracedSession.traced()`). `level` and `slowMs`
+ * override the Root Logger's Span Defaults; an invalid value is ignored.
+ *
+ * @example
+ * ```ts
+ * await withSpan('db.getUser', () => db.getUser(id), { level: 'debug', slowMs: 500, fields: { table: 'users' } })
+ * ```
+ */
+export interface SpanOptions extends SpanDefaults {
+  /**
+   * Span Fields written on this Span's `span.end` line, and on no other line.
+   * Read when the Span starts. `span.set()` adds more, and wins on a shared key.
+   */
+  fields?: LogFields
+}
+
+/**
+ * The handle a Span passes to its work, to add Span Fields from inside it.
+ *
+ * @example
+ * ```ts
+ * const value = await withSpan('cache.read', async (span) => {
+ *   const v = await cache.get(key)
+ *   span.set({ hit: v !== null })
+ *   return v
+ * })
+ * ```
+ */
+export interface Span {
+  /**
+   * Add Span Fields to this Span's `span.end` line, and to no other line. A later
+   * call wins on a shared key. Read now: a getter that throws is written as
+   * `[Unserializable: ...]`, never thrown. Does nothing once the Span has ended, and
+   * for an unsampled trace (which writes no `span.end`).
+   *
+   * @param {LogFields} fields - The fields to add.
+   */
+  set(fields: LogFields): void
+}
+
+/**
  * Shape of the `AsyncLocalStorage` store behind each Logging Context.
  *
  * Created internally by `runWithLogger()` and `withSpan()`; never exposed.
@@ -132,6 +194,12 @@ export interface LoggerOptions {
   environment?: string
   /** Application version (e.g. `'1.2.0'`). */
   version?: string
+  /**
+   * The Span Defaults for every Span in a Logging Context this Root Logger opens:
+   * the level of an OK `span.end` and the Slow Threshold. Each Span's own options
+   * override them.
+   */
+  spans?: SpanDefaults
 }
 
 /**

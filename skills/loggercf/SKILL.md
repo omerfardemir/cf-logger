@@ -20,7 +20,8 @@ Imports come from exactly three entry points:
 - **Logging Context**: the scope of one unit of work (HTTP request, RPC call, queue message, cron run). Holds one trace, its Context Fields, and the logger every line is written through. Every line logged inside it gets `traceId`, `spanId` and `parentSpanId` automatically.
 - **Context Fields**: per-unit-of-work data (`requestId`, `userId`, ...) on every line in a Logging Context.
 - **Trace Carrier**: `{ traceparent, tracestate? }`, the wire form of a trace.
-- **Span**: a named, timed sub-operation, logged once as `span.end` when the trace is sampled. A Span that throws is always logged at `ERROR`: as its `span.end`, or for an unsampled trace as one `<operation> failed` line.
+- **Span**: a named, timed sub-operation, logged once as `span.end` when the trace is sampled: at its `level` (default `info`), or at `WARN` once it reaches its Slow Threshold `slowMs` (at its `level` instead, when that is more severe). A Span that throws is always logged at `ERROR`: as its `span.end`, or for an unsampled trace as one `<operation> failed` line.
+- **Span Fields**: fields that go on one Span's `span.end` line only (`fields` option, `span.set()`), never on other lines or into the Logging Context.
 - **Traced Session**: the RPC target a service binding's `session()` returns. Every method on it continues the caller's trace.
 
 ## Pick the API by unit of work
@@ -39,7 +40,7 @@ Imports come from exactly three entry points:
 | Node job, any other work                       | `runWithLogger({ logger: rootLogger, ...carrier, fields }, fn)`                                                                                          |
 | Outbound HTTP                                  | `tracedFetch(url, init)` in place of `fetch`                                                                                                             |
 | Calling another Worker over HTTP (binding)     | `tracedFetcher(env.SVC).fetch(request)` in place of `env.SVC.fetch(request)`                                                                             |
-| Timing a sub-operation                         | `withSpan('db.getUser', fn)`                                                                                                                             |
+| Timing a sub-operation                         | `withSpan('db.getUser', fn)`; on a hot path `withSpan('db.getUser', fn, { level: 'debug', slowMs: 500 })`                                                |
 | Logging from code that receives no logger      | `getLogger()`, which returns the Logging Context's logger, or the Default Logger outside one                                                             |
 | Code outside every Logging Context             | register a Default Logger: `defaultLoggerFromEnv()` on Workers, `setDefaultLogger(rootLogger)` elsewhere                                                 |
 
@@ -394,6 +395,35 @@ export { LoggedWelcome as Welcome }
 - A throw in `run` outside every `tracedStep` (validation, code between steps, a plain `step.do`) is **not logged**: the engine also throws in `run` for pause, terminate and restart, and nothing documented tells those apart from your errors, so `withWorkflow` never logs a rejected `run`. Put every unit of work, validation included, in a `tracedStep`.
 - Without `trace` in the params, each replay of `run` gets a new `traceId`; join one instance's lines on `workflowInstanceId`.
 
+### Spans on hot paths: `level`, `slowMs`, Span Fields
+
+Wrapping every query or cache read in a Span at `INFO` floods the log. Give hot-path Spans `level: 'debug'` and a Slow Threshold: with `LOG_LEVEL=info`, fast ones write nothing (the logger's level filters them; they are never dropped otherwise), slow ones write `span.end` at `WARN`, and a throw is always `ERROR`. Put a result on the `span.end` line with `span.set()` rather than a separate log line:
+
+```ts
+import { withSpan } from 'loggercf'
+
+declare const cache: { get(key: string): Promise<string | null> }
+
+export async function readCached(key: string): Promise<string | null> {
+  return withSpan(
+    'cache.read',
+    async (span) => {
+      const value = await cache.get(key)
+      span.set({ hit: value !== null }) // on span.end only
+      return value
+    },
+    { level: 'debug', slowMs: 200, fields: { cache: 'users' } },
+  )
+}
+```
+
+- `this.traced(fn, 'svc.op', options)` takes the same options, and `fn` gets the same `span`. A function that takes no argument still works.
+- Set the defaults once instead of on every call: `createLogger({ service, spans: { level: 'debug', slowMs: 500 } })`, or the vars `LOG_SPAN_LEVEL` / `LOG_SPAN_SLOW_MS` for the helpers that build the Root Logger from env (`tracedWorker`, `TracedEntrypoint`, `withLogging`, `withScheduled`, `withQueueMessage`, `withWorkflow`, `defaultLoggerFromEnv`). A Span's own options win; `slowMs: Infinity` turns a default Slow Threshold off for one Span.
+- `withLogging` method Spans, the handler helpers' Spans and `tracedStep` take no per-call options: only the defaults apply.
+- Span Fields never reach other lines: not the work's own lines, not a nested Span, not the unsampled `<operation> failed` line. For fields on every line, use `setLoggerContext`.
+- `span.set()` after the Span ended, or on an unsampled trace, does nothing. It never throws.
+- Span Fields cannot set `span` or `err` (the Span Owned Keys): they are dropped, with one `WARN` naming them. Values for the moved keys (`message`, `level`, `traceId`, ...) land in `args`, as for any log call.
+
 ### Log call shape
 
 Two call styles work, and no argument is ever dropped. Prefer the structured style (fields or an `Error` first, then the message) for data you want to query. The console style (message first) also keeps every argument: a trailing object's keys become top-level fields, the first trailing `Error` becomes `err`, extra strings and numbers join the message, and anything else goes to an `args` array.
@@ -450,7 +480,8 @@ logger.info('loaded order %s', order) // message stays 'loaded order %s', order'
 - `nodejs_compat` is required, because loggercf uses `AsyncLocalStorage` from `node:async_hooks`.
 - `loggerOptionsFromEnv(env)`, `tracedWorker`, `withLogging` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'` for a missing one).
 - `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error`, `fatal` or `silent`. `silent` writes nothing at all. Any other value (including `DEBUG` and `SILENT`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value.
-- To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to a `[TracedEntrypoint.envMapping]` getter on a `TracedEntrypoint` subclass.
+- `LOG_SPAN_LEVEL` (a lowercase level, not `silent`) and `LOG_SPAN_SLOW_MS` (milliseconds, `0` or more) set the Root Logger's Span Defaults. Unset, Spans write at `info` with no Slow Threshold. An invalid value is ignored, with one `WARN` per isolate.
+- To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`, `spanLevel`, `spanSlowMs`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to a `[TracedEntrypoint.envMapping]` getter on a `TracedEntrypoint` subclass.
 
 ```ts
 import { createLogger, loggerOptionsFromEnv } from 'loggercf'

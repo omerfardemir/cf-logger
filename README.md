@@ -57,14 +57,18 @@ Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 }
 ```
 
-| Var           | Logger Option | When absent             |
-| ------------- | ------------- | ----------------------- |
-| `NAME`        | `service`     | `'unknown'`             |
-| `LOG_LEVEL`   | `level`       | `'info'`                |
-| `ENVIRONMENT` | `environment` | left off every log line |
-| `VERSION`     | `version`     | left off every log line |
+| Var                | Logger Option  | When absent                                           |
+| ------------------ | -------------- | ----------------------------------------------------- |
+| `NAME`             | `service`      | `'unknown'`                                           |
+| `LOG_LEVEL`        | `level`        | `'info'`                                              |
+| `ENVIRONMENT`      | `environment`  | left off every log line                               |
+| `VERSION`          | `version`      | left off every log line                               |
+| `LOG_SPAN_LEVEL`   | `spans.level`  | OK Spans write `span.end` at `'info'`                 |
+| `LOG_SPAN_SLOW_MS` | `spans.slowMs` | no Slow Threshold (see [Span Logging](#span-logging)) |
 
 `LOG_LEVEL` must be one of `trace`, `debug`, `info`, `warn`, `error`, `fatal` or `silent` (lowercase). `silent` writes nothing at all. A missing or empty value means `'info'`. Any other value falls back to `'info'` and writes one `WARN` per isolate with `invalidLevel` and `validLevels`.
+
+`LOG_SPAN_LEVEL` takes the same lowercase levels except `silent`, and `LOG_SPAN_SLOW_MS` a number of milliseconds, `0` or more. Either one, when invalid, is left out and writes one `WARN` per isolate naming the bad value. They are the [Span Defaults](#span-logging) of the Root Logger these helpers build, and the only way to set them for `withLogging`, `withScheduled`, `withQueueMessage` and `withWorkflow`, which build their Root Logger from env.
 
 Using other var names, or deriving a field from a binding, takes a mapping (see [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)). To use Cloudflare's [version metadata](https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/) as `version`, add the binding under a name of your choice and map it with a function:
 
@@ -91,6 +95,12 @@ Changes to the Logger Options read from env:
 - A numeric `VERSION` is logged as a string (`2` becomes `"2"`), and `VERSION: 0`, which 0.0.1 left off, is now logged as `"0"`.
 - An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw.
 - `LOG_LEVEL: "SILENT"` (any level name not in lowercase) falls back to `'info'` with one `WARN`; 0.0.1 passed it on and threw. `"silent"` still mutes all logs, as in 0.0.1.
+
+- The env helpers read two new vars, `LOG_SPAN_LEVEL` and `LOG_SPAN_SLOW_MS`, as the Span Defaults (see [Span Logging](#span-logging)). An invalid value is ignored with one `WARN`.
+
+Changes to Spans:
+
+- The callback of `withSpan()` and `traced()` now receives the Span handle (`{ set }`) as its first argument. A function reference whose first parameter is optional (`async function run(dryRun = false)`, passed as `withSpan('op', run)`) now receives the handle instead of `undefined`; wrap it, `withSpan('op', () => run())`. Zero-argument callbacks are unchanged.
 
 Changes to Traced Sessions (`loggercf/workers`):
 
@@ -144,7 +154,7 @@ logger.info({ userId: 'u-42' }, 'Request started')
 // → {"time":"...","level":"INFO","service":"my-worker","environment":"production","version":"1.2.3","userId":"u-42","message":"Request started"}
 ```
 
-`level` defaults to `'info'`. `service`, `environment` and `version` are on every line. An optional second argument adds more fixed fields. Keep these to per-process data: an isolate serves many requests at once, so per-request data (`requestId`, `userId`, ...) belongs in a Logging Context's fields (see `runWithLogger`).
+`level` defaults to `'info'`. `service`, `environment` and `version` are on every line. `spans` sets the [Span Defaults](#span-logging) (`{ level, slowMs }`) for every Span in a Logging Context this logger opens. An unknown `level` or `spans.level`, or a `spans.slowMs` that is not a number `>= 0`, throws. An optional second argument adds more fixed fields. Keep these to per-process data: an isolate serves many requests at once, so per-request data (`requestId`, `userId`, ...) belongs in a Logging Context's fields (see `runWithLogger`).
 
 ### `getLogger(service?)`
 
@@ -223,15 +233,19 @@ for (const job of await loadJobs()) {
 
 Without a valid `traceparent` a new root trace starts. Either way the context gets its own `spanId`. `fields` is copied, never mutated.
 
-### `withSpan(operation, fn)`
+### `withSpan(operation, fn, options?)`
 
-Time a sub-operation as a **Span** nested in the current Logging Context: new `spanId`, `parentSpanId` = the current span, same `traceId`. Works sync or async; errors are logged and rethrown. Logs `span.end` only when the trace is sampled; for an unsampled trace a throw still writes one `<operation> failed` line at `ERROR` with `err` and a `span` object without timing (`operation`, `status: 'ERROR'`, `error`), so a query on `span.status = 'ERROR'` finds both. An error the app catches inside the Span still counts: the Span threw, so it is an `ERROR` line. Outside a Logging Context it just runs `fn`.
+Time a sub-operation as a **Span** nested in the current Logging Context: new `spanId`, `parentSpanId` = the current span, same `traceId`. Works sync or async; errors are logged and rethrown. `fn` gets the Span's handle, whose `span.set(fields)` adds fields to the `span.end` line; `options` takes `level`, `slowMs` and `fields` (see [Span Logging](#span-logging)). Logs `span.end` only when the trace is sampled; for an unsampled trace a throw still writes one `<operation> failed` line at `ERROR` with `err` and a `span` object without timing (`operation`, `status: 'ERROR'`, `error`), so a query on `span.status = 'ERROR'` finds both. An error the app catches inside the Span still counts: the Span threw, so it is an `ERROR` line. Outside a Logging Context it just runs `fn`.
 
 ```ts
 import { withSpan } from 'loggercf'
 
 app.get('/users/:id', async (c) => {
-  const user = await withSpan('db.getUser', () => db.getUser(c.req.param('id')))
+  const user = await withSpan('db.getUser', () => db.getUser(c.req.param('id')), {
+    level: 'debug', // fast lookups stay out of an `info` log
+    slowMs: 500, // ...but one that takes 500 ms or more is a WARN
+    fields: { table: 'users' },
+  })
   return c.json(user)
 })
 ```
@@ -329,7 +343,9 @@ A Span's status says whether the call completed, not what it answered. Any respo
 
 Map Worker (or `process.env`) variables into `LoggerOptions`: `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` by default (see [Cloudflare Worker Requirements](#cloudflare-worker-requirements) for fallbacks).
 
-`mapping` overrides where each field comes from: `service`, `level`, `environment` or `version` take a var name or a function `(env) => string | undefined`. Fields you leave out keep their default var. A mapped field doesn't fall back to its default var. A number is used as its string form; an empty string or any other non-string value counts as absent.
+`LOG_SPAN_LEVEL` and `LOG_SPAN_SLOW_MS` are read too, as `spans.level` and `spans.slowMs`; `spans` is left out when neither is set.
+
+`mapping` overrides where each field comes from: `service`, `level`, `environment`, `version`, `spanLevel` or `spanSlowMs` take a var name or a function `(env) => string | undefined`. Fields you leave out keep their default var. A mapped field doesn't fall back to its default var. A number is used as its string form; an empty string or any other non-string value counts as absent.
 
 ```ts
 import { createLogger, loggerOptionsFromEnv } from 'loggercf'
@@ -559,11 +575,11 @@ export default tracedWorker(MySession)
 
 **Key members:**
 
-| Member                        | Description                                                                                                    |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `this.traced(fn, operation?)` | Runs `fn` in a Logging Context continuing the caller's trace. Optional `operation` reports the call as a Span. |
-| `this.logger`                 | Request-scoped logger (must be called inside `traced()`)                                                       |
-| `this.env`                    | Worker env (bindings, vars) — for multi-hop RPC calls                                                          |
+| Member                                  | Description                                                                                                                                                                                                  |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `this.traced(fn, operation?, options?)` | Runs `fn` in a Logging Context continuing the caller's trace. Optional `operation` reports the call as a Span; `options` and `fn`'s `span` argument work as for [`withSpan`](#withspanoperation-fn-options). |
+| `this.logger`                           | Request-scoped logger (must be called inside `traced()`)                                                                                                                                                     |
+| `this.env`                              | Worker env (bindings, vars) — for multi-hop RPC calls                                                                                                                                                        |
 
 **What callers can reach.** A caller holding a session stub can call every method and read every getter your subclass declares (or inherits from your own base classes), and nothing else. `traced`, `logger` and `env` are instance properties, and the Trace Carrier, Context Fields and Root Logger are `#private`; JSRPC exposes none of them, so `session.traced(...)` or `session.logger` over RPC fails with `The RPC receiver does not implement the method`. Keep helpers you do not want callable as `#private` methods or functions outside the class. `traced` and `logger` cannot be overridden in a subclass (TypeScript reports it, and `super.traced` does not exist); give your own helper another name. In plain JavaScript (or past a `@ts-expect-error`) a subclass member named `traced` or `logger` replaces the helper and is callable over RPC like any other method.
 
@@ -744,12 +760,12 @@ export default withLogging(SearchWorker, { spans: true })
 - With `session: true`, a field the caller passes named `rpcMethod` or `entrypoint` is replaced by the receiver's.
 - Only method calls are wrapped. A method named like a handler (`trace`, `test`, `email`, `connect`, `queue`, `tail` or `tailStream`) is never wrapped. These run outside the Logging Context: a getter read over RPC, and the body of an `async *` method, which runs on each `.next()`, after the call has returned. A sync method that returns an un-awaited `RpcPromise` gets a span that ends when the method returns, not when the promise settles (`spans` treats only a real `Promise` as async). Make the method `async` and `await` the call to time it.
 
-| Option    | Default | Description                                                                                                                                                                                                                                                                                                |
-| --------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `spans`   | `false` | Record each call as a [Span](#span-logging) named `<Class>.<method>`: one `span.end` with duration and status, at `ERROR` with `err` when the method throws or rejects. Without it, a throw is still logged, as one `<Class>.<method> failed` line at `ERROR`. The error is rethrown unchanged either way. |
-| `session` | `false` | Add `session(init)`, which returns a Traced Session over the same methods (see below). Throws if the class already has a `session` method or getter, own or inherited.                                                                                                                                     |
-| `fetch`   | `true`  | Wrap `fetch` in its own Logging Context. Pass `false` when `fetch` hands the request to a Hono app that uses `useLogger`, which opens one itself.                                                                                                                                                          |
-| `env`     | `{}`    | [Env Mapping](#loggeroptionsfromenvenv-mapping) for the Root Logger.                                                                                                                                                                                                                                       |
+| Option    | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                               |
+| --------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `spans`   | `false` | Record each call as a [Span](#span-logging) named `<Class>.<method>`: one `span.end` with duration and status, at `ERROR` with `err` when the method throws or rejects. Its level and Slow Threshold come from the Root Logger's Span Defaults (`LOG_SPAN_LEVEL`, `LOG_SPAN_SLOW_MS`). Without it, a throw is still logged, as one `<Class>.<method> failed` line at `ERROR`. The error is rethrown unchanged either way. |
+| `session` | `false` | Add `session(init)`, which returns a Traced Session over the same methods (see below). Throws if the class already has a `session` method or getter, own or inherited.                                                                                                                                                                                                                                                    |
+| `fetch`   | `true`  | Wrap `fetch` in its own Logging Context. Pass `false` when `fetch` hands the request to a Hono app that uses `useLogger`, which opens one itself.                                                                                                                                                                                                                                                                         |
+| `env`     | `{}`    | [Env Mapping](#loggeroptionsfromenvenv-mapping) for the Root Logger.                                                                                                                                                                                                                                                                                                                                                      |
 
 #### Durable Objects
 
@@ -950,6 +966,7 @@ Emits a span-end log on completion:
 ```json
 {
   "level": "INFO",
+  "message": "span.end math.multiply",
   "span": {
     "operation": "math.multiply",
     "startTime": 1777021502058,
@@ -957,26 +974,95 @@ Emits a span-end log on completion:
     "duration": 1,
     "status": "OK"
   },
-  "message": "span.end math.multiply",
   "traceId": "...",
   "spanId": "...",
   "parentSpanId": "..."
 }
 ```
 
-On error, `status` is `"ERROR"` with an `error` field, logged at error level.
+On error, `status` is `"ERROR"` with an `error` field, logged at error level, with `err`.
 
 The span object intentionally does **not** duplicate `traceId`/`spanId`/`parentSpanId` — those are already on every log line.
 
 Outgoing HTTP calls can be Spans too: pass `spans: true` to `tracedFetch` or `tracedFetcher` (see [Outgoing request options](#outgoing-request-options)).
 
-Span logging is **optional**. Without an operation name, `traced()` only opens the Logging Context. `span.end` lines are skipped when the trace is unsampled (`traceFlags` bit 0 unset), but a throw never is: for an unsampled trace a Span that throws writes one `<operation> failed` line at `ERROR`, with `err` and a `span` object without timing (`operation`, `status: 'ERROR'`, `error`).
+### Levels and the Slow Threshold
+
+Wrapping hot paths (each query, each cache read) in Spans multiplies the log volume when every `span.end` is `INFO`. Each Span takes options, as the third argument of `withSpan(operation, fn, options)` and `this.traced(fn, operation, options)`:
+
+| Option   | Default  | Description                                                                                                                                                            |
+| -------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `level`  | `'info'` | The level of an OK `span.end`.                                                                                                                                         |
+| `slowMs` | none     | The Slow Threshold: an OK Span that takes this many milliseconds or more writes `span.end` at `WARN` (or at `level`, if that is more severe). `Infinity` turns it off. |
+| `fields` | none     | Span Fields for the `span.end` line (see below).                                                                                                                       |
+
+| Outcome                  | Sampled trace                                                   | Unsampled trace                                       |
+| ------------------------ | --------------------------------------------------------------- | ----------------------------------------------------- |
+| OK, no `slowMs`          | `span.end` at `level`                                           | nothing                                               |
+| OK, faster than `slowMs` | `span.end` at `level`                                           | nothing                                               |
+| OK, `slowMs` or slower   | `span.end` at `WARN`, or at `level` when that is more severe    | nothing                                               |
+| Throws or rejects        | `span.end` at `ERROR` with `err`, whatever `level` and `slowMs` | `<operation> failed` at `ERROR` with `err`, no timing |
+
+A fast Span is never dropped: it is written at `level`. To keep fast Spans out of the log, give them `level: 'debug'` and let the logger's level filter them:
+
+```ts
+// LOG_LEVEL=info: fast lookups write nothing, a slow one writes a WARN, a throw an ERROR.
+const user = await withSpan('db.getUser', () => db.getUser(id), { level: 'debug', slowMs: 500 })
+```
+
+An invalid `level` or `slowMs` (a typo past TypeScript, a negative number) is ignored, never thrown.
+
+### Span Defaults
+
+Set `level` and `slowMs` once for a Root Logger with `spans`; each Span's own options override them:
+
+```ts
+const logger = createLogger({ service: 'api', spans: { level: 'debug', slowMs: 500 } })
+
+await withSpan('db.getUser', () => db.getUser(id)) // DEBUG, or WARN at 500 ms or more
+await withSpan('report.build', () => build(), { slowMs: Infinity }) // never slow
+await withSpan('payment.charge', () => charge(), { level: 'info' }) // INFO, WARN at 500 ms or more
+```
+
+The Workers helpers build their Root Logger from env, so there the Span Defaults come from `LOG_SPAN_LEVEL` and `LOG_SPAN_SLOW_MS` (see [Cloudflare Worker Requirements](#cloudflare-worker-requirements)). They apply to every Span in that Root Logger's Logging Contexts: `withSpan`, `traced()`, `withLogging`'s method Spans, `span.end scheduled`, a queue message's or Workflow run's Span, `tracedStep`, and `tracedFetch` with `spans: true`. A `TracedEntrypoint` can set them in code from its `[TracedEntrypoint.loggerOptions]` hook (`{ ...loggerOptionsFromEnv(this.env), spans: { slowMs: 500 } }`). `withLogging`'s method Spans and the handler helpers take no per-call options: the method or handler is the Span, so there is no call to pass them to. `tracedStep` keeps `step.do`'s exact arguments, so it takes none either.
+
+A Root Logger from `createLogger` keeps its Span Defaults in its `.child()` loggers and in every Logging Context it opens. A hand-written `Logger` has none, so its Spans use the built-in ones (`'info'`, no Slow Threshold). Neither does `getLogger()` called outside every Logging Context (it returns a forwarder, not the Root Logger), so `runWithLogger({ logger: getLogger() })` there gets the built-in defaults; pass the Root Logger itself instead.
+
+In Workers, `Date.now()` advances only across I/O, so a Span that does only synchronous CPU work measures `0` ms and never reaches its Slow Threshold.
+
+### Span Fields
+
+`fields` adds fields known up front, and `span.set(fields)` adds fields found inside the work (a row count, a cache hit). `fn` gets the Span's handle as its only argument; a function that takes none still works.
+
+```ts
+const value = await withSpan(
+  'cache.read',
+  async (span) => {
+    const v = await cache.get(key)
+    span.set({ hit: v !== null })
+    return v
+  },
+  { fields: { cache: 'users' } },
+)
+// → {"level":"INFO","message":"span.end cache.read","span":{...},"cache":"users","hit":true,...}
+```
+
+- Span Fields go on the `span.end` line only, `ERROR` included. They are never on other lines (the work's own lines, a nested Span's `span.end`, or the unsampled `<operation> failed` line), and never change the Logging Context: use `setLoggerContext` for that.
+- A later `span.set()` wins over an earlier one on a shared key, and over `fields`. On the `span.end` line a Span Field also wins over a Context Field of the same name, as a log call's fields do.
+- `span.set()` does nothing once the Span has ended, for an unsampled trace (no `span.end` is written), and outside a Logging Context (no Span).
+- Values are read when `fields` is passed and when `span.set()` is called. A getter that throws is written as `[Unserializable: ...]`; nothing is ever thrown into the work, and its own return value or error always wins.
+- Span Fields are serialized like any log call's fields: a value for a [Moved Key](#where-each-argument-goes) (`message`, `level`, `traceId`, `service`, ...) moves to `args`, and the [Re-write Budget](#the-line) applies.
+- **Span Owned Keys.** `span` and `err` are the `span.end` line's own: Span Fields cannot set them. They are dropped, and one `WARN` (`span fields set keys the span line owns; they were dropped`) names them in `droppedKeys`, with the Span's `operation`, never their values. It is written once per operation per isolate, for up to 100 operations.
+
+### Unsampled traces
+
+Span logging is **optional**. Without an operation name, `traced()` only opens the Logging Context (and `fn`'s `span` does nothing). `span.end` lines are skipped when the trace is unsampled (`traceFlags` bit 0 unset), however slow the Span, but a throw never is: for an unsampled trace a Span that throws writes one `<operation> failed` line at `ERROR`, with `err` and a `span` object without timing (`operation`, `status: 'ERROR'`, `error`).
 
 ```json
 {
   "level": "ERROR",
   "message": "db.query failed",
-  "operation": "db.query",
+  "span": { "operation": "db.query", "status": "ERROR", "error": "..." },
   "err": { "type": "Error", "message": "...", "stack": "..." },
   "traceId": "...",
   "spanId": "..."
