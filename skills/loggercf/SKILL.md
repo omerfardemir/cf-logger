@@ -33,6 +33,7 @@ Imports come from exactly three entry points:
 | Queue consumer, cron, Node job, any other work  | `runWithLogger({ logger: rootLogger, fields }, fn)`                                                        |
 | Passing a trace over a queue or other transport | sender puts `getTraceCarrier()` in the payload; receiver calls `runWithLogger({ logger, ...carrier }, fn)` |
 | Outbound HTTP                                   | `tracedFetch(url, init)` in place of `fetch`                                                               |
+| Calling another Worker over HTTP (binding)      | `tracedFetcher(env.SVC).fetch(request)` in place of `env.SVC.fetch(request)`                               |
 | Timing a sub-operation                          | `withSpan('db.getUser', fn)`                                                                               |
 | Logging from code that receives no logger       | `getLogger()`, which returns the Logging Context's logger, or the Default Logger outside one               |
 | Code outside every Logging Context              | register a Default Logger: `defaultLoggerFromEnv()` on Workers, `setDefaultLogger(rootLogger)` elsewhere   |
@@ -164,7 +165,7 @@ Call these inside `useLogger`, `this.traced`, or `runWithLogger`. Outside a Logg
 
 - `setLoggerContext` ignores the fields and writes one WARN per isolate: `setLoggerContext called outside a Logging Context; fields ignored`. That WARN in the logs means a call site is outside every Logging Context.
 - `withSpan` just runs the function, with no Span.
-- `getTraceCarrier()` returns `{}`, and `tracedFetch` sends no trace headers.
+- `getTraceCarrier()` returns `{}`, and `tracedFetch` / `tracedFetcher` send no trace headers.
 - `getLogger()` writes through the Default Logger, or without one a standalone logger with `service: 'unknown'` (or the name you pass). Either way the line has no trace IDs and no Context Fields.
 
 ### Traced Sessions: every RPC method runs in `this.traced`
@@ -224,6 +225,35 @@ export default class extends TracedEntrypoint<Env> {
     })
   }
 }
+```
+
+### Outbound HTTP carries the trace
+
+Use `tracedFetch` for `fetch`, and wrap a service binding with `tracedFetcher` before calling its `fetch`. Do not set `traceparent` by hand, and do not wrap the call in your own retry or `try/catch` for the logger's sake: the wrapper returns or throws exactly what `fetch` or the binding does. It never mutates the `Request` or `init` you pass, so forwarding `c.req.raw` is fine. Its options are off by default:
+
+- `forwardRequestId: true` sends the `requestId` Context Field as `X-Request-Id` (never replacing one you set), so the receiver's `useLogger` reuses it.
+- `spans: true` logs one `span.end fetch` per call with `method`, `host`, `path` (no query string) and `statusCode`. A 5xx response is still an `OK` Span (look at `statusCode`); a network failure is an `ERROR` Span, and the error is rethrown.
+
+```ts
+import { Hono } from 'hono'
+import { tracedFetch, tracedFetcher } from 'loggercf'
+import { useLogger } from 'loggercf/hono'
+import { defaultLoggerFromEnv } from 'loggercf/workers'
+
+const app = new Hono<{ Bindings: { API: Fetcher } }>()
+app.use(useLogger(defaultLoggerFromEnv()))
+
+app.all('/api/*', (c) => {
+  const api = tracedFetcher(c.env.API, { forwardRequestId: true, spans: true })
+  return api.fetch(c.req.raw)
+})
+
+app.get('/weather', async (c) => {
+  const res = await tracedFetch('https://weather.example.com/today', undefined, { spans: true })
+  return c.json(await res.json())
+})
+
+export default app
 ```
 
 ### Log call shape

@@ -12,11 +12,11 @@ pnpm add hono
 
 ## Entry Points
 
-| Import             | Contents                                                                                                                                               |
-| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setDefaultLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, trace utilities, types |
-| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware; `UseLoggerOptions`, `RequestIdOptions`, `RequestIdSource` types                                           |
-| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`, `defaultLoggerFromEnv`                                              |
+| Import             | Contents                                                                                                                                                                               |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `loggercf`         | Core: `createLogger`, `runWithLogger`, `withSpan`, `getLogger`, `setDefaultLogger`, `setLoggerContext`, `loggerOptionsFromEnv`, `tracedFetch`, `tracedFetcher`, trace utilities, types |
+| `loggercf/hono`    | `useLogger`, `generateId` — Hono middleware; `UseLoggerOptions`, `RequestIdOptions`, `RequestIdSource` types                                                                           |
+| `loggercf/workers` | `TracedSession`, `TracedEntrypoint`, `tracedWorker`, `withTrace`, `tracedSession`, `defaultLoggerFromEnv`                                                                              |
 
 ## How Trace Propagation Works
 
@@ -235,7 +235,63 @@ await runWithLogger({ logger, ...msg.body.trace }, async () => {
 })
 ```
 
-`useLogger` (HTTP headers), `tracedFetch` (outgoing requests) and `tracedSession` / `withTrace` (RPC) do this for you.
+`useLogger` (HTTP headers), `tracedFetch` / `tracedFetcher` (outgoing requests) and `tracedSession` / `withTrace` (RPC) do this for you.
+
+### `tracedFetch(input, init?, options?)`
+
+`fetch` that sends the current Trace Carrier as `traceparent` / `tracestate` headers. Takes the same arguments as `fetch`, plus optional [`options`](#outgoing-request-options). Outside a Logging Context it is plain `fetch`.
+
+```ts
+import { tracedFetch } from 'loggercf'
+
+const res = await tracedFetch('https://api.example.com/items', { method: 'POST', body })
+// Record the call as a Span:
+const res2 = await tracedFetch('https://api.example.com/items', undefined, { spans: true })
+```
+
+### `tracedFetcher(binding, options?)`
+
+Wrap a service binding (a `Fetcher`) so its HTTP interface carries the trace: `fetch(input, init)` and `fetch(request)` both send the current Trace Carrier, and the receiving Worker's `useLogger` continues it. Use it when Workers talk over HTTP through bindings (a gateway forwarding to internal Workers); for RPC methods use [`withTrace`](#withtracebinding-fn-fields) instead.
+
+```ts
+import { tracedFetcher } from 'loggercf'
+
+app.all('/api/*', async (c) => {
+  const api = tracedFetcher(c.env.API, { forwardRequestId: true, spans: true })
+  return api.fetch(c.req.raw) // same Request, plus traceparent / tracestate / X-Request-Id
+})
+```
+
+- It returns the binding's own type. `connect()` and every other member pass through to the binding unchanged; only `fetch` is wrapped. Hand the original binding (not the wrapper) to anything that stores or transfers it.
+- Nothing you pass is mutated. The trace headers go in a new `Headers`, starting from the headers `fetch` would send (`init.headers` when given, otherwise the `Request`'s). A `Request` is passed on as it is, with only the new headers beside it, so its body (streaming included) is neither read nor copied, and its `method`, `redirect`, `signal` and `cf` still apply.
+- Outside a Logging Context, `fetch` calls the binding with exactly the arguments you gave it.
+- It never retries, catches or changes an error: the call returns or rejects with exactly what the binding does. A header value that is not safe to send (one with a line break, say) is left out rather than making the call throw.
+
+### Outgoing request options
+
+`tracedFetch` and `tracedFetcher` take the same options. All are off by default.
+
+| Option             | Effect                                                                                                                                                                                                                                                    |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `forwardRequestId` | Sends the current Request ID (the `requestId` Context Field) as `X-Request-Id`, so the receiver's `useLogger` can reuse it (if it passes that side's validation). Never overwrites an `X-Request-Id` you set. Sends nothing when there is no `requestId`. |
+| `spans`            | Logs one Span per call, `span.end fetch`, with `method`, `host`, `path` and the response `statusCode`. `path` is the pathname only, never the query string, which can carry tokens. The downstream work's parent span is this Span.                       |
+
+A Span's status says whether the call completed, not what it answered. Any response, 5xx included, is `OK` (filter on `statusCode` to find failing responses; the receiver's own logs record its errors). A call that throws or rejects, such as a network failure, is logged at `ERROR` with the error, then the same error is rethrown. Like every Span, it is written only when the trace is sampled.
+
+```json
+{
+  "level": "INFO",
+  "message": "span.end fetch",
+  "method": "GET",
+  "host": "api.internal",
+  "path": "/users/42",
+  "statusCode": 200,
+  "span": { "operation": "fetch", "duration": 12, "status": "OK", "...": "..." },
+  "traceId": "...",
+  "spanId": "...",
+  "parentSpanId": "..."
+}
+```
 
 ### `loggerOptionsFromEnv(env, mapping?)`
 
@@ -573,6 +629,8 @@ On error, `status` is `"ERROR"` with an `error` field, logged at error level.
 
 The span object intentionally does **not** duplicate `traceId`/`spanId`/`parentSpanId` — those are already on every log line.
 
+Outgoing HTTP calls can be Spans too: pass `spans: true` to `tracedFetch` or `tracedFetcher` (see [Outgoing request options](#outgoing-request-options)).
+
 Span logging is **optional**. Without an operation name, `traced()` only opens the Logging Context. Span logs are skipped when the trace is unsampled (`traceFlags` bit 0 unset).
 
 ---
@@ -612,7 +670,7 @@ loggercf/
 ├── dev/                  # Local Worker fixtures for e2e verification (not published)
 │   ├── services.d.ts     # Shared RPC service interfaces
 │   ├── main-worker/      # Gateway worker (Hono + routes)
-│   ├── bind-worker/      # Mid-tier worker (single + multi-hop RPC)
+│   ├── bind-worker/      # Mid-tier worker (single + multi-hop RPC, HTTP over its binding)
 │   └── math-worker/      # Leaf worker (multiply, divide)
 ├── skills/loggercf/     # Agent skill shipped in the package
 ├── scripts/e2e-local.mjs # Starts the dev workers, probes trace propagation, checks their logs
