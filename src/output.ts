@@ -1,3 +1,4 @@
+import { isPlainObject } from './route'
 import type { LogFields, TraceContext } from './types'
 
 /**
@@ -57,15 +58,32 @@ export function serializeError(error: Error, depth = 0): LogRecord {
   return out
 }
 
+/** Serialize `value` when it is an `Error`; anything else is returned as is. */
+const serializeIfError = (value: unknown) =>
+  value instanceof Error ? serializeError(value) : value
+
+/** `serializeIfError` on an overflow value and, one level down, on its items or values. */
+function serializeOverflowItem(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(serializeIfError)
+  if (isPlainObject(value)) {
+    const out: LogRecord = {}
+    for (const [key, v] of Object.entries(value)) out[key] = serializeIfError(v)
+    return out
+  }
+  return serializeIfError(value)
+}
+
 /**
- * Build the final log record from a pino entry and the current Logging Context.
+ * Build the final log record from a log call's entry and the current Logging Context.
  *
  * Precedence, strongest first: trace IDs (protected) → fields passed at the log
  * call → logger bindings (`createLogger` / `.child()`) → Context Fields.
- * Pino has already merged the log-call fields over the bindings in `entry`.
- * Any top-level `Error` value is serialized with `serializeError()`.
+ * The logger has already merged the log-call fields (from `routeArgs()`) over
+ * the bindings in `entry`. `Error` values are serialized with
+ * `serializeError()`: at the top level, in `errors`, and in `args` items
+ * (one level down, e.g. `args: [{ err }]`). Never mutates `entry`'s values.
  *
- * @param {LogRecord} entry - The object pino produced (time, level, bindings, call fields, message).
+ * @param {LogRecord} entry - The logger's entry (time, level, bindings, call fields, message, errors, args).
  * @param {RecordContext} [context] - The current Logging Context, if any.
  * @returns {LogRecord} The record to hand to a `Sink`.
  */
@@ -76,6 +94,8 @@ export function buildRecord(entry: LogRecord, context?: RecordContext): LogRecor
   for (const [key, value] of Object.entries(record)) {
     if (value instanceof Error) record[key] = serializeError(value)
   }
+  if (Array.isArray(record.errors)) record.errors = record.errors.map(serializeIfError)
+  if (Array.isArray(record.args)) record.args = record.args.map(serializeOverflowItem)
 
   if (context) {
     const { traceId, spanId, parentSpanId } = context.trace
@@ -88,7 +108,9 @@ export function buildRecord(entry: LogRecord, context?: RecordContext): LogRecor
 }
 
 /**
- * `JSON.stringify` that never throws on circular references or `BigInt`.
+ * `JSON.stringify` that never throws on circular references or `BigInt`, and
+ * keeps values JSON would drop: a function as `[Function: name]`, a symbol as
+ * `Symbol(description)`.
  *
  * @param {LogRecord} record - The record to serialize.
  * @returns {string} One JSON line.
@@ -97,6 +119,8 @@ export function stringifyRecord(record: LogRecord): string {
   const seen = new WeakSet<object>()
   return JSON.stringify(record, (_key, value: unknown) => {
     if (typeof value === 'bigint') return value.toString()
+    if (typeof value === 'function') return `[Function: ${value.name || 'anonymous'}]`
+    if (typeof value === 'symbol') return value.toString()
     if (typeof value === 'object' && value !== null) {
       if (seen.has(value)) return '[Circular]'
       seen.add(value)

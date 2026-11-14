@@ -261,7 +261,7 @@ export function useLogger<T extends LogFields = LogFields>(
       },
     }
     await runWithLogger(contextOptions, async () => {
-      const logger = getLogger<T>()
+      const logger = getLogger()
       const trace = getTraceContext()!
       c.set('logger' as never, logger as never)
       c.set('requestId' as never, requestId as never)

@@ -58,9 +58,7 @@ describe('printf placeholders', () => {
 
   it.each(PINNED)('console-style call: %j', (template, args, message) => {
     const entries = _captureEntries()
-    // pino's LogFn type has no console-style overload yet
-    const info = createLogger({ service: 'svc' }).info as (...a: unknown[]) => void
-    info(template, ...args)
+    createLogger({ service: 'svc' }).info(template, ...args)
     expect(entries[0].message).toBe(message)
   })
 

@@ -1,7 +1,7 @@
-import pino from 'pino/browser.js'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type {
   LogFields,
+  LogLevel,
   LoggerOptions,
   Logger,
   TraceCarrier,
@@ -19,6 +19,7 @@ import {
   type Sink,
 } from './output'
 import { _resetEnvWarnings } from './env'
+import { routeArgs } from './route'
 
 const als = new AsyncLocalStorage<ALSStore>()
 
@@ -35,60 +36,70 @@ const IS_WORKERS = typeof navigator !== 'undefined' && navigator.userAgent === '
  */
 let sink: Sink = IS_WORKERS ? workersSink : nodeSink
 
-const LEVELS = ['trace', 'debug', 'info', 'warn', 'error', 'fatal'] as const
+/** Severity of each level, lowest first. A logger writes levels at or above its minimum. */
+const LEVEL_VALUES: Record<LogLevel, number> = {
+  trace: 10,
+  debug: 20,
+  info: 30,
+  warn: 40,
+  error: 50,
+  fatal: 60,
+}
+
+const LEVELS = Object.keys(LEVEL_VALUES) as LogLevel[]
 
 /**
- * Wrap a pino instance in the public `Logger` interface.
+ * The numeric minimum for a level name. `'silent'` writes nothing.
  *
- * Normalizes a bare `Error` first argument (`logger.error(err, msg?)`) into
- * `{ err }` with `msg` defaulting to `err.message`, because pino's object mode
- * would otherwise drop the error entirely.
- *
- * @template T - The type of user-defined log fields.
- * @param {pino.Logger} p - The pino instance to wrap.
- * @returns {Logger<T>} The Logger.
+ * @param {string} level - A level name.
+ * @returns {number} Its severity.
+ * @throws {Error} `unknown level <name>` for anything else.
  */
-function wrap<T extends LogFields = LogFields>(p: pino.Logger): Logger<T> {
-  const logger = {
-    child: (bindings: Record<string, unknown>) => wrap<T>(p.child(bindings)),
-  } as Logger<T>
-  for (const level of LEVELS) {
-    logger[level] = (...args: unknown[]) => {
-      const [first, msg, ...rest] = args
-      if (first instanceof Error) {
-        ;(p[level] as (...a: unknown[]) => void)({ err: first }, msg ?? first.message, ...rest)
-        return
-      }
-      ;(p[level] as (...a: unknown[]) => void)(...args)
-    }
-  }
-  return logger
+function levelValue(level: string): number {
+  if (level === 'silent') return Infinity
+  if (!Object.hasOwn(LEVEL_VALUES, level)) throw new Error(`unknown level ${level}`)
+  return LEVEL_VALUES[level as LogLevel]
+}
+
+const noop = () => {}
+
+/**
+ * Build one log line: route the arguments, add time, level and bindings, then
+ * hand it to `buildRecord()` and the current sink.
+ *
+ * Order of keys: `time`, `level`, bindings, call fields, `message`, `errors`, `args`.
+ */
+function write(label: string, bindings: LogRecord, input: unknown[]): void {
+  const { fields, message, errors, args } = routeArgs(input)
+  const entry: LogRecord = { time: new Date().toISOString(), level: label, ...bindings, ...fields }
+  if (message !== undefined) entry.message = message
+  if (errors) entry.errors = errors
+  if (args) entry.args = args
+  sink.write(buildRecord(entry, als.getStore()))
 }
 
 /**
- * Create a pino instance. The same configuration on every runtime: pino's
- * object mode hands each entry to `buildRecord()`, then to the current sink.
+ * Build a `Logger` that writes levels at or above `minimum`, with `bindings`
+ * on every line. Immutable: `child()` returns a new logger with merged bindings.
  *
- * @param {string} level - The minimum log level.
- * @returns {pino.Logger} A configured pino instance.
+ * @template T - The type of user-defined log fields.
+ * @param {number} minimum - The minimum severity written.
+ * @param {LogRecord} bindings - Fixed fields on every line.
+ * @returns {Logger<T>} The Logger.
  */
-function createPino(level: string): pino.Logger {
-  return pino({
-    level,
-    messageKey: 'message',
-    timestamp: pino.stdTimeFunctions.isoTime,
-    browser: {
-      asObject: true,
-      formatters: {
-        level(label: string) {
-          return { level: label.toUpperCase() }
-        },
-      },
-      write: (entry: object) => {
-        sink.write(buildRecord(entry as LogRecord, als.getStore()))
-      },
-    },
-  })
+function makeLogger<T extends LogFields = LogFields>(
+  minimum: number,
+  bindings: LogRecord,
+): Logger<T> {
+  const logger = {
+    child: (more: Record<string, unknown>) => makeLogger<T>(minimum, { ...bindings, ...more }),
+  } as Logger<T>
+  for (const level of LEVELS) {
+    const label = level.toUpperCase()
+    logger[level] =
+      LEVEL_VALUES[level] < minimum ? noop : (...args: unknown[]) => write(label, bindings, args)
+  }
+  return logger
 }
 
 /**
@@ -116,15 +127,12 @@ export function createLogger<T extends LogFields = LogFields>(
   bindings?: Partial<T>,
 ): Logger<T> {
   const { service, level, environment, version } = options
-  const p = createPino(level ?? 'info')
-  return wrap<T>(
-    p.child({
-      service,
-      ...(environment ? { environment } : {}),
-      ...(version ? { version } : {}),
-      ...bindings,
-    }),
-  )
+  return makeLogger<T>(levelValue(level ?? 'info'), {
+    service,
+    ...(environment ? { environment } : {}),
+    ...(version ? { version } : {}),
+    ...bindings,
+  })
 }
 
 /**

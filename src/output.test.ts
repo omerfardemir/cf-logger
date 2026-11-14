@@ -4,7 +4,9 @@ import {
   runWithLogger,
   setLoggerContext,
   getTraceContext,
+  withSpan,
   _captureEntries,
+  _captureLines,
   _setSink,
   _reset,
 } from './logger'
@@ -201,5 +203,106 @@ describe('errors', () => {
     expect(depth).toBe(6)
     expect(node.type).toBe('Truncated')
     expect(line.length).toBeGreaterThan(0)
+  })
+})
+
+/** Strip time, generated span IDs, stacks and span timing, everywhere in a line. */
+const normalizeAll = (line: string) =>
+  line
+    .replace(/"time":"[^"]+"/g, '"time":"<t>"')
+    .replace(/"spanId":"[0-9a-f]+"/g, '"spanId":"<span>"')
+    .replace(/"parentSpanId":"(?!b7ad)[0-9a-f]+"/g, '"parentSpanId":"<parent>"')
+    .replace(/"stack":"(?:\\.|[^"\\])*"/g, '"stack":"<stack>"')
+    .replace(/"(start|end)Time":\d+/g, '"$1Time":0')
+    .replace(/"duration":\d+/g, '"duration":0')
+
+/**
+ * Lines written by loggercf 0.0.1 (on pino 10) for the scenario below, captured
+ * before pino was replaced. Key order included: the internal core must match.
+ */
+const PINO_LINES = [
+  String.raw`{"time":"<t>","level":"INFO","service":"svc","environment":"test","version":"1.0.0","region":"eu","message":"outside"}`,
+  String.raw`{"time":"<t>","level":"DEBUG","requestId":"req-1","a":"call","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"n":1,"message":"debug 1","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
+  String.raw`{"time":"<t>","level":"INFO","requestId":"req-1","a":"binding","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"user":"u-1","message":"info line","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
+  String.raw`{"time":"<t>","level":"WARN","requestId":"req-1","a":"binding","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"err":{"type":"Error","message":"bare warning","stack":"<stack>"},"message":"bare warning","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
+  String.raw`{"time":"<t>","level":"ERROR","requestId":"req-1","a":"binding","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"err":{"type":"DbError","message":"query failed","stack":"<stack>","code":"E_DB","cause":{"type":"Error","message":"socket closed","stack":"<stack>"}},"message":"boom","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
+  String.raw`{"time":"<t>","level":"FATAL","requestId":"req-1","a":"binding","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"message":"fatal x {\"k\":1}","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
+  String.raw`{"time":"<t>","level":"INFO","requestId":"req-1","a":"binding","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
+  String.raw`{"time":"<t>","level":"INFO","requestId":"req-1","a":"binding","service":"svc","environment":"test","version":"1.0.0","region":"eu","component":"db","sub":1,"m":1,"traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"b7ad6b7169203331"}`,
+  String.raw`{"time":"<t>","level":"INFO","requestId":"req-1","a":"ctx","service":"svc","environment":"test","version":"1.0.0","region":"eu","span":{"operation":"op","startTime":0,"endTime":0,"duration":0,"status":"OK"},"message":"span.end op","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"<parent>"}`,
+  String.raw`{"time":"<t>","level":"ERROR","requestId":"req-1","a":"ctx","service":"svc","environment":"test","version":"1.0.0","region":"eu","span":{"operation":"op2","startTime":0,"endTime":0,"duration":0,"status":"ERROR","error":"x"},"err":{"type":"Error","message":"x","stack":"<stack>"},"message":"span.end op2","traceId":"0af7651916cd43dd8448eb211c80319c","spanId":"<span>","parentSpanId":"<parent>"}`,
+]
+
+describe('same lines as the pino-based logger', () => {
+  beforeEach(() => _reset())
+
+  it('writes byte-identical lines (time, IDs and stacks aside)', async () => {
+    const lines = _captureLines()
+    const logger = createLogger(
+      { service: 'svc', level: 'debug', environment: 'test', version: '1.0.0' },
+      { region: 'eu' },
+    )
+    logger.trace('dropped by level')
+    logger.info('outside')
+    await runWithLogger(
+      { logger, traceparent: TRACEPARENT, fields: { requestId: 'req-1', a: 'ctx' } },
+      async () => {
+        const log = logger.child({ component: 'db', a: 'binding' }).child({ sub: 1 })
+        log.debug({ n: 1, a: 'call' }, 'debug %d', 1)
+        log.info({ user: 'u-1' }, 'info line')
+        log.warn(new Error('bare warning'))
+        log.error(
+          { err: new DbError('query failed', { cause: new Error('socket closed') }) },
+          'boom',
+        )
+        log.fatal('fatal %s %j', 'x', { k: 1 })
+        log.info({})
+        log.info({ m: 1 })
+        withSpan('op', () => 1)
+        await withSpan('op2', async () => {
+          throw new Error('x')
+        }).catch(() => {})
+      },
+    )
+    expect(lines.map(normalizeAll)).toEqual(PINO_LINES)
+  })
+})
+
+describe('levels and child loggers', () => {
+  beforeEach(() => _reset())
+
+  it('writes only levels at or above the minimum', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc', level: 'warn' })
+    logger.trace('t')
+    logger.debug('d')
+    logger.info('i')
+    logger.warn('w')
+    logger.error('e')
+    logger.fatal('f')
+    expect(entries.map((e) => e.level)).toEqual(['WARN', 'ERROR', 'FATAL'])
+  })
+
+  it("'silent' writes nothing, and an unknown level throws as before", () => {
+    const entries = _captureEntries()
+    createLogger({ service: 'svc', level: 'silent' as never }).fatal('f')
+    expect(entries).toHaveLength(0)
+    expect(() => createLogger({ service: 'svc', level: 'INFO' as never })).toThrow(
+      'unknown level INFO',
+    )
+  })
+
+  it('child() merges bindings immutably: the parent never sees them', () => {
+    const entries = _captureEntries()
+    const parent = createLogger({ service: 'svc' }, { a: 'root' })
+    const child = parent.child({ a: 'child', b: 1 })
+    parent.info('p')
+    child.info('c')
+    child.child({ c: 2 }).info('g')
+    expect(entries[0]).toMatchObject({ a: 'root' })
+    expect(entries[0]).not.toHaveProperty('b')
+    expect(entries[1]).toMatchObject({ a: 'child', b: 1 })
+    expect(entries[1]).not.toHaveProperty('c')
+    expect(entries[2]).toMatchObject({ a: 'child', b: 1, c: 2 })
   })
 })

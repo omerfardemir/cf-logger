@@ -1,0 +1,243 @@
+import type { LogRecord } from './output'
+
+/**
+ * Record keys a log call's object arguments cannot set: their values for these
+ * keys move to `args` instead, so a call can never overwrite loggercf's own
+ * fields and nothing is dropped. `err` is the exception while it is unset:
+ * `logger.error({ err }, 'msg')` is how a structured call passes an error.
+ */
+export const RESERVED_KEYS: ReadonlySet<string> = new Set([
+  'time',
+  'level',
+  'message',
+  'service',
+  'environment',
+  'version',
+  'traceId',
+  'spanId',
+  'parentSpanId',
+  'err',
+  'errors',
+  'args',
+])
+
+/**
+ * Where the arguments of one log call ended up. Nothing is serialized yet:
+ * `buildRecord()` does that, so routed values go through the same serializers
+ * as structured fields.
+ */
+export interface RoutedArgs {
+  /** Top-level fields: `err` and the object arguments' keys, in call order. */
+  fields: LogRecord
+  /** The formatted message, when the call gave one. */
+  message?: string
+  /** Errors after the first, in call order. */
+  errors?: Error[]
+  /** Values with no better place (the overflow), in call order. */
+  args?: unknown[]
+}
+
+/**
+ * Whether `value` is a plain object literal (`{}`, `Object.create(null)`),
+ * as opposed to an array, a class instance, a `Date`, a `Map`...
+ */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/** Values `console.log('a', 'b', 3)` would print as words: appended to the message. */
+function isPrimitive(
+  value: unknown,
+): value is string | number | boolean | bigint | null | undefined {
+  return (
+    value === null ||
+    (typeof value !== 'object' && typeof value !== 'function' && typeof value !== 'symbol')
+  )
+}
+
+/** `JSON.stringify` for `%j`/`%o`/`%O`, never throwing (as pino's formatter did). */
+function tryStringify(value: unknown): string {
+  try {
+    return String(JSON.stringify(value))
+  } catch {
+    return '"[Circular]"'
+  }
+}
+
+/** Sentinel: the placeholder could not render its argument. */
+const UNRENDERED = Symbol('unrendered')
+
+/** Render one argument for placeholder `code`, matching pino 10's `printf`. */
+function render(code: string, value: unknown): string | typeof UNRENDERED {
+  switch (code) {
+    case 'd':
+    case 'f':
+      if (value == null || typeof value === 'symbol') return UNRENDERED
+      return String(Number(value))
+    case 'i':
+      if (value == null || typeof value === 'symbol') return UNRENDERED
+      return String(Math.floor(Number(value)))
+    case 'j':
+    case 'o':
+    case 'O':
+      if (value === undefined) return UNRENDERED
+      if (typeof value === 'string') return `'${value}'`
+      if (typeof value === 'function') return value.name || '<anonymous>'
+      return tryStringify(value)
+    case 's':
+      try {
+        return String(value)
+      } catch {
+        return UNRENDERED // e.g. Object.create(null) has no toString
+      }
+    default:
+      return UNRENDERED // not a placeholder (`50% off`, `%c`)
+  }
+}
+
+/**
+ * Format `template` with `printf` placeholders (`%s %d %i %f %j %o %O %%`),
+ * rendering exactly as pino 10 did.
+ *
+ * Each `%` sequence takes the next argument in order, as in pino. Where pino
+ * then dropped that argument without printing it (`%d` with `null`, `%j` with
+ * `undefined`, an unknown sequence such as `% ` or `%c`), the sequence stays
+ * in the text and the argument is returned in `rest` instead. `%%` becomes `%`
+ * only when there are arguments, like `console.log`.
+ *
+ * @param {string} template - The message template.
+ * @param {readonly unknown[]} args - The arguments after the template.
+ * @returns The formatted message, and every argument it did not print, in call order.
+ */
+export function formatMessage(
+  template: string,
+  args: readonly unknown[],
+): { message: string; rest: unknown[] } {
+  if (args.length === 0 || !template.includes('%')) return { message: template, rest: [...args] }
+
+  const kept: unknown[] = []
+  let message = ''
+  let last = 0
+  let next = 0
+  for (let i = 0; i < template.length - 1; i++) {
+    if (template[i] !== '%') continue
+    const code = template[i + 1]
+    if (code === '%') {
+      message += template.slice(last, i) + '%'
+      last = i + 2
+      i++
+      continue
+    }
+    if (next >= args.length) continue
+    const value = args[next++]
+    const text = render(code, value)
+    if (text === UNRENDERED) {
+      kept.push(value)
+      continue
+    }
+    message += template.slice(last, i) + text
+    last = i + 2
+    i++
+  }
+  message += template.slice(last)
+  return { message, rest: [...kept, ...args.slice(next)] }
+}
+
+/**
+ * Route the arguments of one log call to their place in the record, so that
+ * no argument is ever dropped. Pure: never mutates its input.
+ *
+ * 1. Leading argument: a `string` is the message template. An `Error` becomes
+ *    `err`, and the message defaults to `err.message`. A plain object is
+ *    merged (see below). After an `Error` or a plain object, a `string`
+ *    second argument is the template, and `undefined` means "no message".
+ *    Any other primitive goes to `args` and is the message as `String(value)`.
+ *    Anything else (array, class instance...) goes to `args`.
+ * 2. `printf` placeholders in the template take arguments in order
+ *    (see `formatMessage()`).
+ * 3. Every remaining argument, in order: the first `Error` becomes `err` if
+ *    unset, later ones go to `errors`. A plain object is merged. A primitive
+ *    is appended to the message after a space. Anything else (arrays, class
+ *    instances, functions, symbols) goes to `args`.
+ *
+ * Merging a plain object, leading or not: its keys go to the top level, later
+ * objects winning. `err` is set only when still unset. The other
+ * `RESERVED_KEYS`, and an `err` that is already set, move to `args` as one
+ * object per argument, so a call can never overwrite loggercf's own fields.
+ *
+ * @param {readonly unknown[]} input - The arguments the log method received.
+ * @returns {RoutedArgs} Where each argument goes.
+ */
+export function routeArgs(input: readonly unknown[]): RoutedArgs {
+  const fields: LogRecord = {}
+  const errors: Error[] = []
+  const overflow: unknown[] = []
+  const words: string[] = []
+  let message: string | undefined
+  let template: string | undefined
+  let rest = input.slice(1)
+
+  if (input.length === 0) return { fields }
+
+  const merge = (object: Record<string, unknown>) => {
+    let reserved: Record<string, unknown> | undefined
+    for (const [key, value] of Object.entries(object)) {
+      if (key === 'err' && fields.err === undefined) fields.err = value
+      else if (RESERVED_KEYS.has(key)) (reserved ??= {})[key] = value
+      else fields[key] = value
+    }
+    if (reserved) overflow.push(reserved)
+  }
+  const takeTemplate = () => {
+    if (typeof rest[0] === 'string') template = rest.shift() as string
+    else if (rest.length > 0 && rest[0] === undefined) rest.shift()
+  }
+
+  const first = input[0]
+  if (typeof first === 'string') {
+    template = first
+  } else if (first instanceof Error) {
+    fields.err = first
+    takeTemplate()
+    if (template === undefined) message = first.message
+  } else if (isPlainObject(first)) {
+    merge(first)
+    takeTemplate()
+  } else if (isPrimitive(first)) {
+    overflow.push(first)
+    message = String(first)
+  } else {
+    overflow.push(first)
+    takeTemplate()
+  }
+
+  if (template !== undefined) {
+    const formatted = formatMessage(template, rest)
+    message = formatted.message
+    rest = formatted.rest
+  }
+
+  for (const value of rest) {
+    if (value instanceof Error) {
+      if (fields.err === undefined) fields.err = value
+      else errors.push(value)
+    } else if (isPlainObject(value)) {
+      merge(value)
+    } else if (isPrimitive(value)) {
+      words.push(String(value))
+    } else {
+      overflow.push(value)
+    }
+  }
+
+  if (words.length > 0)
+    message = message === undefined ? words.join(' ') : [message, ...words].join(' ')
+
+  const routed: RoutedArgs = { fields }
+  if (message !== undefined) routed.message = message
+  if (errors.length > 0) routed.errors = errors
+  if (overflow.length > 0) routed.args = overflow
+  return routed
+}
