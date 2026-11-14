@@ -1,5 +1,6 @@
 import { getContextField, getTraceCarrier, setLoggerContext, withSpan } from './logger'
 import { injectCarrier } from './trace'
+import { REQUEST_ID_HEADER, SAFE_HEADER_VALUE } from './headers'
 
 /**
  * Options for `tracedFetch` and `tracedFetcher`. Every option is off by default.
@@ -40,15 +41,6 @@ interface Call {
 
 /** The Span operation name for an outgoing call. */
 const SPAN_OPERATION = 'fetch'
-
-/** The header `forwardRequestId` sends the Request ID in. */
-const REQUEST_ID_HEADER = 'X-Request-Id'
-
-/**
- * A value `Headers#set` accepts and sends unchanged: printable ASCII with no leading or
- * trailing space. Anything else is left out rather than making the call throw.
- */
-const SAFE_HEADER_VALUE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/
 
 /**
  * The `RequestInit` members `fetch(url, request)` reads from a `Request` used as `init`
