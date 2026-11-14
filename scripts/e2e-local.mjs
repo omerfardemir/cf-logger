@@ -7,6 +7,8 @@
 //   - Logs: the Workers' own output continues the trace across every RPC hop,
 //     with the span chain intact and no duplicate keys on any line, and each
 //     Worker's `version` read through its Env Mapping.
+//   - Request lines: one request.end per request (no request.error), INFO for 200 and ERROR
+//     for 500, with the matched route and the main Worker's include / endFields options.
 //
 // Runs on Linux, macOS and Windows.
 //
@@ -269,6 +271,47 @@ function checkLogs(failures) {
   if (divideByZero?.span?.status !== 'ERROR' || divideByZero?.err?.message !== 'Division by zero') {
     failures.push('logs: span.end bind.divideByZero is missing its ERROR status or err')
   }
+
+  checkRequestLines(lines, failures)
+}
+
+/**
+ * useLogger's request lines from the main Worker: one request.end per request, its level from
+ * the status, the matched `route`, and the `include` / `endFields` options of dev/main-worker.
+ */
+function checkRequestLines(lines, failures) {
+  const records = lines.map(({ record }) => record)
+  const withMessage = (message) => records.filter((r) => r.message === message)
+
+  if (records.some((r) => typeof r.message === 'string' && r.message.startsWith('request.error')))
+    failures.push('logs: a request.error line was written; failures belong on request.end')
+
+  const expectRequestEnd = (path, expected) => {
+    const ends = withMessage(`request.end GET ${path}`)
+    if (ends.length !== 1) {
+      failures.push(`logs: ${ends.length} request.end lines for ${path}, expected 1`)
+      return
+    }
+    const [end] = ends
+    for (const [key, value] of Object.entries(expected)) {
+      if (end[key] !== value)
+        failures.push(
+          `logs: request.end ${path} ${key} ${JSON.stringify(end[key])}, expected ${JSON.stringify(value)}`,
+        )
+    }
+    if (typeof end.duration !== 'number') failures.push(`logs: request.end ${path} has no duration`)
+    if (typeof end.userAgent !== 'string' || end.userAgent === '')
+      failures.push(`logs: request.end ${path} has no userAgent (include.userAgent)`)
+    if (!String(end.contentType).startsWith('application/json'))
+      failures.push(
+        `logs: request.end ${path} contentType ${JSON.stringify(end.contentType)} (endFields)`,
+      )
+  }
+  expectRequestEnd('/', { level: 'INFO', statusCode: 200, route: '/', path: '/' })
+  expectRequestEnd('/error', { level: 'ERROR', statusCode: 500, route: '/error', path: '/error' })
+
+  if (withMessage('request.start GET /').length !== 1)
+    failures.push('logs: expected one request.start GET / (requestStart defaults to true)')
 }
 
 async function main() {
