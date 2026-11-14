@@ -4,6 +4,8 @@
 // `pnpm dev`, sends requests carrying a known traceparent, and asserts:
 //   - HTTP: status, X-Request-Id / X-Trace-Id / traceparent / tracestate response headers, bodies.
 //   - Request ID: an invalid incoming X-Request-Id is replaced by a generated UUID.
+//   - Service binding fetch: a request through tracedFetcher(env.BIND) arrives with the
+//     caller's trace ID and X-Request-Id, and bind-worker's useLogger continues the trace.
 //   - Logs: the Workers' own output continues the trace across every RPC hop,
 //     with the span chain intact and no duplicate keys on any line, and each
 //     Worker's `version` read through its Env Mapping.
@@ -187,6 +189,54 @@ function checkResponses(results, failures) {
   expectBody('/trace', 'traceId', TRACE_ID)
   expectBody('/trace', 'parentSpanId', PARENT_SPAN_ID)
   expectBody('/error', 'error', 'Division by zero')
+  expectBody('/fetcher', 'traceId', TRACE_ID)
+
+  // bind-worker's useLogger, reached through tracedFetcher(env.BIND), continued the trace.
+  const downstream = byPath['/fetcher']?.body?.downstream ?? {}
+  if (downstream.traceId !== TRACE_ID)
+    failures.push(`/fetcher downstream traceId ${downstream.traceId}, expected ${TRACE_ID}`)
+  if (!traceparentRe.test(downstream.traceparent ?? ''))
+    failures.push(`/fetcher downstream received traceparent ${downstream.traceparent}`)
+  if (downstream.requestId !== REQUEST_ID)
+    failures.push(`/fetcher downstream requestId ${downstream.requestId}, expected ${REQUEST_ID}`)
+}
+
+/**
+ * tracedFetcher({ spans: true }) logs one span.end fetch in main-worker, and the receiver's
+ * lines continue from that span.
+ */
+function checkFetcher(records, downstream, failures) {
+  const spans = records.filter(
+    (r) => r.service === 'pino-log-test' && r.message === 'span.end fetch',
+  )
+  if (spans.length !== 1) {
+    failures.push(`logs: ${spans.length} span.end fetch lines in main-worker, expected 1`)
+    return
+  }
+  const [span] = spans
+  const expected = { method: 'GET', host: 'bind-test', path: '/echo-trace', statusCode: 200 }
+  for (const [key, value] of Object.entries(expected)) {
+    if (span[key] !== value)
+      failures.push(`logs: span.end fetch ${key} ${JSON.stringify(span[key])}, expected ${value}`)
+  }
+  if (span.span?.status !== 'OK') failures.push(`logs: span.end fetch status ${span.span?.status}`)
+  if (JSON.stringify(span).includes('not-logged'))
+    failures.push('logs: span.end fetch logged the query string')
+  if (downstream?.parentSpanId !== span.spanId)
+    failures.push(
+      `logs: bind-worker parent span ${downstream?.parentSpanId} is not the fetch span ${span.spanId}`,
+    )
+
+  const echo = records.find((r) => r.message === 'bind.echoTrace')
+  if (!echo) {
+    failures.push('logs: no bind.echoTrace line from bind-worker')
+  } else if (
+    echo.service !== 'bind-test' ||
+    echo.requestId !== REQUEST_ID ||
+    echo.parentSpanId !== span.spanId
+  ) {
+    failures.push(`logs: bind.echoTrace does not continue the fetch span: ${JSON.stringify(echo)}`)
+  }
 }
 
 /** Parse the JSON log lines out of wrangler's output (it adds prefixes and ANSI colors). */
@@ -257,13 +307,18 @@ function checkDefaultLogger(failures) {
   }
 }
 
-function checkLogs(failures) {
+function checkLogs(failures, results) {
   checkDefaultLogger(failures)
   const lines = readLogRecords().filter(({ record }) => record.traceId === TRACE_ID)
   if (lines.length === 0) {
     failures.push('logs: no Worker log lines carry the request traceId')
     return
   }
+  checkFetcher(
+    lines.map(({ record }) => record),
+    results.find((r) => r.path === '/fetcher')?.body?.downstream,
+    failures,
+  )
 
   for (const { json } of lines) {
     const keys = topLevelKeys(json)
@@ -316,6 +371,7 @@ async function main() {
       ['/multi-hop', 200],
       ['/trace', 200],
       ['/error', 500],
+      ['/fetcher', 200],
     ]) {
       results.push(await probe(base, path, status))
     }
@@ -327,7 +383,7 @@ async function main() {
     await server.flush()
 
     checkResponses(results, failures)
-    checkLogs(failures)
+    checkLogs(failures, results)
 
     if (failures.length > 0) {
       console.error(`E2E failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`)

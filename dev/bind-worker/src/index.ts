@@ -1,6 +1,7 @@
 import { TracedSession, tracedWorker, withTrace } from 'loggercf/workers'
 import { getLogger, type LogLevel } from 'loggercf'
 import type { BindService, MathService, ServiceSession } from '../../services'
+import { http } from './http'
 
 interface Env {
   ENVIRONMENT: string
@@ -50,4 +51,9 @@ class BindSession extends TracedSession<Env> implements BindService {
   }
 }
 
-export default tracedWorker(BindSession)
+export default class extends tracedWorker(BindSession) {
+  /** HTTP over the service binding: see ./http.ts. */
+  fetch(request?: Request): Response | Promise<Response> {
+    return http.fetch(request as Request)
+  }
+}
