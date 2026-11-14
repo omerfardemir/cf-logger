@@ -287,24 +287,41 @@ export function tracedFetcher<T extends { fetch: FetchLike }>(
   // Methods of the binding, called on the binding itself (a platform object rejects any
   // other `this`). Wrapped in a Proxy so properties on them, like RPC pipelining, still work.
   const methods = new WeakMap<object, unknown>()
+  const read = (prop: string | symbol): unknown => {
+    if (prop === 'fetch') return fetch
+    const value: unknown = Reflect.get(binding, prop)
+    if (typeof value !== 'function') return value
+    let method = methods.get(value)
+    if (!method) {
+      method = new Proxy(value, {
+        apply: (fn, _this, args) => Reflect.apply(fn, binding, args),
+      })
+      methods.set(value, method)
+    }
+    return method
+  }
+
+  // Service bindings are extensible platform objects, so they are proxied directly.
+  if (Object.isExtensible(binding)) {
+    return new Proxy(binding, { get: (_target, prop) => read(prop) })
+  }
 
   // A Proxy must return a frozen (non-configurable, read-only) property's own value, so a
-  // frozen or sealed binding is proxied through an empty shell that inherits from it.
-  // Service bindings are extensible platform objects, so they are proxied directly.
-  const target = Object.isExtensible(binding) ? binding : (Object.create(binding) as T)
-  return new Proxy(target, {
-    get(_target, prop) {
-      if (prop === 'fetch') return fetch
-      const value: unknown = Reflect.get(binding, prop)
-      if (typeof value !== 'function') return value
-      let method = methods.get(value)
-      if (!method) {
-        method = new Proxy(value, {
-          apply: (fn, _this, args) => Reflect.apply(fn, binding, args),
-        })
-        methods.set(value, method)
-      }
-      return method
+  // frozen or sealed binding is proxied through an empty, extensible shell that inherits from
+  // it. Its own keys are the binding's. Proxy invariants forbid reporting a property the shell
+  // lacks as non-configurable, so each is reported as configurable (with the value `get`
+  // gives), and `Object.isFrozen(wrapper)` is false.
+  return new Proxy(Object.create(binding) as T, {
+    get: (_target, prop) => read(prop),
+    ownKeys: () => Reflect.ownKeys(binding),
+    getOwnPropertyDescriptor(_target, prop) {
+      const descriptor: PropertyDescriptor | undefined = Reflect.getOwnPropertyDescriptor(
+        binding,
+        prop,
+      )
+      if (!descriptor) return undefined
+      if ('value' in descriptor) descriptor.value = read(prop)
+      return { ...descriptor, configurable: true }
     },
   })
 }

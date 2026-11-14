@@ -594,6 +594,27 @@ describe('tracedFetcher', () => {
       expect(Object.isFrozen(binding)).toBe(true)
     })
 
+    it("a frozen binding's own keys and descriptors show through the wrapper", () => {
+      const fetch = async () => new Response('ok')
+      const tag = Symbol('tag')
+      const binding = Object.freeze({ fetch, name: 'svc', [tag]: 1 })
+      const svc = tracedFetcher(binding)
+
+      expect(Object.keys(svc)).toEqual(['fetch', 'name'])
+      expect(Reflect.ownKeys(svc)).toEqual(['fetch', 'name', tag])
+      expect(Object.hasOwn(svc, 'name')).toBe(true)
+      expect(Object.getOwnPropertyDescriptor(svc, 'name')).toEqual({
+        value: 'svc',
+        writable: false,
+        enumerable: true,
+        configurable: true,
+      })
+      // The descriptor's value is what reading the property gives: the wrapper's fetch.
+      expect(Object.getOwnPropertyDescriptor(svc, 'fetch')?.value).toBe(svc.fetch)
+      expect(svc.fetch).not.toBe(fetch)
+      expect({ ...svc }).toEqual({ fetch: svc.fetch, name: 'svc', [tag]: 1 })
+      expect(Object.getOwnPropertyDescriptor(svc, 'missing')).toBeUndefined()
+    })
   })
 })
 
