@@ -666,6 +666,28 @@ describe('an Error is serialized once per line', () => {
     expect(entries[0].errors).toEqual([expect.objectContaining({ message: 'b' })])
   })
 
+  it('a copy cut off at an outer Error is not reused where that Error is not an ancestor', () => {
+    const z = new Error('z')
+    const x = new Error('x', { cause: z })
+    const y = new Error('y', { cause: z })
+    z.cause = x
+    const root = Object.assign(new Error('root'), { p: x, q: y })
+    expect(serializeError(root)).toMatchObject({
+      p: { message: 'x', cause: { message: 'z', cause: '[Circular]' } },
+      q: { message: 'y', cause: { message: 'z', cause: { message: 'x', cause: '[Circular]' } } },
+    })
+  })
+
+  it('a dense Error graph with cycles stays fast', () => {
+    const errors = Array.from({ length: 20 }, (_, i) => new Error(`e${i}`))
+    for (const e of errors) Object.assign(e, Object.fromEntries(errors.map((o, i) => [`p${i}`, o])))
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    const ms = elapsed(() => createLogger({ service: 'svc' }).error(errors[0], 'm'))
+    expect(ms).toBeLessThan(1_000)
+    expect(JSON.parse(lines[0]).logError).toBeUndefined()
+  })
+
   it('an AggregateError writes its errors, nested like cause', () => {
     const entries = _captureEntries()
     const agg = new AggregateError([new Error('e1'), new TypeError('e2'), 'plain'], 'agg')

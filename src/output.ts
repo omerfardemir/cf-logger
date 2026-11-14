@@ -177,13 +177,46 @@ function isAggregateError(error: Error): error is AggregateError {
 }
 
 /**
+ * How many times one line may serialize an `Error` again because the copy it
+ * already has is cut off (`"[Circular]"`) at an `Error` outside it, which
+ * may not be an ancestor where it is used again. Past it, the copy is
+ * reused as is, so a dense graph of Errors with cycles stays linear.
+ */
+const MAX_ERROR_RESERIALIZE = 1_000
+
+/** One serialized `Error`, and how far up its `"[Circular]"`s point. */
+interface SerializedError {
+  /** The serialized copy. */
+  out: LogRecord
+  /** The shallowest depth a `"[Circular]"` inside it points to; `Infinity` when none does. */
+  reach: number
+}
+
+/**
  * The Errors one line has already serialized, by nesting depth. A repeated
  * reference to an `Error` at the same depth is the same serialized object,
  * so `stringifyRecord()` sees a repeat and its re-write budget applies. By
  * depth, so a copy built deep (its chain cut off sooner) is never reused
- * higher up, and `MAX_CAUSE_DEPTH` still bounds the nesting.
+ * higher up, and `MAX_CAUSE_DEPTH` still bounds the nesting. A copy cut off
+ * at an `Error` outside it is serialized again instead (see
+ * `MAX_ERROR_RESERIALIZE`), so `"[Circular]"` marks only a real loop.
  */
-export type SerializedErrors = Map<Error, LogRecord>[]
+export interface SerializedErrors {
+  /** Each depth's copies. */
+  byDepth: Map<Error, SerializedError>[]
+  /** Re-serializations left (see `MAX_ERROR_RESERIALIZE`). */
+  again: number
+}
+
+/**
+ * An empty cache, for one line.
+ *
+ * @returns {SerializedErrors} The cache.
+ */
+export const newSerializedErrors = (): SerializedErrors => ({
+  byDepth: [],
+  again: MAX_ERROR_RESERIALIZE,
+})
 
 /**
  * Serialize an `Error` into a plain, JSON-safe object. Never throws.
@@ -193,34 +226,65 @@ export type SerializedErrors = Map<Error, LogRecord>[]
  * `errors` have the same shape, nested up to `MAX_CAUSE_DEPTH` levels. An
  * `Error` nested inside itself (`e.self = e`, a `cause` loop) is
  * `"[Circular]"` there. A property whose getter throws is `unserializable()`.
- * Each `Error` is serialized once per `cache` and depth, so a graph of Errors
- * costs its size, not the number of paths through it.
+ * Each `Error` is serialized once per `cache` and depth (see
+ * `SerializedErrors`), so a graph of Errors costs its size, not the number
+ * of paths through it.
  *
  * @param {Error} error - The error to serialize.
  * @param {number} [depth] - Current nesting depth.
- * @param {Set<Error>} [ancestors] - The errors `error` is nested in.
+ * @param {Map<Error, number>} [ancestors] - The errors `error` is nested in, and their depths.
  * @param {SerializedErrors} [cache] - The Errors this line has already serialized.
  * @returns {LogRecord} The serialized error.
  */
 export function serializeError(
   error: Error,
   depth = 0,
-  ancestors: Set<Error> = new Set(),
-  cache: SerializedErrors = [],
+  ancestors: Map<Error, number> = new Map(),
+  cache: SerializedErrors = newSerializedErrors(),
 ): LogRecord {
-  const known = cache[depth]?.get(error)
-  if (known) return known
-  const out: LogRecord = {}
-  ;(cache[depth] ??= new Map()).set(error, out)
+  return serializeErrorAt(error, depth, ancestors, cache).out
+}
+
+/**
+ * `serializeError()`, with how far up the copy's `"[Circular]"`s point.
+ *
+ * @param {Error} error - The error to serialize.
+ * @param {number} depth - Current nesting depth.
+ * @param {Map<Error, number>} ancestors - The errors `error` is nested in, and their depths.
+ * @param {SerializedErrors} cache - The Errors this line has already serialized.
+ * @returns {SerializedError} The serialized error.
+ */
+function serializeErrorAt(
+  error: Error,
+  depth: number,
+  ancestors: Map<Error, number>,
+  cache: SerializedErrors,
+): SerializedError {
+  const known = cache.byDepth[depth]?.get(error)
+  if (known) {
+    // Cut off only inside itself (or out of re-serializations): the same wherever it is used.
+    if (known.reach >= depth || cache.again <= 0) return known
+    cache.again--
+  }
+  const entry: SerializedError = { out: {}, reach: Infinity }
+  ;(cache.byDepth[depth] ??= new Map()).set(error, entry)
+  const { out } = entry
 
   const nested = (value: unknown): unknown => {
     if (!isError(value)) return value
-    if (ancestors.has(value)) return '[Circular]' // before the cache: a cycle is never a repeat
+    const at = ancestors.get(value)
+    if (at !== undefined) {
+      // Before the cache: a cycle is never a repeat.
+      entry.reach = Math.min(entry.reach, at)
+      return '[Circular]'
+    }
     if (depth >= MAX_CAUSE_DEPTH)
       return { type: 'Truncated', message: `cause chain deeper than ${MAX_CAUSE_DEPTH}` }
-    return serializeError(value, depth + 1, ancestors, cache)
+    const inner = serializeErrorAt(value, depth + 1, ancestors, cache)
+    entry.reach = Math.min(entry.reach, inner.reach)
+    return inner.out
   }
-  ancestors.add(error)
+  ancestors.set(error, depth)
   try {
     out.type = read(() => error.constructor?.name || error.name)
     out.message = read(() => error.message)
@@ -243,7 +307,7 @@ export function serializeError(
       })
     const cause = read(() => error.cause)
     if (cause !== undefined) out.cause = nested(cause)
-    return out
+    return entry
   } finally {
     ancestors.delete(error)
   }
@@ -257,7 +321,7 @@ export function serializeError(
  * @returns {unknown} `serializeError(value)` for an `Error`; anything else as is.
  */
 const serializeIfError = (value: unknown, cache: SerializedErrors): unknown =>
-  isError(value) ? serializeError(value, 0, new Set(), cache) : value
+  isError(value) ? serializeError(value, 0, new Map(), cache) : value
 
 /**
  * `serializeIfError` on an overflow value and, one level down, on its items
@@ -408,7 +472,7 @@ export function buildRecord(entry: RecordEntry, context?: RecordContext): LogRec
   const args = [...(entry.args ?? []), ...moved]
   if (args.length > 0) record.args = args
 
-  const cache: SerializedErrors = []
+  const cache = newSerializedErrors()
   for (const [key, value] of Object.entries(record)) record[key] = serializeIfError(value, cache)
   if (Array.isArray(record.errors))
     record.errors = record.errors.map((error) => serializeIfError(error, cache))
