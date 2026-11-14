@@ -3,11 +3,13 @@ import {
   createLogger,
   getLogger,
   runWithLogger,
+  setDefaultLogger,
   _captureEntries,
   _reset,
   _setSink,
 } from './logger'
 import { serializeError, stringifyRecord } from './output'
+import type { Logger } from './types'
 
 const TRACEPARENT = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
 
@@ -228,6 +230,51 @@ describe('one bad value does not cost the rest of the line', () => {
     expect(entries).toHaveLength(1)
     expect(entries[0]).toMatchObject({ level: 'INFO', service: 'svc', message: 'm %s' })
     expect(entries[0].logError).toBe('log call failed: Error: sink hiccup')
+  })
+})
+
+describe('bindings that cannot be read', () => {
+  beforeEach(() => _reset())
+
+  it('.child() with a throwing getter does not throw, then or at a log call', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    let child: Logger | undefined
+    expect(() => (child = logger.child(throwing()))).not.toThrow()
+    expect(() => child!.info('x')).not.toThrow()
+    expect(entries[0]).toMatchObject({ message: 'x', service: 'svc', a: '[Unserializable: 1]' })
+  })
+
+  it('createLogger bindings with a throwing getter do not throw', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' }, throwing() as Record<string, string>)
+    logger.info('x')
+    expect(entries[0]).toMatchObject({ message: 'x', a: '[Unserializable: 1]' })
+  })
+
+  it('getLogger().child() outside a Logging Context: the log call does not throw', () => {
+    const entries = _captureEntries()
+    const child = getLogger().child(throwing())
+    expect(() => child.info('x')).not.toThrow()
+    setDefaultLogger(createLogger({ service: 'orders' }))
+    expect(() => child.info('y')).not.toThrow()
+    expect(entries).toMatchObject([
+      { service: 'unknown', message: 'x', a: '[Unserializable: 1]' },
+      { service: 'orders', message: 'y', a: '[Unserializable: 1]' },
+    ])
+  })
+
+  it('a default whose .child() throws: the forwarder still writes the line', () => {
+    const entries = _captureEntries()
+    const root = createLogger({ service: 'orders' })
+    setDefaultLogger({
+      ...root,
+      child() {
+        throw new Error('no child')
+      },
+    })
+    expect(() => getLogger().child({ k: 1 }).info('x')).not.toThrow()
+    expect(entries[0]).toMatchObject({ message: 'x', k: 1 })
   })
 })
 

@@ -13,6 +13,8 @@ import { resolveTrace, generateSpanId, injectCarrier, toCarrier } from './trace'
 import {
   applyTrace,
   buildRecord,
+  copyBindings,
+  describeFailure,
   nodeSink,
   stringifyRecord,
   takeOwnKeys,
@@ -83,28 +85,14 @@ function write(label: string, bindings: LogRecord, input: unknown[]): void {
 }
 
 /**
- * Describe a thrown value for `logError`, never throwing itself.
- *
- * @param {unknown} thrown - What the write path threw.
- * @returns {string} e.g. `TypeError: toJSON failed`.
- */
-function describeFailure(thrown: unknown): string {
-  try {
-    if (thrown instanceof Error) return `${thrown.name}: ${thrown.message}`
-    return String(thrown)
-  } catch {
-    return 'unknown error'
-  }
-}
-
-/**
- * `write()`, but a log call never throws. When routing, building or
- * serializing the line fails (a getter that throws, a `toJSON` that throws...),
- * a minimal line is written instead: `time`, `level`, the trace IDs,
- * bindings, the message template as given, and `logError` describing the
- * failure. As in `buildRecord()`, bindings for the core's own keys move to
- * `args`. If even that fails, the line is written without bindings, then
- * dropped.
+ * `write()`, but a log call never throws. Routing and serialization already
+ * replace a value that cannot be read or serialized with a stand-in, so this
+ * is the last resort, for a failure no single value explains (the sink
+ * throws, a value nested too deep for the stack): a minimal line is written
+ * instead, with `time`, `level`, the trace IDs, bindings, the message
+ * template as given, and `logError` describing the failure. As in
+ * `buildRecord()`, bindings for loggercf's own keys move to `args`. If even
+ * that fails, the line is written without bindings, then dropped.
  *
  * @param {string} label - The upper-case level written as `level`.
  * @param {LogRecord} bindings - The logger's bindings (`createLogger` / `.child()`).
@@ -120,7 +108,12 @@ function safeWrite(label: string, bindings: LogRecord, input: unknown[]): void {
     if (trace) applyTrace(head, trace)
     const tail: LogRecord = { logError: `log call failed: ${describeFailure(thrown)}` }
     if (template !== undefined) tail.message = template
-    /** `head`, `extra`, `tail`; then the trace IDs again, so `extra` cannot replace them. */
+    /**
+     * The minimal line.
+     *
+     * @param {LogRecord} [extra] - Bindings to include, between `head` and `tail`.
+     * @returns {LogRecord} `head`, `extra`, `tail`; then the trace IDs again, so `extra` cannot replace them.
+     */
     const minimal = (extra?: LogRecord): LogRecord => {
       const line: LogRecord = { ...head, ...extra, ...tail }
       if (trace) applyTrace(line, trace)
@@ -156,7 +149,8 @@ function makeLogger<T extends LogFields = LogFields>(
   bindings: LogRecord,
 ): Logger<T> {
   const logger = {
-    child: (more: Record<string, unknown>) => makeLogger<T>(minimum, { ...bindings, ...more }),
+    child: (more: Record<string, unknown>) =>
+      makeLogger<T>(minimum, { ...bindings, ...copyBindings(more) }),
   } as Logger<T>
   for (const level of LEVELS) {
     const label = level.toUpperCase()
@@ -197,7 +191,7 @@ export function createLogger<T extends LogFields = LogFields>(
     service,
     ...(environment ? { environment } : {}),
     ...(version ? { version } : {}),
-    ...bindings,
+    ...copyBindings(bindings),
   })
 }
 
@@ -249,14 +243,21 @@ let forwarding = false
  */
 function forwardingLogger(resolve: () => Logger): Logger {
   const logger = {
-    child: (bindings: Record<string, unknown>) => {
+    child: (more: Record<string, unknown>) => {
+      // Read now, as `makeLogger` does: a log call never runs the getters.
+      const bindings = copyBindings(more)
       let base: Logger | undefined
       let child: Logger | undefined
       return forwardingLogger(() => {
         const current = resolve()
         if (current !== base) {
           base = current
-          child = current.child(bindings)
+          try {
+            child = current.child(bindings)
+          } catch {
+            // A hand-written default whose `.child()` throws: keep the line and its fields.
+            child = fallbackLogger().child(bindings)
+          }
         }
         return child!
       })
