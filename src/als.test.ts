@@ -12,6 +12,7 @@ import {
 } from './logger'
 import { tracedFetch } from './fetch'
 import { buildTraceparent } from './trace'
+import { brokenLogger } from './test-helpers'
 
 describe('getLogger outside ALS context', () => {
   beforeEach(() => {
@@ -545,6 +546,80 @@ describe('withSpan', () => {
       // No timing on an unsampled trace: only the failure is recorded.
       expect(entry.span).not.toHaveProperty('duration')
     }
+  })
+
+  it.each([
+    ['a null-prototype object', () => Object.create(null) as unknown],
+    [
+      'a revoked Proxy',
+      () => {
+        const { proxy, revoke } = Proxy.revocable({}, {})
+        revoke()
+        return proxy as unknown
+      },
+    ],
+  ])(
+    'a thrown value String() and instanceof cannot handle (%s) is rethrown as is, sampled or not',
+    async (_name, make) => {
+      for (const traceparent of [SAMPLED, UNSAMPLED]) {
+        const entries = _captureEntries()
+        const thrown = make()
+        await runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent }, async () => {
+          let caught: unknown
+          try {
+            withSpan('sync', () => {
+              throw thrown
+            })
+          } catch (err) {
+            caught = err
+          }
+          expect(caught).toBe(thrown)
+          await expect(
+            withSpan('async', async () => {
+              throw thrown
+            }),
+          ).rejects.toBe(thrown)
+        })
+        expect(entries).toHaveLength(2)
+        for (const entry of entries) {
+          expect(entry.level).toBe('ERROR')
+          expect((entry.span as { error: unknown }).error).toMatch(/^\[Unserializable: .*\]$/)
+        }
+      }
+    },
+  )
+
+  it("a hand-written Logger that throws: the work's own value is still rethrown, sampled or not", async () => {
+    for (const traceparent of [SAMPLED, UNSAMPLED]) {
+      const thrown = new Error('work failed')
+      await runWithLogger({ logger: brokenLogger, traceparent }, async () => {
+        let caught: unknown
+        try {
+          withSpan('sync', () => {
+            throw thrown
+          })
+        } catch (err) {
+          caught = err
+        }
+        expect(caught).toBe(thrown)
+        await expect(
+          withSpan('async', async () => {
+            throw thrown
+          }),
+        ).rejects.toBe(thrown)
+        // Success writes `span.end` at INFO when sampled, which throws too.
+        expect(withSpan('ok', () => 1)).toBe(1)
+        await expect(withSpan('ok async', async () => 2)).resolves.toBe(2)
+      })
+    }
+  })
+
+  it('a returned revoked Proxy is returned as is', () => {
+    const { proxy, revoke } = Proxy.revocable({}, {})
+    revoke()
+    runWithLogger({ logger: createLogger({ service: 'svc' }), traceparent: SAMPLED }, () => {
+      expect(withSpan('ret', () => proxy)).toBe(proxy)
+    })
   })
 
   it('copies Context Fields in; fields set inside stay inside', () => {

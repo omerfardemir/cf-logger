@@ -37,6 +37,7 @@ import {
 import { DurableObject, RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
 import type { EnvMapping, SessionInit, TracedServiceBinding } from './workers'
 import type { Logger, LoggerOptions } from './types'
+import { brokenLogger } from './test-helpers'
 import {
   runWithLogger,
   getTraceContext,
@@ -1233,6 +1234,76 @@ describe('withLogging', () => {
         err: { message: 'search failed' },
       })
     }
+  })
+
+  it('a thrown value that String() and instanceof cannot handle is rethrown as is, spans or not', async () => {
+    const odd = Object.create(null) as unknown
+    class Odd extends WorkerEntrypoint<typeof ENV> {
+      fail(): never {
+        throw odd
+      }
+      async failAsync(): Promise<never> {
+        await Promise.resolve()
+        throw odd
+      }
+    }
+    for (const spans of [true, false]) {
+      const entries = _captureEntries()
+      const worker = new (withLogging(Odd, { spans }))({} as any, ENV)
+      let thrown: unknown
+      try {
+        worker.fail()
+      } catch (err) {
+        thrown = err
+      }
+      expect(thrown).toBe(odd)
+      await expect(worker.failAsync()).rejects.toBe(odd)
+      expect(entries.filter((e) => e.level === 'ERROR')).toHaveLength(2)
+    }
+  })
+
+  it("a hand-written Logger that throws: the method's own value is still rethrown, spans or not", async () => {
+    class Broken extends TracedEntrypoint<typeof ENV> {
+      protected override get [TracedEntrypoint.rootLogger]() {
+        return brokenLogger
+      }
+      fail(): never {
+        throw failure
+      }
+      async failAsync(): Promise<never> {
+        await Promise.resolve()
+        throw failure
+      }
+      ok() {
+        return 1
+      }
+    }
+    const entries = _captureEntries()
+    /** The calls one path makes, each rethrowing or returning the method's own value. */
+    const expectOwnValues = async (target: Pick<Broken, 'fail' | 'failAsync' | 'ok'>) => {
+      let thrown: unknown
+      try {
+        target.fail()
+      } catch (err) {
+        thrown = err
+      }
+      expect(thrown).toBe(failure)
+      await expect(target.failAsync()).rejects.toBe(failure)
+      expect(target.ok()).toBe(1) // with spans and a sampled trace, `span.end` at INFO throws too
+    }
+    for (const spans of [true, false]) {
+      await expectOwnValues(new (withLogging(Broken, { spans }))({} as any, ENV))
+    }
+    // A Traced Session continuing a sampled and an unsampled caller trace.
+    const Worker = withLogging(Broken, { spans: true, session: true })
+    for (const traceparent of [CALLER_TRACEPARENT, `${CALLER_TRACEPARENT_BASE}-00`]) {
+      await expectOwnValues(new Worker({} as any, ENV).session({ traceparent }))
+      // Joining a Logging Context that is already active, whose logger throws.
+      await runWithLogger({ logger: brokenLogger, traceparent }, () =>
+        expectOwnValues(new Worker({} as any, ENV)),
+      )
+    }
+    expect(entries).toHaveLength(0) // every line went to the Logger that throws
   })
 
   it('writes no span.end without spans: true', () => {
