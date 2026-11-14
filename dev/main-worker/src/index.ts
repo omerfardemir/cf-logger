@@ -140,4 +140,15 @@ app.get('/fetcher', async (c) => {
   })
 })
 
+/**
+ * POST /fetcher-forward A gateway forwarding its own incoming Request over a service binding.
+ * The client's X-Request-Id is replaced by this Worker's Request ID, and its tracestate goes
+ * only when this trace continued from the client's traceparent.
+ */
+app.post('/fetcher-forward', async (c) => {
+  const bind = tracedFetcher(c.env.BIND, { forwardRequestId: true, spans: true })
+  const res = await bind.fetch(c.req.raw)
+  return c.json({ traceId: getTraceContext()?.traceId, downstream: await res.json() })
+})
+
 export default app
