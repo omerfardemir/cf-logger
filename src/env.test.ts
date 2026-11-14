@@ -193,4 +193,96 @@ describe('loggerOptionsFromEnv', () => {
       expect(entries).toHaveLength(2)
     })
   })
+
+  describe('Span Defaults: LOG_SPAN_LEVEL and LOG_SPAN_SLOW_MS', () => {
+    it('reads them as spans.level and spans.slowMs', () => {
+      expect(
+        loggerOptionsFromEnv({ NAME: 'api', LOG_SPAN_LEVEL: 'debug', LOG_SPAN_SLOW_MS: '250' }),
+      ).toStrictEqual({ service: 'api', level: 'info', spans: { level: 'debug', slowMs: 250 } })
+    })
+
+    it('leaves spans out when neither is set, and each out when absent', () => {
+      expect(loggerOptionsFromEnv({ LOG_SPAN_LEVEL: '' })).toStrictEqual({
+        service: 'unknown',
+        level: 'info',
+      })
+      expect(loggerOptionsFromEnv({ LOG_SPAN_SLOW_MS: 0 }).spans).toStrictEqual({ slowMs: 0 })
+      expect(loggerOptionsFromEnv({ LOG_SPAN_LEVEL: 'trace' }).spans).toStrictEqual({
+        level: 'trace',
+      })
+    })
+
+    it('reads a numeric var, a fraction and Infinity as the threshold', () => {
+      expect(loggerOptionsFromEnv({ LOG_SPAN_SLOW_MS: 500 }).spans).toStrictEqual({ slowMs: 500 })
+      expect(loggerOptionsFromEnv({ LOG_SPAN_SLOW_MS: '12.5' }).spans).toStrictEqual({
+        slowMs: 12.5,
+      })
+      expect(loggerOptionsFromEnv({ LOG_SPAN_SLOW_MS: 'Infinity' }).spans).toStrictEqual({
+        slowMs: Infinity,
+      })
+    })
+
+    it('reads them from mapped vars or functions', () => {
+      const env = { SPAN_LVL: 'warn', SLOW: '75' }
+      expect(
+        loggerOptionsFromEnv(env, { spanLevel: 'SPAN_LVL', spanSlowMs: (e) => e.SLOW }).spans,
+      ).toStrictEqual({ level: 'warn', slowMs: 75 })
+      // A mapped field never falls back to the default var.
+      expect(
+        loggerOptionsFromEnv({ LOG_SPAN_LEVEL: 'debug' }, { spanLevel: 'OTHER' }).spans,
+      ).toBeUndefined()
+    })
+
+    it.each([['loud'], ['silent'], ['DEBUG']])(
+      'leaves out an invalid LOG_SPAN_LEVEL (%s) and warns once per isolate',
+      (value) => {
+        const entries = _captureEntries()
+        const env = { NAME: 'api', LOG_SPAN_LEVEL: value, LOG_SPAN_SLOW_MS: '10' }
+        expect(loggerOptionsFromEnv(env).spans).toStrictEqual({ slowMs: 10 })
+        loggerOptionsFromEnv(env)
+        expect(entries).toEqual([
+          expect.objectContaining({
+            level: 'WARN',
+            service: 'api',
+            message: `LOG_SPAN_LEVEL "${value}" is not a valid span level; using "info"`,
+            invalidLevel: value,
+            validLevels: ['trace', 'debug', 'info', 'warn', 'error', 'fatal'],
+          }),
+        ])
+      },
+    )
+
+    it.each([['-1'], ['abc'], [' '], ['1e'], [-5]])(
+      'leaves out an invalid LOG_SPAN_SLOW_MS (%s) and warns once per isolate',
+      (value) => {
+        const entries = _captureEntries()
+        const env = { LOG_SPAN_SLOW_MS: value }
+        expect(loggerOptionsFromEnv(env).spans).toBeUndefined()
+        loggerOptionsFromEnv(env)
+        expect(entries).toEqual([
+          expect.objectContaining({
+            level: 'WARN',
+            message: `LOG_SPAN_SLOW_MS "${value}" is not a number of milliseconds >= 0; no slow threshold`,
+            invalidSlowMs: String(value),
+          }),
+        ])
+      },
+    )
+
+    it('names the mapped var, or the field for a function, in the warnings', () => {
+      const entries = _captureEntries()
+      loggerOptionsFromEnv({ L: 'nope' }, { spanLevel: 'L', spanSlowMs: () => 'x' })
+      expect(entries.map((e) => e.message)).toEqual([
+        'L "nope" is not a valid span level; using "info"',
+        'spanSlowMs "x" is not a number of milliseconds >= 0; no slow threshold',
+      ])
+    })
+
+    it('each field warns on its own: an invalid LOG_LEVEL does not silence the span warnings', () => {
+      const entries = _captureEntries()
+      loggerOptionsFromEnv({ LOG_LEVEL: 'x', LOG_SPAN_LEVEL: 'y', LOG_SPAN_SLOW_MS: 'z' })
+      loggerOptionsFromEnv({ LOG_LEVEL: 'x', LOG_SPAN_LEVEL: 'y', LOG_SPAN_SLOW_MS: 'z' })
+      expect(entries).toHaveLength(3)
+    })
+  })
 })

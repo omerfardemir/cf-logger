@@ -8,7 +8,10 @@ import type {
   TraceCarrier,
   TraceContext,
   ALSStore,
+  Span,
   SpanContext,
+  SpanDefaults,
+  SpanOptions,
 } from './types'
 import { resolveTrace, generateSpanId, toCarrier } from './trace'
 import {
@@ -72,6 +75,46 @@ function levelValue(level: string): number {
 }
 
 const noop = () => {}
+
+/**
+ * The Span Defaults of each logger `createLogger` built, and of its `.child()`ren. A
+ * hand-written Logger has none, so its Spans use the built-in ones.
+ */
+const spanDefaults = new WeakMap<object, SpanDefaults>()
+
+/**
+ * Whether `level` is a `LogLevel` (`'silent'` is not: a Span always has a level).
+ *
+ * @param {unknown} level - Any value.
+ * @returns {boolean} `true` for a `LogLevel`.
+ */
+function isLogLevel(level: unknown): level is LogLevel {
+  return typeof level === 'string' && Object.hasOwn(LEVEL_VALUES, level)
+}
+
+/**
+ * Whether `ms` is a Slow Threshold: a number of milliseconds, `0` or more (`Infinity` included).
+ *
+ * @param {unknown} ms - Any value.
+ * @returns {boolean} `true` for a valid threshold.
+ */
+function isSlowMs(ms: unknown): ms is number {
+  return typeof ms === 'number' && ms >= 0
+}
+
+/**
+ * Validate the `spans` Logger Option, as `createLogger` validates `level`.
+ *
+ * @param {SpanDefaults | undefined} spans - The option.
+ * @returns {SpanDefaults} A copy with only the keys that are set.
+ * @throws {Error} `unknown span level <name>`, or `invalid spans.slowMs <value>`.
+ */
+function checkSpanDefaults(spans: SpanDefaults | undefined): SpanDefaults {
+  const { level, slowMs } = spans ?? {}
+  if (level !== undefined && !isLogLevel(level)) throw new Error(`unknown span level ${level}`)
+  if (slowMs !== undefined && !isSlowMs(slowMs)) throw new Error(`invalid spans.slowMs ${slowMs}`)
+  return { ...(level !== undefined ? { level } : {}), ...(slowMs !== undefined ? { slowMs } : {}) }
+}
 
 /**
  * Build one log line: route the arguments, add time, level and bindings, then
@@ -154,16 +197,19 @@ function safeWrite(label: string, bindings: LogRecord, input: unknown[]): void {
  * @template T - The type of user-defined log fields.
  * @param {number} minimum - The minimum severity written.
  * @param {LogRecord} bindings - Fixed fields on every line.
+ * @param {SpanDefaults} spans - The Span Defaults, shared with every `.child()`.
  * @returns {Logger<T>} The Logger.
  */
 function makeLogger<T extends LogFields = LogFields>(
   minimum: number,
   bindings: LogRecord,
+  spans: SpanDefaults,
 ): Logger<T> {
   const logger = {
     child: (more: Record<string, unknown>) =>
-      makeLogger<T>(minimum, { ...bindings, ...copyBindings(more) }),
+      makeLogger<T>(minimum, { ...bindings, ...copyBindings(more) }, spans),
   } as Logger<T>
+  spanDefaults.set(logger, spans)
   for (const level of LEVELS) {
     const label = level.toUpperCase()
     logger[level] =
@@ -181,10 +227,16 @@ function makeLogger<T extends LogFields = LogFields>(
  * and `version` appear on every line; `bindings` add more fixed fields. Keep
  * both to per-process data: per-unit-of-work data belongs in Context Fields.
  *
+ * `spans` sets the Span Defaults for every Span in the Logging Contexts this logger
+ * opens: the level of an OK `span.end` (default `'info'`) and the Slow Threshold
+ * `slowMs`, at or above which an OK Span writes at `WARN`. Each Span's own options
+ * override them.
+ *
  * @template T - The type of user-defined log fields.
  * @param {LoggerOptions} options - Logger Options. `level` defaults to `'info'`.
  * @param {Partial<T>} [bindings] - Extra per-process fields included on every log line.
  * @returns {Logger<T>} The Root Logger.
+ * @throws {Error} For an unknown `level` or `spans.level`, or a `spans.slowMs` that is not a number `>= 0`.
  *
  * @example
  * ```ts
@@ -198,13 +250,17 @@ export function createLogger<T extends LogFields = LogFields>(
   options: LoggerOptions,
   bindings?: Partial<T>,
 ): Logger<T> {
-  const { service, level, environment, version } = options
-  return makeLogger<T>(levelValue(level ?? 'info'), {
-    service,
-    ...(environment ? { environment } : {}),
-    ...(version ? { version } : {}),
-    ...copyBindings(bindings),
-  })
+  const { service, level, environment, version, spans } = options
+  return makeLogger<T>(
+    levelValue(level ?? 'info'),
+    {
+      service,
+      ...(environment ? { environment } : {}),
+      ...(version ? { version } : {}),
+      ...copyBindings(bindings),
+    },
+    checkSpanDefaults(spans),
+  )
 }
 
 /**
@@ -494,6 +550,28 @@ export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
 }
 
 /**
+ * The handle a Span passes its work when it writes no `span.end` (outside a Logging
+ * Context, for an unsampled trace, or without an operation name): `set` does nothing.
+ *
+ * @internal Not exported from the package entry points.
+ */
+export const NOOP_SPAN: Span = Object.freeze({ set: noop })
+
+/**
+ * The Span Owned Keys: what a `span.end` line writes itself, so its Span Fields cannot
+ * set them (`err` is the thrown value on an `ERROR` Span).
+ */
+const SPAN_OWNED_KEYS = ['span', 'err'] as const
+
+/** How many operations the dropped-keys WARN is written for, per isolate. */
+const MAX_WARNED_OPERATIONS = 100
+
+/** The operations the dropped-keys WARN was written for in this isolate. */
+const warnedOperations = new Set<string>()
+
+const DROPPED_SPAN_KEYS_WARNING = 'span fields set keys the span line owns; they were dropped'
+
+/**
  * Run `fn` as a named Span nested inside the current Logging Context.
  *
  * The Span gets a new span ID whose parent is the current span ID, on the same
@@ -501,28 +579,45 @@ export function runWithLogger<T extends LogFields = LogFields, R = unknown>(
  * When the trace is sampled, a `span.end` line with timing and status is logged
  * once `fn` settles (sync or async). Errors are logged and rethrown.
  *
+ * - **OK**: `span.end` at `options.level` (default: the Root Logger's Span Defaults,
+ *   else `'info'`). With a Slow Threshold (`options.slowMs`, or the Root Logger's), a
+ *   Span that takes at least that long writes at `WARN` instead, or at `level` when
+ *   that is more severe.
+ * - **Throw or rejection**: always `ERROR`, whatever `level`, `slowMs` or sampling.
+ *   For an unsampled trace it is one `<operation> failed` line (see `recordSpan`).
+ *
+ * Span Fields (`options.fields`, then each `span.set()`) go on `span.end` only: never
+ * on other lines, never into the Logging Context. They cannot set the Span Owned Keys
+ * `span` and `err`: those are dropped, and one `WARN` names them (key names only).
+ *
  * Outside a Logging Context, `fn` simply runs: no Span, no error.
  *
  * @template R - The return type of `fn`.
  * @param {string} operation - Operation name (e.g. `'db.query'`).
- * @param {() => R} fn - The work to time.
+ * @param {(span: Span) => R} fn - The work to time. Gets the Span's handle, for `span.set()`.
+ * @param {SpanOptions} [options] - `level`, `slowMs` and `fields`.
  * @returns {R} The return value of `fn`.
  *
  * @example
  * ```ts
- * const user = await withSpan('db.getUser', () => db.getUser(id))
+ * const user = await withSpan('db.getUser', () => db.getUser(id), { level: 'debug', slowMs: 500 })
+ * const value = await withSpan('cache.read', async (span) => {
+ *   const v = await cache.get(key)
+ *   span.set({ hit: v !== null })
+ *   return v
+ * })
  * ```
  */
-export function withSpan<R>(operation: string, fn: () => R): R {
+export function withSpan<R>(operation: string, fn: (span: Span) => R, options?: SpanOptions): R {
   const outer = als.getStore()
-  if (!outer) return fn()
+  if (!outer) return fn(NOOP_SPAN)
 
   const store: ALSStore = {
     trace: { ...outer.trace, spanId: generateSpanId(), parentSpanId: outer.trace.spanId },
     fields: { ...outer.fields },
     logger: outer.logger,
   }
-  return als.run(store, () => recordSpan(operation, fn))
+  return als.run(store, () => recordSpan(operation, fn, true, options))
 }
 
 /**
@@ -557,28 +652,137 @@ function isPromise(value: unknown): value is Promise<unknown> {
   }
 }
 
+/** How one sampled Span writes its `span.end`: its options over the Root Logger's Span Defaults. */
+interface SpanSettings {
+  /** The level of an OK `span.end`. */
+  level: LogLevel
+  /** The Slow Threshold, when there is one. */
+  slowMs?: number
+  /** The Span Fields so far. No prototype: an own `__proto__` key stays a key. */
+  fields: LogRecord
+}
+
+/**
+ * Merge `source` into `target`, read as `copyBindings()` reads logger bindings: never
+ * throwing, a getter that throws written as `unserializable()`.
+ *
+ * @param {LogRecord} target - The Span Fields so far. Mutated.
+ * @param {unknown} source - What `fields` or `span.set()` was given.
+ */
+function addSpanFields(target: LogRecord, source: unknown): void {
+  for (const [key, value] of Object.entries(copyBindings(source))) target[key] = value
+}
+
+/**
+ * The settings of one sampled Span. Never throws: an option that cannot be read, or
+ * is invalid, is ignored.
+ *
+ * @param {Logger} logger - The Logging Context's logger, which carries the Span Defaults.
+ * @param {SpanOptions} [options] - The Span's own options.
+ * @returns {SpanSettings} The settings.
+ */
+function spanSettings(logger: Logger, options: SpanOptions | undefined): SpanSettings {
+  const defaults = spanDefaults.get(logger) ?? {}
+  const read = <K extends keyof SpanOptions>(key: K): SpanOptions[K] | undefined => {
+    try {
+      return options?.[key]
+    } catch {
+      return undefined
+    }
+  }
+  const level = read('level')
+  const slowMs = read('slowMs')
+  const settings: SpanSettings = {
+    level: isLogLevel(level) ? level : (defaults.level ?? 'info'),
+    fields: Object.create(null) as LogRecord,
+  }
+  const threshold = isSlowMs(slowMs) ? slowMs : defaults.slowMs
+  if (threshold !== undefined) settings.slowMs = threshold
+  addSpanFields(settings.fields, read('fields'))
+  return settings
+}
+
+/**
+ * The level of an OK `span.end`: `level`, raised to `WARN` once the Span reaches the
+ * Slow Threshold.
+ *
+ * @param {SpanSettings} settings - The Span's settings.
+ * @param {number} duration - How long it took, in milliseconds.
+ * @returns {LogLevel} The level to write at.
+ */
+function okLevel({ level, slowMs }: SpanSettings, duration: number): LogLevel {
+  if (slowMs === undefined || duration < slowMs) return level
+  return LEVEL_VALUES[level] > LEVEL_VALUES.warn ? level : 'warn'
+}
+
+/**
+ * The Span Fields without the Span Owned Keys.
+ *
+ * @param {LogRecord} fields - The Span Fields.
+ * @returns The fields to write, and the Span Owned Keys that were removed from them.
+ */
+function withoutSpanOwnedKeys(fields: LogRecord): { fields: LogRecord; dropped: string[] } {
+  const dropped = SPAN_OWNED_KEYS.filter((key) => Object.hasOwn(fields, key))
+  if (dropped.length === 0) return { fields, dropped }
+  const rest: LogRecord = Object.create(null)
+  for (const [key, value] of Object.entries(fields)) {
+    if (!dropped.includes(key as (typeof SPAN_OWNED_KEYS)[number])) rest[key] = value
+  }
+  return { fields: rest, dropped }
+}
+
+/**
+ * Write the dropped-keys WARN, once per operation per isolate (for the first
+ * `MAX_WARNED_OPERATIONS` operations), naming the keys, never their values.
+ *
+ * @param {Logger} logger - The Logging Context's logger.
+ * @param {string} operation - The Span's operation name.
+ * @param {string[]} dropped - The Span Owned Keys its Span Fields set.
+ */
+function warnDroppedSpanKeys(logger: Logger, operation: string, dropped: string[]): void {
+  if (warnedOperations.has(operation) || warnedOperations.size >= MAX_WARNED_OPERATIONS) return
+  warnedOperations.add(operation)
+  logger.warn({ operation, droppedKeys: dropped }, DROPPED_SPAN_KEYS_WARNING)
+}
+
 /**
  * Time `fn` as a Span covering the *current* Logging Context (no new span ID).
  *
  * Used by `withSpan()` after it opens a nested context, and by Traced Sessions,
  * whose whole Logging Context is the Span. The `span.end` line is written only when
- * the trace is sampled (and `timed` is on). Otherwise a throw is still logged, as one
+ * the trace is sampled (and `timed` is on), at the level `withSpan()` describes. Otherwise a throw is still logged, as one
  * `<operation> failed` line at `ERROR` with `err` and a `span` object without timing
  * (`operation`, `status: 'ERROR'`, `error`), so a query on `span.status` finds it too;
- * success writes nothing.
+ * success writes nothing. Span Fields go on `span.end` only, never on the `failed` line.
  *
  * @internal Not exported from the package entry points.
  */
-export function recordSpan<R>(operation: string, fn: () => R, timed = true): R {
+export function recordSpan<R>(
+  operation: string,
+  fn: (span: Span) => R,
+  timed = true,
+  options?: SpanOptions,
+): R {
   const store = als.getStore()
-  if (!store) return fn()
+  if (!store) return fn(NOOP_SPAN)
 
   const { logger } = store
   const sampled = timed && (store.trace.traceFlags & 0x01) === 0x01
   const startTime = Date.now()
+  // Only a sampled Span writes `span.end`, so only it reads its options and keeps Span Fields.
+  const settings = sampled ? spanSettings(logger, options) : undefined
+  let ended = false
+  const handle: Span = settings
+    ? Object.freeze({
+        set: (fields: LogFields) => {
+          if (!ended) addSpanFields(settings.fields, fields)
+        },
+      })
+    : NOOP_SPAN
 
   // Never throws, so `fn`'s own value is always what is returned or rethrown.
   const emit = (status: SpanContext['status'], error?: unknown) => {
+    ended = true
     try {
       logSpan(status, error)
     } catch {
@@ -586,7 +790,7 @@ export function recordSpan<R>(operation: string, fn: () => R, timed = true): R {
     }
   }
   const logSpan = (status: SpanContext['status'], error?: unknown) => {
-    if (!sampled) {
+    if (!settings) {
       if (status === 'ERROR') {
         const span = { operation, status, error: errorText(error) }
         logger.error({ span, err: error }, '%s failed', operation)
@@ -594,24 +798,27 @@ export function recordSpan<R>(operation: string, fn: () => R, timed = true): R {
       return
     }
     const endTime = Date.now()
+    const duration = endTime - startTime
     const span: SpanContext = {
       operation,
       startTime,
       endTime,
-      duration: endTime - startTime,
+      duration,
       status,
       ...(status === 'ERROR' ? { error: errorText(error) } : {}),
     }
+    const { fields, dropped } = withoutSpanOwnedKeys(settings.fields)
     if (status === 'ERROR') {
-      logger.error({ span, err: error }, 'span.end %s', operation)
+      logger.error({ span, err: error, ...fields }, 'span.end %s', operation)
     } else {
-      logger.info({ span }, 'span.end %s', operation)
+      logger[okLevel(settings, duration)]({ span, ...fields }, 'span.end %s', operation)
     }
+    if (dropped.length > 0) warnDroppedSpanKeys(logger, operation, dropped)
   }
 
   let result: R
   try {
-    result = fn()
+    result = fn(handle)
   } catch (err) {
     emit('ERROR', err)
     throw err
@@ -734,5 +941,6 @@ export function _reset(): void {
   unknownLogger = undefined
   defaultLogger = undefined
   warnedOutsideContext = false
+  warnedOperations.clear()
   _resetEnvWarnings()
 }

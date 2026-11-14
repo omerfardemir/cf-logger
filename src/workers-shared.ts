@@ -1,10 +1,11 @@
 // Internals shared by the Workers helpers (`workers.ts`, `handlers.ts`).
 // Not an entry point: nothing here is exported from the package.
 
-import type { Logger, LoggerOptions, TraceCarrier } from './types'
+import type { Logger, LoggerOptions, Span, SpanOptions, TraceCarrier } from './types'
 import {
   createLogger,
   hasDefaultLogger,
+  NOOP_SPAN,
   recordSpan,
   registerDefaultLogger,
   runWithLogger,
@@ -26,7 +27,8 @@ const rootLoggers = new Map<string, Logger>()
  * @returns {Logger} The cached Root Logger.
  */
 export function cachedRootLogger(options: LoggerOptions): Logger {
-  const key = JSON.stringify([options.service, options.level, options.environment, options.version])
+  const { service, level, environment, version, spans } = options
+  const key = JSON.stringify([service, level, environment, version, spans?.level, spans?.slowMs])
   let logger = rootLoggers.get(key)
   if (!logger) {
     logger = createLogger(options)
@@ -64,19 +66,25 @@ export function registerRootLogger(rootLogger: () => Logger): void {
  *
  * @template R - The return type of `fn`.
  * @param {Parameters<typeof runWithLogger>[0]} context - The Logging Context to open.
- * @param {() => R} fn - The function to run in it.
+ * @param {(span: Span) => R} fn - The function to run in it. Gets the Span's handle (a
+ *   no-op one without `operation`).
  * @param {string} [operation] - Span operation name; no Span without it.
  * @param {boolean} [timed] - `false` writes no `span.end`, only the `<operation> failed`
  *   line on a throw (see `recordSpan`).
+ * @param {SpanOptions} [options] - The Span's options; ignored without `operation`.
  * @returns {R} The return value of `fn`, unchanged.
  */
 export function runLogged<R>(
   context: Parameters<typeof runWithLogger>[0],
-  fn: () => R,
+  fn: (span: Span) => R,
   operation?: string,
   timed = true,
+  options?: SpanOptions,
 ): R {
-  return runWithLogger(context, operation ? () => recordSpan(operation, fn, timed) : fn)
+  return runWithLogger(
+    context,
+    operation ? () => recordSpan(operation, fn, timed, options) : () => fn(NOOP_SPAN),
+  )
 }
 
 /** Any method, as stored on a prototype. */

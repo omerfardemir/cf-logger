@@ -184,6 +184,19 @@ describe('withScheduled', () => {
     })
   })
 
+  it('the span.end scheduled level follows the env Span Defaults; a throw is still ERROR', async () => {
+    const entries = _captureEntries()
+    const env = { ...ENV, LOG_LEVEL: 'debug', LOG_SPAN_LEVEL: 'debug', LOG_SPAN_SLOW_MS: '60000' }
+    await withScheduled(() => {})(controller(), env, {} as ExecutionContext)
+    await expect(
+      withScheduled(async () => {
+        throw new Error('cron failed')
+      })(controller(), env, {} as ExecutionContext),
+    ).rejects.toThrow('cron failed')
+
+    expect(linesOf(entries, 'span.end scheduled').map((e) => e.level)).toEqual(['DEBUG', 'ERROR'])
+  })
+
   it('passes arguments and the return value through unchanged', async () => {
     const ctx = { waitUntil: vi.fn() } as unknown as ExecutionContext
     const c = controller()
