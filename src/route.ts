@@ -1,4 +1,5 @@
 import {
+  functionName,
   functionText,
   inlineJSON,
   isPlainObject,
@@ -73,6 +74,7 @@ function numberFor(value: unknown): number | undefined {
  * @param {string} code - The character after `%`.
  * @param {unknown} value - The placeholder's argument.
  * @returns {string | typeof UNRENDERED} The text, or `UNRENDERED` when the placeholder does not print `value`.
+ * @throws When `value` cannot be read (a function whose `name` getter throws).
  */
 function render(code: string, value: unknown): string | typeof UNRENDERED {
   switch (code) {
@@ -89,7 +91,7 @@ function render(code: string, value: unknown): string | typeof UNRENDERED {
     case 'O':
       if (value === undefined || value instanceof Error) return UNRENDERED
       if (typeof value === 'string') return `'${value}'`
-      if (typeof value === 'function') return value.name || functionText(value)
+      if (typeof value === 'function') return functionName(value) || functionText(value)
       return inlineJSON(value) ?? UNRENDERED
     case 's':
       if (typeof value === 'object' && value !== null) return UNRENDERED

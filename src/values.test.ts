@@ -506,3 +506,105 @@ describe('inside a Logging Context', () => {
     })
   })
 })
+
+/** A revoked Proxy of a function: `typeof` is `'function'`, every read throws. */
+const revokedFn = () => {
+  const { proxy, revoke } = Proxy.revocable(function target() {}, {})
+  revoke()
+  return proxy
+}
+
+describe('functions whose name cannot be read', () => {
+  beforeEach(() => _reset())
+
+  it('a class whose static name getter throws: only that value is replaced', () => {
+    const entries = _captureEntries()
+    class Svc {
+      static get name(): string {
+        throw new Error('x')
+      }
+    }
+    createLogger({ service: 'svc' }).info({ a: 1, Svc }, 'm')
+    expect(entries[0]).toMatchObject({ a: 1, message: 'm', Svc: '[Unserializable: Error: x]' })
+    expect(entries[0].logError).toBeUndefined()
+  })
+
+  it('a revoked function Proxy as a field, in args, under %o and as a toJSON', () => {
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    logger.info('m', { fn: revokedFn(), a: 1 })
+    logger.info('m', revokedFn(), [revokedFn()])
+    logger.info('v=%o', revokedFn(), { a: 1 })
+    logger.info('m', { toJSON: revokedFn(), a: 1 })
+    expect(entries.map((e) => e.logError)).toEqual([undefined, undefined, undefined, undefined])
+    expect(entries[0]).toMatchObject({ message: 'm', a: 1, fn: expect.stringMatching(REVOKED) })
+    expect(entries[1].args).toEqual([
+      expect.stringMatching(REVOKED),
+      [expect.stringMatching(REVOKED)],
+    ])
+    expect(entries[2]).toMatchObject({ message: 'v=%o', a: 1 })
+    expect(entries[2].args).toEqual([expect.stringMatching(REVOKED)])
+    expect(entries[3]).toMatchObject({ message: 'm', a: 1 })
+    expect(entries[3].args).toEqual([{ toJSON: expect.stringMatching(REVOKED) }])
+  })
+
+  it('a revoked function Proxy as a binding keeps every line of that logger', () => {
+    const entries = _captureEntries()
+    // The binding types have no functions; at runtime a binding can still be one.
+    const logger = createLogger({ service: 'svc' }, { fn: revokedFn() as unknown as string })
+    logger.info('one')
+    logger.child({ b: 1 }).warn('two')
+    expect(entries.map((e) => e.logError)).toEqual([undefined, undefined])
+    expect(entries.map((e) => e.message)).toEqual(['one', 'two'])
+    expect(entries[0].fn).toMatch(REVOKED)
+  })
+
+  it('a function whose name is not a string is anonymous, under %o and on the line', () => {
+    const entries = _captureEntries()
+    const odd: unknown = Object.defineProperty(() => {}, 'name', {
+      value: {
+        toString() {
+          throw new Error('no text')
+        },
+      },
+    })
+    createLogger({ service: 'svc' }).info('v=%o', odd, { f: odd })
+    expect(entries[0]).toMatchObject({
+      message: 'v=[Function: anonymous]',
+      f: '[Function: anonymous]',
+    })
+    expect(entries[0].logError).toBeUndefined()
+  })
+
+  it('a Map or Set that cannot be iterated is replaced on its own', () => {
+    const entries = _captureEntries()
+    class BadMap extends Map {
+      override [Symbol.iterator](): MapIterator<[unknown, unknown]> {
+        throw new Error('no entries')
+      }
+    }
+    class BadSet extends Set {
+      override [Symbol.iterator](): SetIterator<unknown> {
+        throw new Error('no items')
+      }
+    }
+    createLogger({ service: 'svc' }).info('m', { map: new BadMap(), set: new BadSet(), a: 1 })
+    expect(entries[0]).toMatchObject({
+      a: 1,
+      map: '[Unserializable: Error: no entries]',
+      set: '[Unserializable: Error: no items]',
+    })
+  })
+
+  it('an args array with an item whose getter throws keeps its other items', () => {
+    const entries = _captureEntries()
+    const list = Object.defineProperty([1, 2, 3], 1, {
+      enumerable: true,
+      get() {
+        throw new Error('no item')
+      },
+    })
+    createLogger({ service: 'svc' }).info('m', list)
+    expect(entries[0].args).toEqual([[1, '[Unserializable: Error: no item]', 3]])
+  })
+})

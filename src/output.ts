@@ -35,14 +35,33 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
 }
 
 /**
- * How a function appears in a log line: `[Function: name]`, or
- * `[Function: anonymous]` when it has no name.
+ * A function's `name`, or `''` when it has none or it is not a string.
  *
- * @param {{ name: string }} fn - The function.
+ * @param {{ name: unknown }} fn - The function.
+ * @returns {string} Its name.
+ * @throws When `name` cannot be read (a getter that throws, a revoked `Proxy`).
+ */
+export function functionName(fn: { name: unknown }): string {
+  const name = fn.name
+  return typeof name === 'string' ? name : ''
+}
+
+/**
+ * How a function appears in a log line: `[Function: name]`, or
+ * `[Function: anonymous]` when it has no name. Never throws: a function
+ * whose `name` cannot be read is `unserializable()`.
+ *
+ * @param {{ name: unknown }} fn - The function.
  * @returns {string} Its text.
  */
-export function functionText(fn: { name: string }): string {
-  return `[Function: ${fn.name || 'anonymous'}]`
+export function functionText(fn: { name: unknown }): string {
+  let name: string
+  try {
+    name = functionName(fn)
+  } catch (thrown) {
+    return unserializable(thrown)
+  }
+  return `[Function: ${name || 'anonymous'}]`
 }
 
 /**
@@ -205,14 +224,19 @@ const serializeIfError = (value: unknown): unknown =>
 /**
  * `serializeIfError` on an overflow value and, one level down, on its items
  * or values. Never throws: an item that can't be inspected (a `Proxy` whose
- * traps throw) is `unserializable()`.
+ * traps throw) is `unserializable()`, and so is an item whose getter throws.
  *
  * @param {unknown} value - One item of `args`.
  * @returns {unknown} The item, with Errors serialized at its top level and one level down.
  */
 function serializeOverflowItem(value: unknown): unknown {
   try {
-    if (Array.isArray(value)) return value.map(serializeIfError)
+    if (Array.isArray(value)) {
+      const out: unknown[] = []
+      const length = value.length
+      for (let i = 0; i < length; i++) out.push(serializeIfError(read(() => value[i])))
+      return out
+    }
     if (isPlainObject(value)) {
       const out: LogRecord = Object.create(null) // `value` may have an own `__proto__` key
       for (const [key, v] of readEntries(value)) out[key] = serializeIfError(v)
@@ -499,7 +523,7 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
 /**
  * The text loggercf writes for a primitive JSON cannot write: a `BigInt`'s
  * digits, `[Function: name]`, `Symbol(description)`. Shared by the fast path
- * and the walk of `stringifyRecord()`.
+ * and the walk of `stringifyRecord()`. Never throws.
  *
  * @param {unknown} value - Any value.
  * @returns {string | undefined} Its text, or `undefined` for any other value.
@@ -508,7 +532,7 @@ function nonJSONText(value: unknown): string | undefined {
   switch (typeof value) {
     case 'bigint':
     case 'symbol':
-      return value.toString()
+      return String(value)
     case 'function':
       return functionText(value)
   }
