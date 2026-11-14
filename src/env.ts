@@ -1,5 +1,5 @@
 import { createLogger } from './logger'
-import type { LoggerOptions } from './types'
+import type { LoggerOptions, LogLevel, SpanDefaults } from './types'
 
 type LoggerLevel = NonNullable<LoggerOptions['level']>
 
@@ -17,7 +17,8 @@ export type EnvSource<E = unknown> = string | ((env: E) => string | undefined)
 
 /**
  * Per-field override of the env vars `loggerOptionsFromEnv()` reads. Fields you
- * leave out keep their default var: `NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`.
+ * leave out keep their default var: `NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`,
+ * `LOG_SPAN_LEVEL`, `LOG_SPAN_SLOW_MS`.
  *
  * @template E - The worker or process environment type.
  *
@@ -41,6 +42,17 @@ export interface EnvMapping<E = unknown> {
   environment?: EnvSource<E>
   /** Source of `version`. Default `'VERSION'`; omitted when absent. */
   version?: EnvSource<E>
+  /**
+   * Source of `spans.level`, the level of an OK `span.end`. Default `'LOG_SPAN_LEVEL'`;
+   * omitted when absent or invalid (Spans then write at `'info'`). `'silent'` is not a
+   * Span level.
+   */
+  spanLevel?: EnvSource<E>
+  /**
+   * Source of `spans.slowMs`, the Slow Threshold in milliseconds. Default
+   * `'LOG_SPAN_SLOW_MS'`; omitted when absent or not a number `>= 0`.
+   */
+  spanSlowMs?: EnvSource<E>
 }
 
 const DEFAULT_VARS = {
@@ -48,6 +60,8 @@ const DEFAULT_VARS = {
   level: 'LOG_LEVEL',
   environment: 'ENVIRONMENT',
   version: 'VERSION',
+  spanLevel: 'LOG_SPAN_LEVEL',
+  spanSlowMs: 'LOG_SPAN_SLOW_MS',
 } as const
 
 /** The levels `LOG_LEVEL` accepts, lowercase only. `'silent'` writes nothing, as in 0.0.1. */
@@ -61,8 +75,47 @@ const LOG_LEVELS: readonly LoggerLevel[] = [
   'silent',
 ]
 
-/** Whether the invalid-level warning has been written in this isolate. */
-let warnedInvalidLevel = false
+/** The levels `LOG_SPAN_LEVEL` accepts: every level but `'silent'`. */
+const SPAN_LEVELS = LOG_LEVELS.filter((level): level is LogLevel => level !== 'silent')
+
+/** A field whose invalid value writes a warning. */
+type CheckedField = 'level' | 'spanLevel' | 'spanSlowMs'
+
+/** The fields whose invalid-value warning has been written in this isolate. */
+const warnedInvalid = new Set<CheckedField>()
+
+/**
+ * The var a field is read from, as the warnings name it: the var name, or the field
+ * name for a derive function.
+ *
+ * @param {EnvSource} source - The field's source.
+ * @param {string} field - The field's name in the Env Mapping.
+ * @returns {string} The name to show.
+ */
+function sourceName(source: EnvSource<any>, field: string): string {
+  return typeof source === 'string' ? source : field
+}
+
+/**
+ * Write a warning once per field per isolate, through a logger with the other Logger
+ * Options, so it carries `service`, `environment` and `version`.
+ *
+ * @param {CheckedField} field - The field with the invalid value.
+ * @param {LoggerOptions} options - The other Logger Options.
+ * @param {object} fields - The warning's fields.
+ * @param {string} message - The warning.
+ */
+function warnInvalid(
+  field: CheckedField,
+  options: LoggerOptions,
+  fields: object,
+  message: string,
+): void {
+  if (warnedInvalid.has(field)) return
+  warnedInvalid.add(field)
+  const { service, environment, version } = options
+  createLogger({ service, environment, version }).warn(fields, message)
+}
 
 /**
  * Read one field from env through its source. Absent values become `undefined`.
@@ -94,25 +147,68 @@ function resolveLevel(
 ): LoggerLevel {
   if (value === undefined) return 'info'
   if ((LOG_LEVELS as readonly string[]).includes(value)) return value as LoggerLevel
-  if (!warnedInvalidLevel) {
-    warnedInvalidLevel = true
-    createLogger({ ...options, level: 'info' }).warn(
-      { invalidLevel: value, validLevels: [...LOG_LEVELS] },
-      `${levelVar} "${value}" is not a valid log level; using "info"`,
+  warnInvalid(
+    'level',
+    options,
+    { invalidLevel: value, validLevels: [...LOG_LEVELS] },
+    `${levelVar} "${value}" is not a valid log level; using "info"`,
+  )
+  return 'info'
+}
+
+/**
+ * The Span Defaults read from env. An invalid value is left out, and writes one WARN
+ * per field per isolate.
+ *
+ * @param {(key: 'spanLevel' | 'spanSlowMs') => string | undefined} field - Reads one field.
+ * @param {(key: 'spanLevel' | 'spanSlowMs') => string} name - The var a field is read from.
+ * @param {LoggerOptions} options - The other Logger Options, for the warnings.
+ * @returns {SpanDefaults | undefined} The Span Defaults, or `undefined` when none is set.
+ */
+function resolveSpans(
+  field: (key: 'spanLevel' | 'spanSlowMs') => string | undefined,
+  name: (key: 'spanLevel' | 'spanSlowMs') => string,
+  options: LoggerOptions,
+): SpanDefaults | undefined {
+  const spans: SpanDefaults = {}
+  const level = field('spanLevel')
+  if (level !== undefined && (SPAN_LEVELS as readonly string[]).includes(level)) {
+    spans.level = level as LogLevel
+  } else if (level !== undefined) {
+    warnInvalid(
+      'spanLevel',
+      options,
+      { invalidLevel: level, validLevels: [...SPAN_LEVELS] },
+      `${name('spanLevel')} "${level}" is not a valid span level; using "info"`,
     )
   }
-  return 'info'
+  const slowMs = field('spanSlowMs')
+  // An empty var is already absent; a blank one would be `Number(' ') === 0`.
+  const ms = slowMs !== undefined && slowMs.trim() !== '' ? Number(slowMs) : NaN
+  if (ms >= 0) {
+    spans.slowMs = ms
+  } else if (slowMs !== undefined) {
+    warnInvalid(
+      'spanSlowMs',
+      options,
+      { invalidSlowMs: slowMs },
+      `${name('spanSlowMs')} "${slowMs}" is not a number of milliseconds >= 0; no slow threshold`,
+    )
+  }
+  return Object.keys(spans).length > 0 ? spans : undefined
 }
 
 /**
  * Build Logger Options from env.
  *
- * By default it reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. Pass a
- * mapping to read other var names or derive a field with a function. `service`
- * falls back to `'unknown'` and `level` to `'info'`; an absent `environment` or
- * `version` is left out, so log lines omit it. `level` accepts `'silent'`, which
- * writes nothing. An invalid level falls back to `'info'` and writes one WARN per
- * isolate.
+ * By default it reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`, and the Span
+ * Defaults `LOG_SPAN_LEVEL` and `LOG_SPAN_SLOW_MS` (as `spans.level` and
+ * `spans.slowMs`). Pass a mapping to read other var names or derive a field with a
+ * function. `service` falls back to `'unknown'` and `level` to `'info'`; an absent
+ * `environment`, `version` or Span Default is left out, so log lines omit it (and
+ * `spans` is left out when both are). `level` accepts `'silent'`, which writes
+ * nothing. An invalid level falls back to `'info'`, and an invalid Span Default is
+ * left out; each writes one WARN per isolate.
  *
  * @template E - The worker or process environment type.
  * @param {E} env - The worker or process environment object.
@@ -132,7 +228,8 @@ export function loggerOptionsFromEnv<E = unknown>(
   env: E,
   mapping: EnvMapping<E> = {},
 ): LoggerOptions {
-  const field = (key: keyof EnvMapping) => read(env, mapping[key] ?? DEFAULT_VARS[key])
+  const source = (key: keyof EnvMapping) => mapping[key] ?? DEFAULT_VARS[key]
+  const field = (key: keyof EnvMapping) => read(env, source(key))
   const environment = field('environment')
   const version = field('version')
   const options: LoggerOptions = {
@@ -140,16 +237,16 @@ export function loggerOptionsFromEnv<E = unknown>(
     ...(environment ? { environment } : {}),
     ...(version ? { version } : {}),
   }
-  const levelSource = mapping.level ?? DEFAULT_VARS.level
-  const levelVar = typeof levelSource === 'string' ? levelSource : 'level'
-  return { ...options, level: resolveLevel(field('level'), levelVar, options) }
+  const level = resolveLevel(field('level'), sourceName(source('level'), 'level'), options)
+  const spans = resolveSpans(field, (key) => sourceName(source(key), key), options)
+  return { ...options, level, ...(spans ? { spans } : {}) }
 }
 
 /**
- * Re-arm the one-time invalid-level warning.
+ * Re-arm the one-time invalid-value warnings.
  *
  * @internal Called by `_reset()` in tests; not part of the public API.
  */
 export function _resetEnvWarnings(): void {
-  warnedInvalidLevel = false
+  warnedInvalid.clear()
 }

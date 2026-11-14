@@ -1,5 +1,5 @@
 import { DurableObject, RpcTarget, WorkerEntrypoint, env as workersEnv } from 'cloudflare:workers'
-import type { LogFields, Logger, LoggerOptions, TraceCarrier } from './types'
+import type { LogFields, Logger, LoggerOptions, Span, SpanOptions, TraceCarrier } from './types'
 import {
   getLogger,
   getTraceCarrier,
@@ -139,17 +139,24 @@ export class TracedSession<E = unknown> extends RpcTarget {
    * Each call gets its own span ID whose parent is the caller's span. When
    * `operation` is provided, the call is reported as a Span (`span.end` with
    * timing and status) if the trace is sampled; for an unsampled trace a throw is
-   * still logged, as one `<operation> failed` line at `ERROR`. The return value and
-   * a throw or rejection pass through unchanged.
+   * still logged, as one `<operation> failed` line at `ERROR`. `options` (`level`,
+   * `slowMs`, `fields`) and `span.set()` work as for `withSpan()`; without
+   * `operation` there is no Span, so both are ignored. The return value and a throw or
+   * rejection pass through unchanged.
    *
    * An instance property, so JSRPC never exposes it; call it as `this.traced(fn, op)`.
    *
    * @template R - The return type of `fn`.
-   * @param {() => R} fn - The function to execute inside the Logging Context.
+   * @param {(span: Span) => R} fn - The function to execute inside the Logging Context. Gets the Span's handle.
    * @param {string} [operation] - Span operation name (e.g. `'bind.add'`).
+   * @param {SpanOptions} [options] - The Span's `level`, `slowMs` and `fields`.
    * @returns {R} The return value of `fn`.
    */
-  declare protected readonly traced: <R>(fn: () => R, operation?: string) => R
+  declare protected readonly traced: <R>(
+    fn: (span: Span) => R,
+    operation?: string,
+    options?: SpanOptions,
+  ) => R
 
   /**
    * The current Logging Context's logger inside `this.traced()`, otherwise the
@@ -168,7 +175,8 @@ export class TracedSession<E = unknown> extends RpcTarget {
     this.#rootLogger = rootLogger
     this.env = env
     defineInstanceMember(this, 'traced', {
-      value: <R>(fn: () => R, operation?: string): R => this.#traced(fn, operation),
+      value: <R>(fn: (span: Span) => R, operation?: string, options?: SpanOptions): R =>
+        this.#traced(fn, operation, options),
       writable: true,
     })
     defineInstanceMember(this, 'logger', {
@@ -180,11 +188,12 @@ export class TracedSession<E = unknown> extends RpcTarget {
    * `traced()`'s implementation.
    *
    * @template R - The return type of `fn`.
-   * @param {() => R} fn - The function to execute inside the Logging Context.
+   * @param {(span: Span) => R} fn - The function to execute inside the Logging Context.
    * @param {string} [operation] - Span operation name.
+   * @param {SpanOptions} [options] - The Span's options.
    * @returns {R} The return value of `fn`.
    */
-  #traced<R>(fn: () => R, operation?: string): R {
+  #traced<R>(fn: (span: Span) => R, operation?: string, options?: SpanOptions): R {
     return runLogged(
       {
         logger: this.#rootLogger,
@@ -194,6 +203,8 @@ export class TracedSession<E = unknown> extends RpcTarget {
       },
       fn,
       operation,
+      true,
+      options,
     )
   }
 

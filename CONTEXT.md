@@ -27,7 +27,7 @@ The keys the Hono middleware writes itself on the Request Lines and as Context F
 _Avoid_: protected keys, own keys, reserved keys
 
 **Root Logger**:
-The logger built once per process or isolate from Logger Options, carrying only per-process data (`service`, `environment`, `version`). It never holds per-unit-of-work data, because an isolate serves many requests concurrently.
+The logger built once per process or isolate from Logger Options, carrying only per-process data (`service`, `environment`, `version`) and its Span Defaults. It never holds per-unit-of-work data, because an isolate serves many requests concurrently.
 _Avoid_: base logger, factory
 
 **Default Logger**:
@@ -35,10 +35,10 @@ The Root Logger (or a `.child()` of one with per-process fields only) an isolate
 _Avoid_: global logger, fallback logger
 
 **Logger Options**:
-The per-process configuration a Root Logger is built from: service name, minimum level (or `silent`, which writes nothing), environment, version.
+The per-process configuration a Root Logger is built from: service name, minimum level (or `silent`, which writes nothing), environment, version, and the Span Defaults.
 
 **Env Mapping**:
-Where each Logger Options field is read from in a Worker's (or process's) env: a var name or a function of env. Unmapped fields read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`.
+Where each Logger Options field is read from in a Worker's (or process's) env: a var name or a function of env. Unmapped fields read `NAME`, `LOG_LEVEL`, `ENVIRONMENT`, `VERSION`, `LOG_SPAN_LEVEL` and `LOG_SPAN_SLOW_MS`.
 _Avoid_: env config, var map
 
 **Argument Routing**:
@@ -81,7 +81,22 @@ The wire form of a Trace Context: a `traceparent` value plus an optional `traces
 _Avoid_: trace headers, propagation context
 
 **Span**:
-A named, timed operation within a Logging Context, reported once on completion with its duration and status. For an unsampled trace only a failure is reported: one `<operation> failed` line at `ERROR`, with no timing.
+A named, timed operation within a Logging Context, reported once on completion with its duration and status, as its `span.end` line: at its level when it succeeds (`info` unless its options or the Span Defaults say otherwise), at `WARN` once it reaches its Slow Threshold (or at its level, when that is more severe), and always at `ERROR` when it throws. For an unsampled trace only a failure is reported: one `<operation> failed` line at `ERROR`, with no timing.
+
+**Slow Threshold**:
+A Span's `slowMs`: the duration, in milliseconds, at or above which a Span that succeeds writes its `span.end` at `WARN` (or at its level, when that is more severe). A faster Span is still written, at its level; to keep fast Spans out of the log, give them a level the logger filters.
+_Avoid_: timeout, latency budget
+
+**Span Defaults**:
+The level and Slow Threshold a Root Logger gives every Span in the Logging Contexts it opens (`createLogger({ spans })`, or `LOG_SPAN_LEVEL` / `LOG_SPAN_SLOW_MS` through the Env Mapping). Each Span's own options override them. A hand-written Logger has none.
+
+**Span Fields**:
+Fields a Span writes on its `span.end` line and on no other: given up front as its `fields` option, or added from inside its work with `span.set()`. They never enter the Logging Context, never reach a nested Span, and are not on the unsampled `<operation> failed` line. Serialized like a log call's fields, so the Moved Keys and the Re-write Budget apply.
+_Avoid_: span attributes, span context
+
+**Span Owned Keys**:
+The keys a `span.end` line writes itself, which Span Fields cannot set: `span` and `err`. They are dropped from the Span Fields, and one WARN per operation (per isolate, for up to 100 operations) names them, never their values.
+_Avoid_: reserved span keys. Not to be confused with the Hono middleware's Owned Keys or the Moved Keys.
 
 **Traced Session**:
 An RPC target returned by a Service Binding's `session()` call that carries the caller's Trace Context privately, so every RPC method on it runs inside a Logging Context continuing the caller's trace.

@@ -176,7 +176,8 @@ export function withQueueMessage<R, E = Cloudflare.Env>(
       ...carrierFromBody(message.body),
       fields: { queue: batch.queue, messageId: message.id, attempts: message.attempts },
     },
-    fn,
+    // A closure, so `fn` is called with no arguments, exactly as without the wrapper.
+    () => fn(),
     'queue.message',
   )
 }
