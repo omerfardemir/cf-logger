@@ -469,11 +469,11 @@ export const newBudget = (): Budget => ({
 /** The budget each record from `buildRecord()` is written with, when its entry had one. */
 const lineBudgets = new WeakMap<LogRecord, Budget>()
 
-/** What the walks before this one wrote on the same line: `%j` placeholders earlier in the message. */
+/** What the message already holds: its `%j` / `%o` / `%O` placeholders and its long words and `%s` texts. */
 interface Written {
-  /** The objects they wrote, outside repeats. */
+  /** The objects its placeholders wrote, outside repeats. */
   objects: WeakSet<object>
-  /** The long strings they wrote, outside repeats. */
+  /** The long strings it holds, outside repeats. */
   strings: Set<string>
 }
 
@@ -860,34 +860,68 @@ export function stringifyRecord(record: LogRecord): string {
   return JSON.stringify(toJSONValue(record, '', newWalk(false, budget), false))
 }
 
+/** What `formatMessage()` and `routeArgs()` print a message with. */
+export interface MessagePrinter {
+  /**
+   * The JSON text a `%j`, `%o` or `%O` placeholder prints, or `undefined`
+   * when its value cannot be printed as it is.
+   */
+  json(value: unknown): string | undefined
+  /**
+   * Whether `text` may go into the message: a long string (see
+   * `LONG_STRING`) the message already holds is a repeat, put in again while
+   * its length fits the line's budget, which it then spends from.
+   */
+  fits(text: string): boolean
+}
+
 /**
- * The printer for one message's `%j`, `%o` and `%O` placeholders. It gives
- * the JSON text a placeholder prints, or `undefined` when its value cannot be
- * printed as it is: anything that would need a stand-in in
- * `stringifyRecord()` (a `BigInt`, a function or a symbol inside, a cycle,
- * a repeat over the budget, a getter or a `toJSON` that throws), or a value
- * JSON writes nothing for. A `Map` prints as `[key, value]` pairs and a
- * `Set` as an array, as on the line. What one placeholder prints is a repeat
- * for the next ones, and all of them spend from `budget`; a placeholder that
- * gives up prints nothing, so what it saw is not a repeat.
+ * The printer for one message. `json()` gives the text of a `%j`, `%o` or
+ * `%O` placeholder, or `undefined` for anything that would need a stand-in in
+ * `stringifyRecord()` (a `BigInt`, a function or a symbol inside, a cycle, a
+ * repeat over the budget, a getter or a `toJSON` that throws), or a value
+ * JSON writes nothing for. A `Map` prints as `[key, value]` pairs and a `Set`
+ * as an array, as on the line. `fits()` admits a word or a `%s` text. What
+ * the message already holds is a repeat for what comes after, and all of it
+ * spends from `budget`; a placeholder that gives up prints nothing and spends
+ * nothing, so what it saw is not a repeat.
  *
  * @param {Budget} budget - The line's re-write budget.
- * @returns {(value: unknown) => string | undefined} Gives one placeholder's text, or `undefined`.
+ * @returns {MessagePrinter} The printer.
  */
-export function inlinePrinter(budget: Budget): (value: unknown) => string | undefined {
-  const written: Written = { objects: new WeakSet(), strings: new Set() }
-  return (value) => {
-    const walk = newWalk(true, budget, written)
-    let text: string | undefined
-    try {
-      text = JSON.stringify(toJSONValue(value, '', walk))
-    } catch {
-      return undefined
-    }
-    if (text === undefined) return undefined
-    for (const object of walk.seen) written.objects.add(object)
-    for (const string of walk.strings) written.strings.add(string)
-    return text
+export function inlinePrinter(budget: Budget): MessagePrinter {
+  let written: Written | undefined
+  return {
+    json(value) {
+      written ??= { objects: new WeakSet(), strings: new Set() }
+      const { values, chars } = budget
+      const walk = newWalk(true, budget, written)
+      let text: string | undefined
+      try {
+        text = JSON.stringify(toJSONValue(value, '', walk))
+      } catch {
+        text = undefined
+      }
+      if (text === undefined) {
+        budget.values = values
+        budget.chars = chars
+        return undefined
+      }
+      for (const object of walk.seen) written.objects.add(object)
+      for (const string of walk.strings) written.strings.add(string)
+      return text
+    },
+    fits(text) {
+      if (text.length < LONG_STRING) return true
+      written ??= { objects: new WeakSet(), strings: new Set() }
+      if (!written.strings.has(text)) {
+        written.strings.add(text)
+        return true
+      }
+      if (text.length > budget.chars) return false
+      budget.chars -= text.length
+      return true
+    },
   }
 }
 

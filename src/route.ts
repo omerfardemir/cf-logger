@@ -2,6 +2,7 @@ import {
   functionName,
   functionText,
   inlinePrinter,
+  isError,
   isPlainObject,
   newBudget,
   OPTION_KEYS,
@@ -11,6 +12,7 @@ import {
   unserializable,
   type Budget,
   type LogRecord,
+  type MessagePrinter,
   type RoutedArgs,
 } from './output'
 
@@ -65,25 +67,39 @@ function numberFor(value: unknown): number | undefined {
 }
 
 /**
+ * An `Error`'s `message` as text, never throwing: a non-string `message` is
+ * `String(message)`, and one that cannot be read is `unserializable()`.
+ *
+ * @param {Error} error - Any `Error`.
+ * @returns {string} Its message.
+ */
+function errorMessage(error: Error): string {
+  try {
+    const message: unknown = error.message
+    return typeof message === 'string' ? message : String(message)
+  } catch (thrown) {
+    return unserializable(thrown)
+  }
+}
+
+/**
  * Render one argument for placeholder `code`. `%s %d %i %f` never render an
  * object or an array (`[object Object]`, `NaN` would hide its fields).
- * `%d %i %f` never render a function or a non-numeric string (`NaN`); `%d`
- * and `%i` write a `BigInt` exactly. `%j %o %O` never render an `Error`
- * (`{}` would hide its stack) or a value `print` cannot print (a
- * `BigInt`, a cycle, a getter that throws...), so it is routed like a
- * trailing argument instead.
+ * `%d %i %f`
+ * never render a function or a non-numeric string (`NaN`); `%d` and `%i`
+ * write a `BigInt` exactly. `%j %o %O` never render an `Error` (`{}` would
+ * hide its stack) or a value `printer.json` cannot print (a `BigInt`, a
+ * cycle, a getter that throws...). A long string the message already holds
+ * renders only while it fits the line's budget (`printer.fits`). Whatever is
+ * not rendered is routed like a trailing argument instead.
  *
  * @param {string} code - The character after `%`.
  * @param {unknown} value - The placeholder's argument.
- * @param {(value: unknown) => string | undefined} print - The message's `inlinePrinter()`.
+ * @param {MessagePrinter} printer - The message's printer.
  * @returns {string | typeof UNRENDERED} The text, or `UNRENDERED` when the placeholder does not print `value`.
  * @throws When `value` cannot be read (a function whose `name` getter throws).
  */
-function render(
-  code: string,
-  value: unknown,
-  print: (value: unknown) => string | undefined,
-): string | typeof UNRENDERED {
+function render(code: string, value: unknown, printer: MessagePrinter): string | typeof UNRENDERED {
   switch (code) {
     case 'd':
     case 'i':
@@ -96,13 +112,15 @@ function render(
     case 'j':
     case 'o':
     case 'O':
-      if (value === undefined || value instanceof Error) return UNRENDERED
-      if (typeof value === 'string') return `'${value}'`
+      if (value === undefined || isError(value)) return UNRENDERED
+      if (typeof value === 'string') return printer.fits(value) ? `'${value}'` : UNRENDERED
       if (typeof value === 'function') return functionName(value) || functionText(value)
-      return print(value) ?? UNRENDERED
-    case 's':
+      return printer.json(value) ?? UNRENDERED
+    case 's': {
       if (typeof value === 'object' && value !== null) return UNRENDERED
-      return String(value)
+      const text = String(value)
+      return printer.fits(text) ? text : UNRENDERED
+    }
     default:
       return UNRENDERED // not a placeholder (`50% off`, `%c`)
   }
@@ -117,25 +135,25 @@ function render(
  * `%j %o %O` with an `Error` or a value JSON cannot write as it is, such as a
  * cycle or a `BigInt`, an unknown sequence such as `% ` or `%c`), the
  * sequence stays in the text and the argument is returned in `unprinted`
- * instead. Never throws. `%%` becomes `%` only when there are
- * arguments, like `console.log`. `%j`, `%o` and `%O` spend from the line's
- * re-write budget, all of them together.
+ * instead. Never throws. `%%` becomes `%` only when there
+ * are arguments, like `console.log`. Everything printed spends from the
+ * line's re-write budget through `printer`, all placeholders together: a
+ * repeated object under `%j`, or a long string the message already holds.
  *
  * @param {string} template - The message template.
  * @param {readonly unknown[]} args - The arguments after the template.
- * @param {Budget} [budget] - The line's re-write budget.
+ * @param {MessagePrinter} [printer] - The message's printer, holding the line's budget.
  * @returns {{ message: string, unprinted: unknown[] }} The formatted message, and every argument it did not print, in call order.
  */
 export function formatMessage(
   template: string,
   args: readonly unknown[],
-  budget: Budget = newBudget(),
+  printer: MessagePrinter = inlinePrinter(newBudget()),
 ): { message: string; unprinted: unknown[] } {
+  printer.fits(template) // a long template is a string the message holds
   if (args.length === 0 || !template.includes('%'))
     return { message: template, unprinted: [...args] }
 
-  let printer: ((value: unknown) => string | undefined) | undefined
-  const print = (value: unknown) => (printer ??= inlinePrinter(budget))(value)
   const unprinted: unknown[] = []
   let message = ''
   let last = 0
@@ -153,7 +171,7 @@ export function formatMessage(
     const value = args[next++]
     let text: string | typeof UNRENDERED
     try {
-      text = render(code, value, print)
+      text = render(code, value, printer)
     } catch {
       text = UNRENDERED // e.g. `%s` with a function whose toString throws
     }
@@ -259,13 +277,7 @@ export function routeArgs(input: readonly unknown[], budget: Budget = newBudget(
     } else if (first instanceof Error) {
       setErr(first)
       takeTemplate()
-      if (template === undefined) {
-        try {
-          message = first.message
-        } catch (thrown) {
-          message = unserializable(thrown)
-        }
-      }
+      if (template === undefined) message = errorMessage(first)
     } else if (isPlainObject(first)) {
       merge(first)
       takeTemplate()
@@ -285,8 +297,9 @@ export function routeArgs(input: readonly unknown[], budget: Budget = newBudget(
     takeTemplate()
   }
 
+  const printer = inlinePrinter(budget)
   if (template !== undefined) {
-    const formatted = formatMessage(template, remaining, budget)
+    const formatted = formatMessage(template, remaining, printer)
     message = formatted.message
     remaining = formatted.unprinted
   }
@@ -297,6 +310,8 @@ export function routeArgs(input: readonly unknown[], budget: Budget = newBudget(
         if (!setErr(value)) errors.push(value)
       } else if (isPlainObject(value)) {
         merge(value)
+      } else if (typeof value === 'string' && !printer.fits(value)) {
+        overflow.push(value) // a long repeat over the budget: `"[Repeated]"` in `args`
       } else if (isPrimitive(value)) {
         words.push(String(value))
       } else {

@@ -882,3 +882,51 @@ describe('the fast path keeps to the budget below its value cap', () => {
     expect(items.at(-1)).toBe('[Repeated]')
   })
 })
+
+describe('a placeholder that gave up spends nothing', () => {
+  beforeEach(() => _reset())
+
+  it('what it re-wrote before giving up is not charged to the line', () => {
+    const entries = _captureEntries()
+    const small = wide(6_000) // its repeat fits the budget once
+    createLogger({ service: 'svc' }).info('x %j', { a: small, b: small, z: 1n })
+    expect(entries[0]).toMatchObject({ message: 'x %j', a: small, b: small, z: '1' })
+  })
+})
+
+describe('long strings in the message count against the budget', () => {
+  beforeEach(() => _reset())
+
+  const big = 'b'.repeat(100_000)
+
+  it('a 100 kB string 2,000 times as words: the line is bounded, and nothing is dropped', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    createLogger({ service: 'svc' }).info('m', ...Array(2000).fill(big))
+    expect(lines[0].length).toBeLessThan(1_000_000)
+    const line = JSON.parse(lines[0])
+    expect(line.message).toBe(`m ${big}`)
+    expect(line.args).toHaveLength(1999)
+    expect(line.args[0]).toBe(big)
+    expect(line.args.at(-1)).toBe('[Repeated]')
+  })
+
+  it('a 100 kB string 2,000 times under %s: the line is bounded, and nothing is dropped', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    createLogger({ service: 'svc' }).info('%s,'.repeat(2000), ...Array(2000).fill(big))
+    expect(lines[0].length).toBeLessThan(1_000_000)
+    const line = JSON.parse(lines[0])
+    expect(line.message).toBe(`${big},${'%s,'.repeat(1999)}`)
+    expect(line.args).toHaveLength(1999)
+    expect(line.args.at(-1)).toBe('[Repeated]')
+  })
+
+  it('a long string is printed again while it fits', () => {
+    const entries = _captureEntries()
+    const long = 'y'.repeat(2_000)
+    createLogger({ service: 'svc' }).info('%s %j', long, long, long)
+    expect(entries[0].message).toBe(`${long} '${long}' ${long}`)
+    expect(entries[0].args).toBeUndefined()
+  })
+})
