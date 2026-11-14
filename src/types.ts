@@ -11,13 +11,15 @@ export type LogLevel = 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace'
 /**
  * Allowed types for log field values.
  *
- * Supports primitives, `Date`, nested objects, and arrays.
+ * Supports primitives, `Date`, `Error` (written with its type, message and
+ * stack, at any depth), nested objects, and arrays.
  */
 export type LogValue =
   | string
   | number
   | boolean
   | Date
+  | Error
   | null
   | undefined
   | { [key: string]: LogValue }

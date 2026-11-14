@@ -87,8 +87,8 @@ function dateText(date: Date): string {
  * routed, see `formatMessage()`) and a `Date` its ISO string. `%d %i %f`
  * never render a function or a non-numeric string (`NaN`); `%d` and `%i`
  * write a `BigInt` exactly. `%j %o %O` never render an `Error` (`{}` would
- * hide its stack) or a value `printer.json` cannot print (a `BigInt`, a
- * cycle, a getter that throws...). A long string or `BigInt` the message
+ * hide its stack) or a value `printer.json` cannot print (one holding an
+ * `Error`, a `BigInt`, a cycle, a getter that throws...). A long string or `BigInt` the message
  * already holds renders only while it fits the Re-write Budget
  * (`printer.admit`). Whatever is not rendered is routed like a trailing
  * argument instead.
@@ -141,7 +141,7 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
  * Each `%` sequence takes the next argument in order. When it cannot print
  * that argument (`%d` with `null` or `'abc'`, `%j` with `undefined`,
  * `%s %d %i %f` with an object or array, `%d %i %f` with a function,
- * `%j %o %O` with an `Error` or a value JSON cannot write as it is, such as a
+ * `%j %o %O` with an `Error`, or a value holding one or that JSON cannot write as it is, such as a
  * cycle or a `BigInt`, an unknown sequence such as `% ` or `%c`), the
  * sequence stays in the text and the argument is returned in `unprinted`
  * instead. `%s` prints an `Error`'s `message` and still returns the `Error`
