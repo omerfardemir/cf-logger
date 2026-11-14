@@ -1,4 +1,5 @@
 import {
+  errorMessage,
   functionName,
   functionText,
   inlinePrinter,
@@ -67,22 +68,6 @@ function numberFor(value: unknown): number | undefined {
 }
 
 /**
- * An `Error`'s `message` as text, never throwing: a non-string `message` is
- * `String(message)`, and one that cannot be read is `unserializable()`.
- *
- * @param {Error} error - Any `Error`.
- * @returns {string} Its message.
- */
-function errorMessage(error: Error): string {
-  try {
-    const message: unknown = error.message
-    return typeof message === 'string' ? message : String(message)
-  } catch (thrown) {
-    return unserializable(thrown)
-  }
-}
-
-/**
  * How `%s` prints a `Date`: its ISO string, or `Invalid Date`. Reads it
  * through `Date.prototype`, so no user code runs.
  *
@@ -104,7 +89,7 @@ function dateText(date: Date): string {
  * write a `BigInt` exactly. `%j %o %O` never render an `Error` (`{}` would
  * hide its stack) or a value `printer.json` cannot print (a `BigInt`, a
  * cycle, a getter that throws...). A long string the message already holds
- * renders only while it fits the line's budget (`printer.fits`). Whatever is
+ * renders only while it fits the line's budget (`printer.admit`). Whatever is
  * not rendered is routed like a trailing argument instead.
  *
  * @param {string} code - The character after `%`.
@@ -127,7 +112,7 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
     case 'o':
     case 'O':
       if (value === undefined || isError(value)) return UNRENDERED
-      if (typeof value === 'string') return printer.fits(value) ? `'${value}'` : UNRENDERED
+      if (typeof value === 'string') return printer.admit(value) ? `'${value}'` : UNRENDERED
       if (typeof value === 'function') return functionName(value) || functionText(value)
       return printer.json(value) ?? UNRENDERED
     case 's': {
@@ -136,7 +121,7 @@ function render(code: string, value: unknown, printer: MessagePrinter): string |
       else if (value instanceof Date) text = dateText(value)
       else if (typeof value === 'object' && value !== null) return UNRENDERED
       else text = String(value)
-      return printer.fits(text) ? text : UNRENDERED
+      return printer.admit(text) ? text : UNRENDERED
     }
     default:
       return UNRENDERED // not a placeholder (`50% off`, `%c`)
@@ -169,7 +154,7 @@ export function formatMessage(
   args: readonly unknown[],
   printer: MessagePrinter = inlinePrinter(newBudget()),
 ): { message: string; unprinted: unknown[] } {
-  printer.fits(template) // a long template is a string the message holds
+  printer.admit(template) // a long template is a string the message holds
   if (args.length === 0 || !template.includes('%'))
     return { message: template, unprinted: [...args] }
 
@@ -287,14 +272,18 @@ export function routeArgs(input: readonly unknown[], budget: Budget = newBudget(
     else if (remaining.length > 0 && remaining[0] == null) overflow.push(remaining.shift())
   }
 
+  const printer = inlinePrinter(budget)
   const first = input[0]
   try {
     if (typeof first === 'string') {
       template = first
-    } else if (first instanceof Error) {
+    } else if (isError(first)) {
       setErr(first)
       takeTemplate()
-      if (template === undefined) message = errorMessage(first)
+      if (template === undefined) {
+        message = errorMessage(first)
+        printer.admit(message) // the message holds it: a word repeating it is a repeat
+      }
     } else if (isPlainObject(first)) {
       merge(first)
       takeTemplate()
@@ -314,7 +303,6 @@ export function routeArgs(input: readonly unknown[], budget: Budget = newBudget(
     takeTemplate()
   }
 
-  const printer = inlinePrinter(budget)
   if (template !== undefined) {
     const formatted = formatMessage(template, remaining, printer)
     message = formatted.message
@@ -323,11 +311,11 @@ export function routeArgs(input: readonly unknown[], budget: Budget = newBudget(
 
   for (const value of remaining) {
     try {
-      if (value instanceof Error) {
+      if (isError(value)) {
         if (!setErr(value)) errors.push(value)
       } else if (isPlainObject(value)) {
         merge(value)
-      } else if (typeof value === 'string' && !printer.fits(value)) {
+      } else if (typeof value === 'string' && !printer.admit(value)) {
         overflow.push(value) // a long repeat over the budget: `"[Repeated]"` in `args`
       } else if (isPrimitive(value)) {
         words.push(String(value))

@@ -17,6 +17,8 @@ import {
   newBudget,
   copyBindings,
   describeFailure,
+  errorMessage,
+  isError,
   nodeSink,
   stringifyRecord,
   takeRecordKeys,
@@ -525,17 +527,16 @@ export function withSpan<R>(operation: string, fn: () => R): R {
 
 /**
  * The text a Span records as its `error`. Never throws, so the caller always
- * gets its own thrown value back: a value `String()` or `instanceof` throws on
+ * gets its own thrown value back: a value `String()` throws on
  * (`Object.create(null)`, a revoked `Proxy`) is `unserializable()`.
  *
  * @param {unknown} error - What the Span's work threw.
  * @returns {string} The error's message, or the value as text.
  */
 function errorText(error: unknown): string {
+  if (isError(error)) return errorMessage(error)
   try {
-    if (!(error instanceof Error)) return String(error)
-    const message: unknown = error.message
-    return typeof message === 'string' ? message : String(message)
+    return String(error)
   } catch (thrown) {
     return unserializable(thrown)
   }

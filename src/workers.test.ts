@@ -36,6 +36,23 @@ import {
 } from './workers'
 import { DurableObject, RpcTarget, WorkerEntrypoint } from 'cloudflare:workers'
 import type { EnvMapping, SessionInit, TracedServiceBinding } from './workers'
+import type { Logger } from './types'
+
+/** Throws, as a hand-written Logger's method might. */
+const loggerBroke = (): never => {
+  throw new Error('logger broke')
+}
+
+/** A hand-written Logger whose every level throws, and whose `child` is itself. */
+const brokenLogger: Logger = {
+  trace: loggerBroke,
+  debug: loggerBroke,
+  info: loggerBroke,
+  warn: loggerBroke,
+  error: loggerBroke,
+  fatal: loggerBroke,
+  child: () => brokenLogger,
+}
 import {
   runWithLogger,
   getTraceContext,
@@ -1249,6 +1266,36 @@ describe('withLogging', () => {
       expect(thrown).toBe(odd)
       await expect(worker.failAsync()).rejects.toBe(odd)
       expect(entries.filter((e) => e.level === 'ERROR')).toHaveLength(2)
+    }
+  })
+
+  it("a hand-written Logger that throws: the method's own value is still rethrown, spans or not", async () => {
+    class Broken extends TracedEntrypoint<typeof ENV> {
+      protected override get rootLogger() {
+        return brokenLogger
+      }
+      fail(): never {
+        throw failure
+      }
+      async failAsync(): Promise<never> {
+        await Promise.resolve()
+        throw failure
+      }
+      ok() {
+        return 1
+      }
+    }
+    for (const spans of [true, false]) {
+      const worker = new (withLogging(Broken, { spans }))({} as any, ENV)
+      let thrown: unknown
+      try {
+        worker.fail()
+      } catch (err) {
+        thrown = err
+      }
+      expect(thrown).toBe(failure)
+      await expect(worker.failAsync()).rejects.toBe(failure)
+      expect(worker.ok()).toBe(1) // with spans, `span.end` at INFO throws too
     }
   })
 

@@ -12,6 +12,23 @@ import {
 } from './logger'
 import { tracedFetch } from './fetch'
 import { buildTraceparent } from './trace'
+import type { Logger } from './types'
+
+/** Throws, as a hand-written Logger's method might. */
+const loggerBroke = (): never => {
+  throw new Error('logger broke')
+}
+
+/** A hand-written Logger whose every level throws, and whose `child` is itself. */
+const brokenLogger: Logger = {
+  trace: loggerBroke,
+  debug: loggerBroke,
+  info: loggerBroke,
+  warn: loggerBroke,
+  error: loggerBroke,
+  fatal: loggerBroke,
+  child: () => brokenLogger,
+}
 
 describe('getLogger outside ALS context', () => {
   beforeEach(() => {
@@ -587,6 +604,31 @@ describe('withSpan', () => {
       }
     },
   )
+
+  it("a hand-written Logger that throws: the work's own value is still rethrown, sampled or not", async () => {
+    for (const traceparent of [SAMPLED, UNSAMPLED]) {
+      const thrown = new Error('work failed')
+      await runWithLogger({ logger: brokenLogger, traceparent }, async () => {
+        let caught: unknown
+        try {
+          withSpan('sync', () => {
+            throw thrown
+          })
+        } catch (err) {
+          caught = err
+        }
+        expect(caught).toBe(thrown)
+        await expect(
+          withSpan('async', async () => {
+            throw thrown
+          }),
+        ).rejects.toBe(thrown)
+        // Success writes `span.end` at INFO when sampled, which throws too.
+        expect(withSpan('ok', () => 1)).toBe(1)
+        await expect(withSpan('ok async', async () => 2)).resolves.toBe(2)
+      })
+    }
+  })
 
   it('a returned revoked Proxy is returned as is', () => {
     const { proxy, revoke } = Proxy.revocable({}, {})

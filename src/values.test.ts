@@ -621,6 +621,14 @@ function errorGraph(levels: number, width: number): Error {
   return next!
 }
 
+/** An `AggregateError` holding `inner` 1,001 times, where `inner`'s cause loops back to it. */
+const loopsBack = (inner: Error) => {
+  const root = new AggregateError([], 'root')
+  inner.cause = root
+  root.errors.push(...Array.from({ length: 1001 }, () => inner))
+  return root
+}
+
 describe('an Error is serialized once per line', () => {
   beforeEach(() => _reset())
 
@@ -686,7 +694,36 @@ describe('an Error is serialized once per line', () => {
     _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
     const ms = elapsed(() => createLogger({ service: 'svc' }).error(errors[0], 'm'))
     expect(ms).toBeLessThan(1_000)
+    expect(lines[0].length).toBeLessThan(1_000_000)
     expect(JSON.parse(lines[0]).logError).toBeUndefined()
+  })
+
+  it('a wide Error whose cause loops back, 1,001 times: serialized again only within a budget', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    const inner = new AggregateError(
+      Array.from({ length: 100_000 }, () => 1),
+      'inner',
+    )
+    const ms = elapsed(() => createLogger({ service: 'svc' }).error(loopsBack(inner)))
+    expect(ms).toBeLessThan(500)
+    expect(lines[0].length).toBeLessThan(1_000_000)
+    const errors = JSON.parse(lines[0]).err.errors as unknown[]
+    expect(errors).toHaveLength(1001)
+    expect(errors[0]).toMatchObject({ message: 'inner', cause: '[Circular]' })
+    expect(errors.at(-1)).toBe('[Repeated]')
+  })
+
+  it('an Error with 10,000 own properties whose cause loops back, 1,001 times: the same', () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    const inner = Object.assign(new Error('inner'), wide(10_000))
+    const ms = elapsed(() => createLogger({ service: 'svc' }).error(loopsBack(inner)))
+    expect(ms).toBeLessThan(500)
+    expect(lines[0].length).toBeLessThan(1_000_000)
+    const errors = JSON.parse(lines[0]).err.errors as unknown[]
+    expect(errors[0]).toMatchObject({ message: 'inner', k9999: 9_999, cause: '[Circular]' })
+    expect(errors.at(-1)).toBe('[Repeated]')
   })
 
   it('an AggregateError writes its errors, nested like cause', () => {
@@ -871,6 +908,16 @@ describe('boxed primitives are told by their brand, not their tag', () => {
   })
 })
 
+/** 2,000 getters, all returning one object whose `toJSON` gives a new `{ ...fields }`. */
+const throughGetters = (fields: Record<string, unknown>) => {
+  const shared = { toJSON: () => ({ ...fields }) }
+  return Array.from({ length: 2000 }, () => ({
+    get v() {
+      return shared
+    },
+  }))
+}
+
 describe('the fast path keeps to the budget below its value cap', () => {
   beforeEach(() => _reset())
 
@@ -889,7 +936,7 @@ describe('the fast path keeps to the budget below its value cap', () => {
     expect(a.at(-1)).toBe('[Repeated]')
   })
 
-  it('past 1 MiB of characters, the walk bounds what the fast path cannot see', () => {
+  it('past 256 KiB of characters, the walk bounds what the fast path cannot see', () => {
     const fields = Object.fromEntries(
       Array.from({ length: 50 }, (_, i) => [`k${i}`, String(i).padEnd(1000, 'x')]),
     )
@@ -903,11 +950,30 @@ describe('the fast path keeps to the budget below its value cap', () => {
     let line = ''
     const ms = elapsed(() => (line = lineFor({ a: holders })))
     expect(ms).toBeLessThan(500)
-    expect(line.length).toBeLessThan(2_000_000)
+    expect(line.length).toBeLessThan(1_000_000)
     const a = JSON.parse(line).a as { v: unknown }[]
     expect(a[0].v).toEqual(fields)
     expect(a.at(-1)!.v).toBe('[Repeated]')
   })
+
+  it.each([
+    ['short strings', (i: number) => `value-${i}`],
+    ['numbers', (i: number) => i * 1000],
+  ])(
+    'a toJSON of 40 keys of %s, behind 2,000 getters: within a few budgets of the walk',
+    (_kind, value) => {
+      const fields = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`key${i}`, value(i)]))
+      const once = JSON.stringify(fields).length
+      let line = ''
+      const ms = elapsed(() => (line = lineFor({ a: throughGetters(fields) })))
+      expect(ms).toBeLessThan(500)
+      expect(line.length).toBeLessThan(300_000) // the walk alone writes about 140 kB
+      expect(line.length).toBeLessThan(2000 * once) // not every copy
+      const a = JSON.parse(line).a as { v: unknown }[]
+      expect(a[0].v).toEqual(fields)
+      expect(a.at(-1)!.v).toBe('[Repeated]')
+    },
+  )
 
   it('a toJSON returning 2,000 keys, shared 20 times, is written again only within the budget', () => {
     const big = wide(2_000)
@@ -977,6 +1043,21 @@ describe('long strings in the message count against the budget', () => {
     const line = JSON.parse(lines[0])
     expect(line.message).toBe(`${big},${'%s,'.repeat(1999)}`)
     expect(line.args).toHaveLength(1999)
+    expect(line.args.at(-1)).toBe('[Repeated]')
+  })
+
+  it("a leading Error's message is held by the message: a word repeating it is a repeat", () => {
+    const lines: string[] = []
+    _setSink({ write: (record) => lines.push(stringifyRecord(record)) })
+    // Untyped: an `Error`, then a number where the types expect the message.
+    const error = createLogger({ service: 'svc' }).error as (...args: unknown[]) => void
+    error(new Error(big), 1, ...Array(2000).fill(big))
+    // One copy in the message, one in `err.message`, one in `err.stack`, plus the budget.
+    expect(lines[0].length).toBeLessThan(3.5 * big.length)
+    const line = JSON.parse(lines[0])
+    expect(line.message).toBe(`${big} 1`)
+    expect(line.err.message).toBe(big)
+    expect(line.args).toHaveLength(2000)
     expect(line.args.at(-1)).toBe('[Repeated]')
   })
 

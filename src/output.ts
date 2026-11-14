@@ -145,6 +145,22 @@ export function isError(value: unknown): value is Error {
   }
 }
 
+/**
+ * An `Error`'s `message` as text, never throwing: a non-string `message` is
+ * `String(message)`, and one that cannot be read is `unserializable()`.
+ *
+ * @param {Error} error - Any `Error`.
+ * @returns {string} Its message.
+ */
+export function errorMessage(error: Error): string {
+  try {
+    const message: unknown = error.message
+    return typeof message === 'string' ? message : String(message)
+  } catch (thrown) {
+    return unserializable(thrown)
+  }
+}
+
 /** How many levels of `cause` (and of `Error`-valued properties) are serialized before the chain is cut off. */
 const MAX_CAUSE_DEPTH = 5
 
@@ -176,20 +192,14 @@ function isAggregateError(error: Error): error is AggregateError {
   }
 }
 
-/**
- * How many times one line may serialize an `Error` again because the copy it
- * already has is cut off (`"[Circular]"`) at an `Error` outside it, which
- * may not be an ancestor where it is used again. Past it, the copy is
- * reused as is, so a dense graph of Errors with cycles stays linear.
- */
-const MAX_ERROR_RESERIALIZE = 1_000
-
 /** One serialized `Error`, and how far up its `"[Circular]"`s point. */
 interface SerializedError {
   /** The serialized copy. */
   out: LogRecord
   /** The shallowest depth a `"[Circular]"` inside it points to; `Infinity` when none does. */
   reach: number
+  /** What serializing it again writes at its own level (see `copyCost()`), once it has been worked out. */
+  cost?: Budget
 }
 
 /**
@@ -198,14 +208,21 @@ interface SerializedError {
  * so `stringifyRecord()` sees a repeat and its re-write budget applies. By
  * depth, so a copy built deep (its chain cut off sooner) is never reused
  * higher up, and `MAX_CAUSE_DEPTH` still bounds the nesting. A copy cut off
- * at an `Error` outside it is serialized again instead (see
- * `MAX_ERROR_RESERIALIZE`), so `"[Circular]"` marks only a real loop.
+ * at an `Error` outside it may not be right where it is used again, so it is
+ * serialized again instead, while that fits `reserializeBudget`: `"[Circular]"`
+ * then marks only a real loop. Past it, the copy is reused as is.
  */
 export interface SerializedErrors {
   /** Each depth's copies. */
   byDepth: Map<Error, SerializedError>[]
-  /** Re-serializations left (see `MAX_ERROR_RESERIALIZE`). */
-  again: number
+  /**
+   * What serializing Errors again may still write. A new copy is a new
+   * object, which `stringifyRecord()` never sees as a repeat, so each one is
+   * charged its values and characters, as a repeat would be: a graph of
+   * Errors with cycles stays linear, and its line stays near the re-write
+   * budget, however wide each `Error` is.
+   */
+  reserializeBudget: Budget
 }
 
 /**
@@ -215,8 +232,46 @@ export interface SerializedErrors {
  */
 export const newSerializedErrors = (): SerializedErrors => ({
   byDepth: [],
-  again: MAX_ERROR_RESERIALIZE,
+  reserializeBudget: newBudget(),
 })
+
+/**
+ * What a copy of an `Error` writes at its own level: a value per key and
+ * per `errors` item, and the characters of its keys and short strings. A
+ * long string (see `LONG_STRING`) is left out: the line's re-write budget
+ * already bounds it, as the same string. Nested Errors are charged when they
+ * are serialized again themselves.
+ *
+ * @param {LogRecord} out - The copy.
+ * @returns {Budget} Its cost.
+ */
+function copyCost(out: LogRecord): Budget {
+  const cost: Budget = { values: 0, chars: 0 }
+  const add = (value: unknown) => {
+    cost.values++
+    if (typeof value === 'string' && value.length < LONG_STRING) cost.chars += value.length
+  }
+  for (const [key, value] of Object.entries(out)) {
+    add(value)
+    cost.chars += key.length
+    if (key === 'errors' && Array.isArray(value)) for (const item of value) add(item)
+  }
+  return cost
+}
+
+/**
+ * Spend `cost` from `budget`, when it fits.
+ *
+ * @param {Budget} budget - The budget. Mutated when `cost` fits.
+ * @param {Budget} cost - What to spend.
+ * @returns {boolean} Whether it fit, and was spent.
+ */
+function spend(budget: Budget, cost: Budget): boolean {
+  if (cost.values > budget.values || cost.chars > budget.chars) return false
+  budget.values -= cost.values
+  budget.chars -= cost.chars
+  return true
+}
 
 /**
  * Serialize an `Error` into a plain, JSON-safe object. Never throws.
@@ -262,9 +317,10 @@ function serializeErrorAt(
 ): SerializedError {
   const known = cache.byDepth[depth]?.get(error)
   if (known) {
-    // Cut off only inside itself (or out of re-serializations): the same wherever it is used.
-    if (known.reach >= depth || cache.again <= 0) return known
-    cache.again--
+    // Cut off only inside itself: the same wherever it is used.
+    if (known.reach >= depth) return known
+    known.cost ??= copyCost(known.out)
+    if (!spend(cache.reserializeBudget, known.cost)) return known
   }
   const entry: SerializedError = { out: {}, reach: Infinity }
   ;(cache.byDepth[depth] ??= new Map()).set(error, entry)
@@ -535,7 +591,10 @@ export const newBudget = (): Budget => ({
 /** The budget each record from `buildRecord()` is written with, when its entry had one. */
 const lineBudgets = new WeakMap<LogRecord, Budget>()
 
-/** What the message already holds: its `%j` / `%o` / `%O` placeholders and its long words and `%s` texts. */
+/**
+ * What one message already holds, its `%j` / `%o` / `%O` placeholders and
+ * its long words and `%s` texts, and the repeats its placeholders gave up on.
+ */
 interface Written {
   /** The objects its placeholders wrote, outside repeats. */
   objects: WeakSet<object>
@@ -871,15 +930,18 @@ const NEEDS_WALK = new Error('needs walk')
 /**
  * How many values the fast path writes before it hands the line to the
  * walk, which writes the same line but bounds every repeat by the budget.
- * A safety net: the fast path already gives up on every repeat it can see.
+ * A safety net: the fast path already gives up on every repeat it can see,
+ * but not on one it cannot (a `toJSON` object reached through a getter,
+ * whose value it does not read again). A small multiple of the budget, so
+ * such a line is at most a few budgets longer than the walk would write.
  */
-const MAX_FAST_VALUES = 100_000
+const MAX_FAST_VALUES = 4 * MAX_REWRITTEN_VALUES
 
 /**
  * How many characters of keys and strings the fast path writes before it
  * hands the line to the walk (see `MAX_FAST_VALUES`).
  */
-const MAX_FAST_CHARS = 1024 * 1024
+const MAX_FAST_CHARS = 4 * MAX_REWRITTEN_CHARS
 
 /**
  * Serialize a record to one JSON line. Never throws for a value in it: a
@@ -950,11 +1012,13 @@ export interface MessagePrinter {
    */
   json(value: unknown): string | undefined
   /**
-   * Whether `text` may go into the message: a long string (see
-   * `LONG_STRING`) the message already holds is a repeat, put in again while
-   * its length fits the line's budget, which it then spends from.
+   * Whether `text` may go into the message, and if so record it as held
+   * there and charge it: a long string (see `LONG_STRING`) the message
+   * already holds is a repeat, put in again while its length fits the line's
+   * budget, which it then spends from. The caller puts `text` in the message
+   * whenever this returns `true`.
    */
-  fits(text: string): boolean
+  admit(text: string): boolean
 }
 
 /**
@@ -963,7 +1027,7 @@ export interface MessagePrinter {
  * `stringifyRecord()` (a `BigInt`, a function or a symbol inside, a cycle, a
  * repeat over the budget, a getter or a `toJSON` that throws), or a value
  * JSON writes nothing for. A `Map` prints as `[key, value]` pairs and a `Set`
- * as an array, as on the line. `fits()` admits a word or a `%s` text. What
+ * as an array, as on the line. `admit()` admits a word or a `%s` text. What
  * the message already holds is a repeat for what comes after, and all of it
  * spends from `budget`; a placeholder that gives up prints nothing and spends
  * nothing, so what it saw is not a repeat.
@@ -973,11 +1037,14 @@ export interface MessagePrinter {
  */
 export function inlinePrinter(budget: Budget): MessagePrinter {
   let written: Written | undefined
+  /** What the message holds so far, made on first use: most messages need none of it. */
+  const held = (): Written =>
+    (written ??= { objects: new WeakSet(), strings: new Set(), tooLarge: new WeakMap() })
   return {
     json(value) {
-      written ??= { objects: new WeakSet(), strings: new Set(), tooLarge: new WeakMap() }
+      const holds = held()
       const { values, chars } = budget
-      const walk = newWalk(true, budget, written)
+      const walk = newWalk(true, budget, holds)
       let text: string | undefined
       try {
         text = JSON.stringify(toJSONValue(value, '', walk))
@@ -989,15 +1056,15 @@ export function inlinePrinter(budget: Budget): MessagePrinter {
         budget.chars = chars
         return undefined
       }
-      for (const object of walk.seen) written.objects.add(object)
-      for (const string of walk.strings) written.strings.add(string)
+      for (const object of walk.seen) holds.objects.add(object)
+      for (const string of walk.strings) holds.strings.add(string)
       return text
     },
-    fits(text) {
+    admit(text) {
       if (text.length < LONG_STRING) return true
-      written ??= { objects: new WeakSet(), strings: new Set(), tooLarge: new WeakMap() }
-      if (!written.strings.has(text)) {
-        written.strings.add(text)
+      const { strings } = held()
+      if (!strings.has(text)) {
+        strings.add(text)
         return true
       }
       if (text.length > budget.chars) return false

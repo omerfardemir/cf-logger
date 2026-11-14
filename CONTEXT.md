@@ -58,8 +58,12 @@ The fixed fields a logger writes on every line: a Root Logger's `service`, `envi
 _Avoid_: logger fields, child fields
 
 **Overflow**:
-The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, a leading `undefined` / `null` not followed by a string, an `undefined` / `null` in the message's place after a leading object or `Error`, a long string the message can't hold again within the line's budget, an object's values for the Moved Keys, and a Logger Binding's or Context Field's value for a Record Key), in call order. Present only when non-empty.
+The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, a leading `undefined` / `null` not followed by a string, an `undefined` / `null` in the message's place after a leading object or `Error`, a long string the message can't hold again within the Re-write Budget, an object's values for the Moved Keys, and a Logger Binding's or Context Field's value for a Record Key), in call order. Present only when non-empty.
 _Avoid_: extras, rest, leftovers
+
+**Re-write Budget**:
+What one log line may write again of what it already holds: 10,000 values, or 65,536 characters of keys and strings, inside repeats (an object written before on the line, an object whose `toJSON` was already called, a string of 1,024 characters or more the line already holds). The message and the rest of the line spend from the same one. A repeat that doesn't fit is `"[Repeated]"` as a whole, so a line holds its first copies plus about one budget, however shared its values are. Serializing an `Error` again, in a graph of Errors with cycles, has a budget of its own of the same size.
+_Avoid_: quota, limit, the line's budget (without saying which)
 
 ### Tracing
 
