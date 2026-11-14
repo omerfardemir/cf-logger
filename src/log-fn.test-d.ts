@@ -8,7 +8,15 @@ interface AppFields extends LogFields {
   tenant?: string
 }
 
-export function callStyles(logger: Logger, typed: Logger<AppFields>, caught: unknown): void {
+export function callStyles(
+  logger: Logger,
+  typed: Logger<AppFields>,
+  caught: unknown,
+  // oxlint-disable-next-line no-explicit-any -- a value typed `any` must be accepted
+  loose: any,
+  either: string | Error,
+  maybe: Error | undefined,
+): void {
   const err = new Error('boom')
 
   // Console style.
@@ -42,10 +50,47 @@ export function callStyles(logger: Logger, typed: Logger<AppFields>, caught: unk
   // @ts-expect-error userId is declared as a string
   typed.info({ userId: 42 }, 'wrong type')
 
+  // A value typed `unknown` or `any` (a `catch` binding).
+  try {
+    logger.info('work')
+  } catch (e) {
+    logger.error(e)
+    logger.error(e, 'failed')
+    logger.error(e, 'failed %s', 'job', { a: 1 })
+    typed.error(e, 'typed failed')
+  }
+  logger.error(caught)
+  logger.error(loose)
+  logger.error(loose, 'loose')
+
+  // A union first argument.
+  logger.error(either)
+  logger.error(either, 'failed %s', 'job')
+  logger.error(maybe)
+  logger.error(maybe, 'maybe failed')
+  typed.error(either, 'typed')
+
   // @ts-expect-error the message after an object must be a string
   logger.info({ a: 1 }, 42)
   // @ts-expect-error the message after an Error must be a string
   logger.error(err, { a: 1 })
   // @ts-expect-error a log method needs a message, an Error or fields first
   logger.info(42)
+  // @ts-expect-error a log method needs a message, an Error or fields first
+  logger.info(true)
+  // @ts-expect-error the message after an unknown value must be a string
+  logger.error(caught, { a: 1 })
+  // @ts-expect-error the message after a union must be a string
+  logger.error(either, { a: 1 })
+  // @ts-expect-error userId is declared as a string (no fallback overload takes it)
+  typed.info({ userId: 42 })
+}
+
+// A generic `Logger<T>` cannot take a structured call: `KnownFields<T>` cannot
+// be checked against an unresolved `T`. Console-style calls still work.
+export function generic<T extends LogFields>(logger: Logger<T>): void {
+  logger.info('console style %s', 'ok', { a: 1 })
+  logger.error(new Error('boom'), 'error first')
+  // @ts-expect-error structured calls need a concrete T
+  logger.info({ a: 1 }, 'structured')
 }
