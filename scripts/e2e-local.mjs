@@ -21,6 +21,9 @@
 //   - Units of work outside HTTP (dev/main-worker/src/units.ts): a cron run, a queue message
 //     continuing the producer's trace, a Workflow step re-entering run's Logging Context, and a
 //     Durable Object's RPC methods, fetch and alarm, each with their Context Fields.
+//   - Traced Session surface (dev/main-worker/src/session-surface.ts): through tracedWorker's and
+//     withLogging's session stubs, `traced`, `logger` and `env` are not RPC members, and a
+//     session method still continues the caller's trace.
 //
 // Runs on Linux, macOS and Windows.
 //
@@ -711,6 +714,39 @@ function checkRequestLines(lines, failures) {
     failures.push('logs: expected one request.start GET / (requestStart defaults to true)')
 }
 
+/**
+ * GET /session-surface: JSRPC exposes only a Traced Session's own methods. Calling `traced`, or
+ * reading `logger` or `env`, through a session stub fails as a missing member; bind's `add`
+ * still continues main's span.
+ */
+function checkSessionSurface(results, failures) {
+  const body = results.find((r) => r.path === '/session-surface')?.body ?? {}
+  const missing = /does not implement the method/
+  for (const session of ['bind', 'logged']) {
+    for (const member of ['traced', 'logger', 'env']) {
+      const outcome = body[session]?.[member]
+      if (outcome?.ok !== false || !missing.test(outcome.error ?? ''))
+        failures.push(
+          `/session-surface: ${session} session ${member} is reachable over RPC: ${show(outcome)}`,
+        )
+    }
+  }
+  if (body.bind?.add?.value !== 5)
+    failures.push(`/session-surface: bind add(2, 3) gave ${show(body.bind?.add)}, expected 5`)
+  const added = readLogRecords()
+    .map(({ record }) => record)
+    .find((r) => r.message === 'Added 2 + 3 = 5')
+  if (
+    added?.service !== 'bind-test' ||
+    added.traceId !== TRACE_ID ||
+    typeof body.spanId !== 'string' ||
+    added.parentSpanId !== body.spanId
+  )
+    failures.push(
+      `logs: bind add(2, 3) does not continue main's span ${body.spanId}: ${show(added)}`,
+    )
+}
+
 async function main() {
   if (await portInUse(PORT))
     throw new Error(`Port ${PORT} is already in use. Stop it before running e2e.`)
@@ -731,6 +767,7 @@ async function main() {
       ['/durable-object', 200],
       ['/queue', 200],
       ['/workflow', 200],
+      ['/session-surface', 200],
     ]) {
       results.push(await probe(base, path, status))
     }
@@ -756,6 +793,7 @@ async function main() {
     checkWithLogging(results, failures)
     checkUnits(results, failures)
     checkForwards(forwards, base, failures)
+    checkSessionSurface(results, failures)
 
     if (failures.length > 0) {
       console.error(`E2E failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`)

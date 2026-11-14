@@ -1072,15 +1072,12 @@ describe('useLogger fields and endFields', () => {
     expect(end()).not.toHaveProperty('cfRay')
   })
 
-  it('does not let fields set cfRay, err or the request.end fields when the request has none of them', async () => {
+  it('does not let fields set cfRay, err, statusCode or duration when the request has none of them', async () => {
     const { entries, start, end, app } = optionsApp({
       fields: () => ({
         tenant: 't-1',
         cfRay: 'forged',
         err: 'forged',
-        method: 'forged',
-        path: 'forged',
-        route: 'forged',
         statusCode: 1,
         duration: -1,
       }),
@@ -1099,9 +1096,7 @@ describe('useLogger fields and endFields', () => {
       expect(entry).not.toHaveProperty('err')
     }
     const fromHandler = entries().find((e) => e.message === 'from handler')!
-    for (const key of ['method', 'path', 'route', 'statusCode', 'duration']) {
-      expect(fromHandler).not.toHaveProperty(key)
-    }
+    for (const key of ['statusCode', 'duration']) expect(fromHandler).not.toHaveProperty(key)
     expect(start()).not.toHaveProperty('statusCode')
     expect(end()).toMatchObject({ method: 'GET', path: '/x', route: '/x', statusCode: 200 })
   })
@@ -1137,13 +1132,87 @@ describe('useLogger fields and endFields', () => {
   })
 })
 
+describe('useLogger hooks that set method, path or route', () => {
+  beforeEach(() => _reset())
+
+  it("lets fields set method, path and route on the handler's lines, without a WARN", async () => {
+    const { entries, warnings, app } = optionsApp({
+      fields: () => ({ method: 'X', path: '/p', route: '/r' }),
+    })
+    app.get('/users/:id', (c) => {
+      ;(c.get('logger' as never) as Logger).info('from handler')
+      return c.text('ok')
+    })
+    await app.request('/users/42')
+    const fromHandler = entries().find((e) => e.message === 'from handler')!
+    expect(fromHandler).toMatchObject({ method: 'X', path: '/p', route: '/r' })
+    expect(entries().filter((e) => e.droppedKeys !== undefined)).toEqual([])
+    expect(warnings()).toEqual([])
+  })
+
+  it('still writes the real method, path and route on request.start and request.end', async () => {
+    const { start, end, app } = optionsApp({
+      fields: () => ({ method: 'X', path: '/p', route: '/r' }),
+    })
+    app.post('/users/:id', (c) => c.text('ok'))
+    await app.request('/users/42', { method: 'POST' })
+    const real = { method: 'POST', path: '/users/42', route: '/users/:id' }
+    expect(start()).toMatchObject(real)
+    expect(start().message).toBe('request.start POST /users/42')
+    expect(end()).toMatchObject({ ...real, statusCode: 200 })
+    expect(end().message).toBe('request.end POST /users/42')
+  })
+
+  it('lets endFields return method, path and route, but request.end keeps the real ones, without a WARN', async () => {
+    const { end, warnings, entries, app } = optionsApp({
+      endFields: () => ({ method: 'X', path: '/p', route: '/r', userId: 'u-1' }),
+    })
+    app.get('/users/:id', (c) => c.text('ok'))
+    await app.request('/users/42')
+    expect(end()).toMatchObject({
+      method: 'GET',
+      path: '/users/42',
+      route: '/users/:id',
+      userId: 'u-1',
+    })
+    expect(entries().filter((e) => e.droppedKeys !== undefined)).toEqual([])
+    expect(warnings()).toEqual([])
+  })
+
+  it('keeps the real values on request.end when fields and endFields both set them', async () => {
+    const { end, app } = optionsApp({
+      fields: () => ({ method: 'A', path: '/a', route: '/a' }),
+      endFields: () => ({ method: 'B', path: '/b', route: '/b' }),
+    })
+    app.get('/x', (c) => c.text('ok'))
+    await app.request('/x')
+    expect(end()).toMatchObject({ method: 'GET', path: '/x', route: '/x' })
+  })
+
+  it('still drops the other owned keys a hook returns alongside them', async () => {
+    const { entries, app } = optionsApp({
+      fields: () => ({ method: 'X', requestId: 'forged', statusCode: 1 }),
+    })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/', { headers: { 'X-Request-Id': 'r-1' } })
+    const dropped = entries().filter((e) => e.droppedKeys !== undefined)
+    expect(dropped).toHaveLength(1)
+    expect(dropped[0].droppedKeys).toEqual(['requestId', 'statusCode'])
+    for (const entry of entries()) expect(entry.requestId).toBe('r-1')
+  })
+})
+
 describe('useLogger owned keys a hook returns', () => {
   beforeEach(() => _reset())
 
   it('warns once per hook, naming the dropped keys but never their values', async () => {
     const { lines, entries, ends, app } = optionsApp({
       fields: () => ({ tenant: 't-1', requestId: 'forged-secret-1' }),
-      endFields: () => ({ userId: 'u-1', statusCode: 'forged-secret-2', route: 'forged-secret-3' }),
+      endFields: () => ({
+        userId: 'u-1',
+        statusCode: 'forged-secret-2',
+        duration: 'forged-secret-3',
+      }),
     })
     app.get('/', (c) => c.text('ok'))
     await app.request('/')
@@ -1155,7 +1224,7 @@ describe('useLogger owned keys a hook returns', () => {
     expect(dropped[1]).toMatchObject({
       level: 'WARN',
       hook: 'endFields',
-      droppedKeys: ['route', 'statusCode'],
+      droppedKeys: ['statusCode', 'duration'],
     })
     for (const line of lines) expect(line).not.toContain('forged-secret')
   })
@@ -1270,6 +1339,15 @@ describe('useLogger hook errors', () => {
     expect(end()).toMatchObject({ level: 'INFO' })
     expect(warnings()).toHaveLength(1)
     expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'string' })
+  })
+
+  it("a level hook that returns 'silent' falls back to the default level: request.end is never muted", async () => {
+    const { end, warnings, app } = optionsApp({ level: () => 'silent' as never })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    expect(end()).toMatchObject({ level: 'INFO' })
+    expect(warnings()).toHaveLength(1)
+    expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'silent' })
   })
 
   it('treats an async fields or endFields hook as a failure: no fields, one WARN each', async () => {

@@ -1,5 +1,7 @@
 import { createLogger } from './logger'
-import type { LoggerOptions, LogLevel } from './types'
+import type { LoggerOptions } from './types'
+
+type LoggerLevel = NonNullable<LoggerOptions['level']>
 
 /**
  * Where one Logger Options field comes from: the name of an env var, or a
@@ -30,7 +32,10 @@ export type EnvSource<E = unknown> = string | ((env: E) => string | undefined)
 export interface EnvMapping<E = unknown> {
   /** Source of `service`. Default `'NAME'`; falls back to `'unknown'` when absent. */
   service?: EnvSource<E>
-  /** Source of `level`. Default `'LOG_LEVEL'`; falls back to `'info'` when absent or invalid. */
+  /**
+   * Source of `level`. Default `'LOG_LEVEL'`; falls back to `'info'` when absent or invalid.
+   * `'silent'` writes nothing.
+   */
   level?: EnvSource<E>
   /** Source of `environment`. Default `'ENVIRONMENT'`; omitted when absent. */
   environment?: EnvSource<E>
@@ -45,7 +50,16 @@ const DEFAULT_VARS = {
   version: 'VERSION',
 } as const
 
-const LOG_LEVELS: readonly LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error', 'fatal']
+/** The levels `LOG_LEVEL` accepts, lowercase only. `'silent'` writes nothing, as in 0.0.1. */
+const LOG_LEVELS: readonly LoggerLevel[] = [
+  'trace',
+  'debug',
+  'info',
+  'warn',
+  'error',
+  'fatal',
+  'silent',
+]
 
 /** Whether the invalid-level warning has been written in this isolate. */
 let warnedInvalidLevel = false
@@ -71,15 +85,15 @@ function read<E>(env: E, source: EnvSource<E>): string | undefined {
  * @param {string | undefined} value - The level read from env.
  * @param {string} levelVar - The var it was read from (or `'level'` for a function), named in the warning.
  * @param {LoggerOptions} options - The other Logger Options, so the warning carries `service` etc.
- * @returns {LogLevel} A valid level.
+ * @returns {LoggerLevel} A valid level, `'silent'` included.
  */
 function resolveLevel(
   value: string | undefined,
   levelVar: string,
   options: LoggerOptions,
-): LogLevel {
+): LoggerLevel {
   if (value === undefined) return 'info'
-  if ((LOG_LEVELS as readonly string[]).includes(value)) return value as LogLevel
+  if ((LOG_LEVELS as readonly string[]).includes(value)) return value as LoggerLevel
   if (!warnedInvalidLevel) {
     warnedInvalidLevel = true
     createLogger({ ...options, level: 'info' }).warn(
@@ -96,8 +110,9 @@ function resolveLevel(
  * By default it reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. Pass a
  * mapping to read other var names or derive a field with a function. `service`
  * falls back to `'unknown'` and `level` to `'info'`; an absent `environment` or
- * `version` is left out, so log lines omit it. An invalid level falls back to
- * `'info'` and writes one WARN per isolate.
+ * `version` is left out, so log lines omit it. `level` accepts `'silent'`, which
+ * writes nothing. An invalid level falls back to `'info'` and writes one WARN per
+ * isolate.
  *
  * @template E - The worker or process environment type.
  * @param {E} env - The worker or process environment object.

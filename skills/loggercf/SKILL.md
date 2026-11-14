@@ -192,7 +192,7 @@ app.use(async (c, next) => {
 })
 ```
 
-`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, returns a Promise or an unknown level, or returns an object that throws when read) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`. Keys `useLogger` owns, its Owned Keys (`requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration`, `err`, ...) are dropped from a `fields`/`endFields` result, with one WARN listing them in `droppedKeys`: pick other names. For a streamed body, `request.end` is written when the handler returns the `Response`, so `duration` leaves out the streaming and an error while streaming is not on it: log that from the stream's error callback.
+`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, returns a Promise or an unknown level, or returns an object that throws when read) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`. Keys `useLogger` owns, its Owned Keys (`requestId`, `cfRay`, `statusCode`, `duration`, `err`, ...) are dropped from a `fields`/`endFields` result, with one WARN listing them in `droppedKeys`: pick other names. `method`, `path` and `route` are not Owned Keys: return them from `fields` to put them on the handlers' lines; `request.start` and `request.end` still write their own. `fields` runs before routing, so `c.req.routePath` there is not the endpoint's pattern: set `route` from the handler with `setLoggerContext`. A `level` hook that returns `'silent'` counts as an unknown level (default level, one WARN): `request.end` cannot be muted by the hook. For a streamed body, `request.end` is written when the handler returns the `Response`, so `duration` leaves out the streaming and an error while streaming is not on it: log that from the stream's error callback.
 
 ### Context helpers need a Logging Context
 
@@ -206,6 +206,8 @@ Call these inside a Logging Context: `useLogger`, `this.traced`, a `withLogging`
 ### Traced Sessions: every RPC method runs in `this.traced`
 
 Wrap the body of every RPC method in `this.traced(fn, 'svc.op')`. The operation name makes the call a Span. Inside `traced`, `this.logger` is the Logging Context's logger. Outside it, `this.logger` is the bare Root Logger, with no trace IDs.
+
+Every method and getter on the subclass is an RPC member any caller can call. `traced`, `logger` and `env` are not: they are instance properties, which JSRPC never exposes. Make a helper you do not want callable a `#private` method or a function outside the class, and do not override `traced` or `logger`: TypeScript rejects it, and in plain JavaScript a member with either name replaces the helper and becomes callable over RPC.
 
 ```ts
 import { TracedSession, tracedWorker, withTrace, type TracedServiceBinding } from 'loggercf/workers'
@@ -447,7 +449,7 @@ logger.info('loaded order %s', order) // message stays 'loaded order %s', order'
 
 - `nodejs_compat` is required, because loggercf uses `AsyncLocalStorage` from `node:async_hooks`.
 - `loggerOptionsFromEnv(env)`, `tracedWorker`, `withLogging` and `TracedEntrypoint` read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`. A missing `NAME` becomes `service: 'unknown'` and a missing `LOG_LEVEL` becomes `'info'`. A missing or empty `ENVIRONMENT` or `VERSION` is left off the log line (0.0.1 wrote `'unknown'` for a missing one).
-- `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error` or `fatal`. Any other value (including `DEBUG` and `silent`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value. There is no off switch; the quietest level is `fatal`.
+- `LOG_LEVEL` must be lowercase: one of `trace`, `debug`, `info`, `warn`, `error`, `fatal` or `silent`. `silent` writes nothing at all. Any other value (including `DEBUG` and `SILENT`) falls back to `'info'` and writes one `WARN` per isolate that names the bad value.
 - To read other vars, pass a mapping. Each field (`service`, `level`, `environment`, `version`) takes a var name or a function of env. Fields you leave out keep their default var. The same mapping goes to `tracedWorker(S, { env })` or `withLogging(C, { env })`, or to an `envMapping` getter on a `TracedEntrypoint` subclass.
 
 ```ts

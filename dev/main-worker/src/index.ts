@@ -10,6 +10,7 @@ import {
 import { withTrace } from 'loggercf/workers'
 import type { BindService, LoggedMathService, ServiceSession } from './types'
 import { queue, scheduled, units, type Job } from './units'
+import { sessionSurface } from './session-surface'
 
 export { Report, Room } from './units'
 
@@ -143,6 +144,9 @@ app.get('/logged', async (c) => {
 
 // GET /durable-object, /queue, /workflow: start each unit of work (src/units.ts).
 app.route('/', units)
+
+// GET /session-surface: what a caller reaches on a Traced Session stub (src/session-surface.ts).
+app.route('/', sessionSurface)
 
 /** GET /trace Shows current trace context */
 app.get('/trace', async (c) => {
