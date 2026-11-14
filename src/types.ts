@@ -161,8 +161,12 @@ export interface LogFn<T extends LogFields = LogFields> {
   (err: Error, msg?: string, ...args: unknown[]): void
   /** Structured: fields merged at the top level (`err` may be `unknown`), then the message. */
   <F extends object>(fields: F & KnownFields<T>, msg?: string, ...args: unknown[]): void
-  /** A message or an `Error` whose static type is a union (`string | Error`, `Error | undefined`). */
-  (value: string | Error | undefined, msg?: string, ...args: unknown[]): void
+  /**
+   * A message or an `Error` whose static type is a union (`string | Error`,
+   * `Error | undefined`, `Error | null`). An unset `undefined` / `null` writes
+   * nothing, and the next string is still the message: `logger.error(maybeErr, 'failed %s', id)`.
+   */
+  (value: string | Error | null | undefined, msg?: string, ...args: unknown[]): void
   /**
    * A value typed `unknown` or `any`, such as a `catch (e)` binding:
    * `logger.error(e)`, `logger.error(e, 'failed')`. Only `unknown` and `any`

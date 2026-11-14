@@ -16,6 +16,7 @@ export function callStyles(
   loose: any,
   either: string | Error,
   maybe: Error | undefined,
+  maybeNull: Error | null,
 ): void {
   const err = new Error('boom')
 
@@ -68,6 +69,9 @@ export function callStyles(
   logger.error(either, 'failed %s', 'job')
   logger.error(maybe)
   logger.error(maybe, 'maybe failed')
+  logger.error(maybe, 'failed %s', 'id1')
+  logger.error(maybeNull)
+  logger.error(maybeNull, 'failed %s', 'id1')
   typed.error(either, 'typed')
 
   // @ts-expect-error the message after an object must be a string

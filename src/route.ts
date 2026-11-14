@@ -168,10 +168,13 @@ export function formatMessage(
  *
  * 1. Leading argument: a `string` is the message template. An `Error` becomes
  *    `err`, and the message defaults to `err.message`. A plain object is
- *    merged (see below). After an `Error` or a plain object, a `string`
- *    second argument is the template, and `undefined` means "no message".
- *    Any other primitive goes to `args` and is the message as `String(value)`.
- *    Anything else (array, class instance...) goes to `args`.
+ *    merged (see below). A leading `undefined` or `null` means "no fields"
+ *    (an `Error | undefined` that is unset) and writes nothing. Any other
+ *    primitive goes to `args` and is the message as `String(value)`.
+ *    Anything else (array, class instance...) goes to `args`. After an
+ *    `Error`, a plain object, `undefined` / `null`, an array or a class
+ *    instance, a `string` second argument is the template, and `undefined`
+ *    means "no message".
  * 2. `printf` placeholders in the template take arguments in order
  *    (see `formatMessage()`).
  * 3. Every remaining argument, in order: the first `Error` becomes `err` if
@@ -241,6 +244,9 @@ export function routeArgs(input: readonly unknown[]): RoutedArgs {
     if (template === undefined) message = first.message
   } else if (isPlainObject(first)) {
     merge(first)
+    takeTemplate()
+  } else if (first == null) {
+    // No fields (an `Error | undefined` that is unset): nothing to write for it.
     takeTemplate()
   } else if (isPrimitive(first)) {
     overflow.push(first)
