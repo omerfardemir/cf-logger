@@ -811,6 +811,13 @@ describe('a shared object with a toJSON is a repeat too', () => {
   })
 })
 
+/** Real boxed values, each moved to a plain prototype. */
+const moved = () => ({
+  n: Object.setPrototypeOf(Object(1), {}),
+  s: Object.setPrototypeOf(Object('ab'), {}),
+  b: Object.setPrototypeOf(Object(true), {}),
+})
+
 describe('boxed primitives are told by their brand, not their tag', () => {
   class Money {
     amount = 5
@@ -837,6 +844,16 @@ describe('boxed primitives are told by their brand, not their tag', () => {
     const expected = { m: { amount: 5 }, t: { a: 1 }, n: { a: 2 }, s: {} }
     expect(JSON.parse(stringifyRecord(fakes()))).toEqual(expected)
     expect(JSON.parse(stringifyRecord({ ...fakes(), p: sh, q: sh }))).toMatchObject(expected)
+  })
+
+  it('a real boxed value moved to another prototype: JSON on the fast path, an object on the walk', () => {
+    // A known difference (see the PR's Known limitations): JSON converts it through `{}`'s methods.
+    expect(JSON.parse(stringifyRecord(moved()))).toEqual({ n: null, s: '[object String]', b: true })
+    expect(JSON.parse(stringifyRecord({ ...moved(), p: sh, q: sh }))).toMatchObject({
+      n: {},
+      s: { 0: 'a', 1: 'b' },
+      b: {},
+    })
   })
 
   it('real boxed values are unwrapped the same way on both paths', () => {
