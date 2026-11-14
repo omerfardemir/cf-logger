@@ -1,5 +1,5 @@
 import { TracedSession, tracedWorker, withTrace } from 'loggercf/workers'
-import type { LogLevel } from 'loggercf'
+import { getLogger, type LogLevel } from 'loggercf'
 import type { BindService, MathService, ServiceSession } from '../../services'
 
 interface Env {
@@ -23,6 +23,8 @@ class BindSession extends TracedSession<Env> implements BindService {
 
   /** Multi-hop demo: bind-worker → math-worker (trace propagates automatically) */
   async multiHop(value: number): Promise<number> {
+    // Outside this.traced(): logs through the Default Logger tracedWorker registered.
+    getLogger().info({ value }, 'bind.multiHop received')
     return this.traced(async () => {
       this.logger.info({ value }, 'Starting multi-hop: will multiply then divide')
 
