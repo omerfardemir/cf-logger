@@ -165,7 +165,7 @@ app.use(async (c, next) => {
 })
 ```
 
-A `fields`, `endFields` or `level` option that throws does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`.
+`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, or returns a Promise or an unknown level) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`.
 
 ### Context helpers need a Logging Context
 

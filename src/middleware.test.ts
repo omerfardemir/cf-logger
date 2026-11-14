@@ -674,6 +674,18 @@ describe('useLogger route', () => {
     expect(end().route).toBe('/users/:id')
   })
 
+  it('logs the handler on request.end when a middleware registered with app.get runs first', async () => {
+    const { start, end, app } = optionsApp()
+    app.get('/api/*', async (_c, next) => {
+      await next()
+    })
+    app.get('/api/users/:id', (c) => c.text('ok'))
+    await app.request('/api/users/1')
+    // request.start is written before the handlers run, so it can only expect the first one.
+    expect(start().route).toBe('/api/*')
+    expect(end().route).toBe('/api/users/:id')
+  })
+
   it('uses the wildcard pattern when only a wildcard handler matches', async () => {
     const { end, app } = optionsApp()
     app.get('/users/:id', (c) => c.text('ok'))
@@ -757,14 +769,34 @@ describe('useLogger fields and endFields', () => {
     expect(entries().find((e) => e.message === 'from handler')).not.toHaveProperty('userId')
   })
 
-  it('does not let endFields replace the request.end fields', async () => {
+  it('does not let endFields replace the request.end fields, requestId or cfRay', async () => {
     const { end, app } = optionsApp({
-      endFields: () => ({ statusCode: 1, route: 'forged', path: 'forged', duration: -1 }),
+      endFields: () => ({
+        statusCode: 1,
+        route: 'forged',
+        path: 'forged',
+        duration: -1,
+        requestId: 'forged',
+        cfRay: 'forged',
+      }),
     })
     app.get('/x', (c) => c.text('ok'))
-    await app.request('/x')
-    expect(end()).toMatchObject({ statusCode: 200, route: '/x', path: '/x' })
+    await app.request('/x', { headers: { 'X-Request-Id': 'r-1', 'cf-ray': CF_RAY } })
+    expect(end()).toMatchObject({
+      statusCode: 200,
+      route: '/x',
+      path: '/x',
+      requestId: 'r-1',
+      cfRay: CF_RAY,
+    })
     expect(end().duration).toBeGreaterThanOrEqual(0)
+  })
+
+  it('does not add a cfRay to request.end when the request has none', async () => {
+    const { end, app } = optionsApp({ endFields: () => ({ cfRay: 'forged' }) })
+    app.get('/x', (c) => c.text('ok'))
+    await app.request('/x')
+    expect(end()).not.toHaveProperty('cfRay')
   })
 })
 
@@ -846,6 +878,46 @@ describe('useLogger hook errors', () => {
     expect(end()).toMatchObject({ level: 'INFO' })
     expect(warnings()).toHaveLength(1)
     expect(warnings()[0]).toMatchObject({ hook: 'level', returned: 'warning' })
+  })
+
+  it('treats an async fields or endFields hook as a failure: no fields, one WARN each', async () => {
+    const { entries, ends, warnings, app } = optionsApp({
+      fields: (async () => ({ tenant: 't-1' })) as never,
+      endFields: (async () => ({ userId: 'u-1' })) as never,
+    })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    for (const entry of entries()) {
+      expect(entry).not.toHaveProperty('tenant')
+      expect(entry).not.toHaveProperty('userId')
+    }
+    expect(ends()).toHaveLength(1)
+    expect(warnings().map((w) => [w.hook, w.returned])).toEqual([
+      ['fields', 'Promise'],
+      ['endFields', 'Promise'],
+    ])
+  })
+
+  it('treats a fields hook that returns a string or an array as a failure', async () => {
+    for (const value of ['abc', ['a']]) {
+      const { entries, warnings, app } = optionsApp({ fields: () => value as never })
+      app.get('/', (c) => c.text('ok'))
+      await app.request('/')
+      for (const entry of entries()) expect(entry).not.toHaveProperty('0')
+      expect(warnings()).toHaveLength(1)
+      expect(warnings()[0].hook).toBe('fields')
+    }
+  })
+
+  it('accepts a fields or endFields hook that returns undefined, without a WARN', async () => {
+    const { ends, warnings, app } = optionsApp({
+      fields: () => undefined,
+      endFields: () => undefined,
+    })
+    app.get('/', (c) => c.text('ok'))
+    await app.request('/')
+    expect(ends()).toHaveLength(1)
+    expect(warnings()).toEqual([])
   })
 
   it('warns once per useLogger instance', async () => {

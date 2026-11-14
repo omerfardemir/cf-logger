@@ -314,8 +314,8 @@ When the request has a `cf-ray` header, its value is also recorded as `cfRay` on
 | `err`        | end        | The error Hono caught (`c.error`), when there is one.                                                  |
 | `userAgent`  | start, end | With `include: { userAgent: true }`, when the request has a `User-Agent` header.                       |
 | `cf`         | start, end | With `include: { cf: true }`: `{ colo, country, asn }` from `request.cf`, when present.                |
-| `fields`     | every line | What the `fields` option returns, as Context Fields.                                                   |
-| `endFields`  | end        | What the `endFields` option returns.                                                                   |
+| _yours_      | every line | The keys the `fields` option returns, as Context Fields.                                               |
+| _yours_      | end        | The keys the `endFields` option returns.                                                               |
 
 ```ts
 import { Hono } from 'hono'
@@ -342,21 +342,23 @@ app.use(
 | -------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `requestStart` | `true`                   | `false` writes no `request.start`.                                                                                                                                    |
 | `level`        | `defaultRequestEndLevel` | `(statusCode, err, c) => LogLevel` for `request.end`. The default is `error` when `c.error` is set or the status is 5xx, `warn` for 4xx, `info` otherwise.            |
-| `fields`       | none                     | `(c) => fields`, called before the handlers. Added as Context Fields, so they are on `request.start`, every line the handlers write, and `request.end`.               |
-| `endFields`    | none                     | `(c) => fields`, called after the handlers, so it sees `c.var` values they set. Added to `request.end` only.                                                          |
+| `fields`       | none                     | `(c) => fields`, synchronous, called before the handlers. Added as Context Fields, so they are on `request.start`, every line the handlers write, and `request.end`.  |
+| `endFields`    | none                     | `(c) => fields`, synchronous, called after the handlers, so it sees `c.var` values they set. Added to `request.end` only.                                             |
 | `include`      | `{}`                     | `{ userAgent?: boolean, cf?: boolean }`. Adds the `User-Agent` header and Cloudflare's `request.cf` `colo`, `country` and `asn` to `request.start` and `request.end`. |
 
-Neither `fields` nor `endFields` can replace the fields `useLogger` sets itself: `requestId` and `cfRay` on every line, and `method`, `path`, `route`, `statusCode`, `duration` and `err` on `request.end`. For app data such as a user or tenant ID, use these hooks; for request metadata Cloudflare provides, use `include`.
+Neither `fields` nor `endFields` can replace the fields `useLogger` sets itself: `requestId` and `cfRay` on every line, and `method`, `path`, `route`, `statusCode`, `duration` and `err` on `request.end`. For app data such as a user or tenant ID, use these hooks; for the request details Cloudflare provides, use `include`.
 
 A throwing `HTTPException` sets `c.error`, so with the default `level` a `throw new HTTPException(401)` is logged at `error`. The example above logs those at `warn`.
 
-**`route`** is the pattern of the endpoint the request was routed to, including a sub-app's base path (`/api/items/:id`). Of the routes that matched the request after `useLogger`, it is the first one registered for a method (`app.get`, `app.post`, `app.on`, ...), read from Hono's `matchedRoutes(c)`. So:
+**`route`** is the pattern of the endpoint the request was routed to, including a sub-app's base path (`/api/items/:id`), read from Hono's `matchedRoutes(c)`:
 
-- It is known before the handler runs, and `request.start` and `request.end` carry the same value.
-- A middleware that answers early (an auth check returning 401) still logs the handler's pattern, and a catch-all registered later (`app.get('*', spaFallback)`) does not replace it.
+- On `request.end`, it is the route that answered, when that route was registered for a method (`app.get`, `app.post`, `app.on`, ...). A method-registered middleware ahead of the handler, such as `app.get('*', cache(...))`, does not hide the handler.
+- Otherwise, and on `request.start` (written before any handler runs), it is the first route registered for a method among those that matched after `useLogger`. So a middleware registered with `app.use` that answers early (an auth check returning 401) still logs the handler's pattern, and a catch-all registered later (`app.get('*', spaFallback)`) does not replace it.
 - When no method route matched, it is the last matched route: an `app.all()` handler's pattern, or, for a request no handler matched (a 404 from `notFound()`), the last matching middleware's, such as `/*` for `app.use(useLogger(...))`.
 
-**When an option throws**, `useLogger` does not let the error reach your app and does not drop a line. A throwing `fields` leaves its fields off the request's lines; a throwing `endFields` leaves its fields off `request.end`; a throwing `level`, or one that returns an unknown level, uses the default level. Each option's first failure is reported in one WARN per `useLogger()` call, with `hook` naming the option and `err` (or `returned`, for an unknown level); later failures of the same option are not repeated.
+The two lines differ only when a method-registered middleware runs before the handler: `request.start` can only expect that middleware's pattern. Group by `route` on `request.end`.
+
+**When an option fails**, `useLogger` does not let the error reach your app and does not drop a line. A `fields` that throws, or returns anything but a plain object or `undefined` (a Promise from an `async` function, a string, an array), leaves its fields off the request's lines; such an `endFields` leaves its fields off `request.end`; a `level` that throws or returns an unknown level uses the default level. Each option's first failure is reported in one WARN per `useLogger()` call, with `hook` naming the option and `err` (what it threw) or `returned` (what it returned, such as `Promise`); later failures of the same option are not repeated.
 
 `useLogger()` does not catch, create, or replace error responses. It lets Hono run downstream handlers and app-level `onError()` normally, then reads `c.error` and the final `c.res.status` after `await next()`.
 

@@ -74,14 +74,16 @@ export interface UseLoggerOptions {
   /**
    * Context Fields to add at the start of the request, so they are on every line of it,
    * `request.start` included. Runs before the handlers, so it sees the request but not what
-   * later middleware sets. `requestId` and `cfRay` cannot be replaced. When it throws, the
-   * request is logged without these fields and one WARN is written.
+   * later middleware sets. Must be synchronous. `requestId` and `cfRay` cannot be replaced.
+   * When it throws or returns anything but a plain object or `undefined` (a Promise, for
+   * example), the request is logged without these fields and one WARN is written.
    */
   fields?: (c: Context) => LogFields | undefined
   /**
    * Fields to add to `request.end` only. Runs after the handlers, so it sees `c.var` values
-   * they set (an authenticated user ID, for example). It cannot replace `method`, `path`,
-   * `route`, `statusCode`, `duration` or `err`. When it throws, `request.end` is written
+   * they set (an authenticated user ID, for example). Must be synchronous. It cannot replace
+   * `requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration` or `err`. When it
+   * throws or returns anything but a plain object or `undefined`, `request.end` is written
    * without these fields and one WARN is written.
    */
   endFields?: (c: Context) => LogFields | undefined
@@ -91,7 +93,11 @@ export interface UseLoggerOptions {
 
 /**
  * The default `level` of `request.end`: `error` when Hono caught an error or the status is
- * 5xx, `warn` for 4xx, `info` otherwise.
+ * 5xx, `warn` for 4xx, `info` otherwise. Call it from your own `level` to change one case.
+ *
+ * @param {number} statusCode - The final response status (`c.res.status`).
+ * @param {Error | undefined} err - The error Hono caught (`c.error`), if any.
+ * @returns {LogLevel} The level `request.end` is written at.
  */
 export function defaultRequestEndLevel(statusCode: number, err: Error | undefined): LogLevel {
   return err || statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
@@ -115,43 +121,87 @@ const HOOK_FAILURE: Record<Hook, string> = {
 }
 
 /**
- * Reports an option hook that threw or returned an unknown level: one WARN per hook per
+ * Reports an option hook that threw or returned something unusable: one WARN per hook per
  * `useLogger()` call, so a hook that fails on every request does not double the log volume.
  */
 function hookFailureReporter() {
   const reported = new Set<Hook>()
-  return (logger: Logger, hook: Hook, details: Record<string, unknown>): void => {
+  return (logger: Logger, hook: Hook, failure: HookFailure): void => {
     if (reported.has(hook)) return
     reported.add(hook)
-    logger.warn({ hook, ...details }, HOOK_FAILURE[hook])
+    logger.warn({ hook, ...failure }, HOOK_FAILURE[hook])
   }
 }
 
-type Attempt<R> = { ok: true; value: R } | { ok: false; err: unknown }
+/** Why a hook's result was not used: what it threw, or a description of what it returned. */
+type HookFailure = { err: unknown } | { returned: string }
 
-/** Runs an option hook, turning a throw into a value so it never reaches the app. */
-function attempt<R>(fn: () => R): Attempt<R> {
+type HookResult<R> = { value?: R; failure?: HookFailure }
+
+/**
+ * Calls an option hook. A throw, or a value `accepts` rejects, becomes a `failure` instead of
+ * reaching the app; the hook's result is then not used.
+ */
+function callHook<R>(fn: () => unknown, accepts: (value: unknown) => value is R): HookResult<R> {
+  let value: unknown
   try {
-    return { ok: true, value: fn() }
+    value = fn()
   } catch (err) {
-    return { ok: false, err }
+    return { failure: { err } }
   }
+  return accepts(value) ? { value } : { failure: { returned: describe(value) } }
+}
+
+function describe(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  if (typeof (value as { then?: unknown } | undefined)?.then === 'function') return 'Promise'
+  return typeof value
+}
+
+/** A synchronous `fields` / `endFields` result: a plain object, or nothing. */
+function isFields(value: unknown): value is LogFields | undefined {
+  if (value === undefined) return true
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  return typeof (value as { then?: unknown }).then !== 'function'
+}
+
+function isLevel(value: unknown): value is LogLevel {
+  return LOG_LEVELS.has(value)
+}
+
+/** `fields` without the keys `useLogger` owns, which the hook must not replace. */
+function withoutOwnFields(fields: LogFields | undefined): LogFields {
+  const rest = { ...fields }
+  delete rest.requestId
+  delete rest.cfRay
+  return rest
 }
 
 /**
- * The pattern of the endpoint a request was routed to, read when `useLogger` runs.
+ * The endpoint pattern a request is expected to reach, read when `useLogger` runs.
  *
  * Of the routes matched after `useLogger` itself, the first one registered for a method
- * (`app.get`, `app.post`, `app.on`, ...; `app.use` and `app.all` register for every method) is
- * the endpoint. A catch-all registered after it does not replace it, and a middleware that
- * answers before it runs (an auth check returning 401) does not either. When no such route
- * matched, the last matched route's pattern is used: an `app.all` handler's, or a middleware's
- * (`/*`) for a request no handler matched.
+ * (`app.get`, `app.post`, `app.on`, ...; `app.use` and `app.all` register for every method).
+ * A catch-all registered after it does not replace it, and a middleware that answers before it
+ * runs (an auth check returning 401) does not either. When no such route matched, the last
+ * matched one: an `app.all` handler, or a middleware (`/*`) for a request no handler matched.
  */
-function routeOf(c: Context): string {
+function expectedRoute(c: Context): string {
   const routes = matchedRoutes(c).slice(c.req.routeIndex + 1)
   const route = routes.find((r) => r.method !== 'ALL') ?? routes.at(-1)
   return route?.path ?? routePath(c)
+}
+
+/**
+ * The endpoint pattern for `request.end`: the route that answered, when it was registered for a
+ * method, so a method-registered middleware ahead of the handler (`app.get('*', cache())`) does
+ * not hide it. Otherwise the route `expectedRoute` found when the request arrived.
+ */
+function answeredRoute(c: Context, expected: string): string {
+  const answered = matchedRoutes(c)[c.req.routeIndex]
+  return answered && answered.method !== 'ALL' ? answered.path : expected
 }
 
 /** The `include` details of a request; a detail the request does not have is left out. */
@@ -283,19 +333,18 @@ export function useLogger<T extends LogFields = LogFields>(
     const method = c.req.method
     // The pathname only: a query string often carries tokens and personal data.
     const path = new URL(c.req.url).pathname
-    // Known before the handler runs, so request.start has it too.
-    const route = routeOf(c)
+    const startRoute = expectedRoute(c)
     const details = requestDetails(c, include)
-    const appFields = fields && attempt(() => fields(c))
+    const appFields = fields ? callHook(() => fields(c), isFields) : undefined
+    const ownFields: LogFields = {
+      requestId,
+      ...(cfRay !== undefined && matches(DEFAULT_REQUEST_ID_PATTERN, cfRay) && { cfRay }),
+    }
 
     const contextOptions = {
       logger: rootLogger,
       ...extractCarrier((name) => c.req.header(name)),
-      fields: {
-        ...(appFields?.ok && appFields.value),
-        requestId,
-        ...(cfRay !== undefined && matches(DEFAULT_REQUEST_ID_PATTERN, cfRay) && { cfRay }),
-      },
+      fields: { ...appFields?.value, ...ownFields },
     }
     await runWithLogger(contextOptions, async () => {
       const logger = getLogger<T>()
@@ -304,9 +353,12 @@ export function useLogger<T extends LogFields = LogFields>(
       c.set('requestId' as never, requestId as never)
       c.set('traceId' as never, trace.traceId as never)
 
-      if (appFields && !appFields.ok) reportHookFailure(logger, 'fields', { err: appFields.err })
+      if (appFields?.failure) reportHookFailure(logger, 'fields', appFields.failure)
       if (requestStart) {
-        logger.info({ ...details, method, path, route }, `request.start ${method} ${path}`)
+        logger.info(
+          { ...details, method, path, route: startRoute },
+          `request.start ${method} ${path}`,
+        )
       }
 
       const start = Date.now()
@@ -316,22 +368,21 @@ export function useLogger<T extends LogFields = LogFields>(
       const statusCode = c.res.status
       const err = c.error
 
-      const extra = endFields && attempt(() => endFields(c))
-      if (extra && !extra.ok) reportHookFailure(logger, 'endFields', { err: extra.err })
+      const endExtra = endFields ? callHook(() => endFields(c), isFields) : undefined
+      if (endExtra?.failure) reportHookFailure(logger, 'endFields', endExtra.failure)
 
-      let endLevel = defaultRequestEndLevel(statusCode, err)
-      const picked = level && attempt(() => level(statusCode, err, c))
-      if (picked && !picked.ok) reportHookFailure(logger, 'level', { err: picked.err })
-      else if (picked && LOG_LEVELS.has(picked.value)) endLevel = picked.value
-      else if (picked) reportHookFailure(logger, 'level', { returned: String(picked.value) })
+      const pickedLevel = level ? callHook(() => level(statusCode, err, c), isLevel) : undefined
+      if (pickedLevel?.failure) reportHookFailure(logger, 'level', pickedLevel.failure)
+      const endLevel = pickedLevel?.value ?? defaultRequestEndLevel(statusCode, err)
 
       logger[endLevel](
         {
-          ...(extra?.ok && extra.value),
+          ...withoutOwnFields(endExtra?.value),
+          ...ownFields,
           ...details,
           method,
           path,
-          route,
+          route: answeredRoute(c, startRoute),
           statusCode,
           duration,
           ...(err !== undefined && { err }),
