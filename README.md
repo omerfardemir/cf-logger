@@ -96,6 +96,12 @@ Changes to the Logger Options read from env:
 - An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw.
 - `LOG_LEVEL: "SILENT"` (any level name not in lowercase) falls back to `'info'` with one `WARN`; 0.0.1 passed it on and threw. `"silent"` still mutes all logs, as in 0.0.1.
 
+- The env helpers read two new vars, `LOG_SPAN_LEVEL` and `LOG_SPAN_SLOW_MS`, as the Span Defaults (see [Span Logging](#span-logging)). An invalid value is ignored with one `WARN`.
+
+Changes to Spans:
+
+- The callback of `withSpan()` and `traced()` now receives the Span handle (`{ set }`) as its first argument. A function reference whose first parameter is optional (`async function run(dryRun = false)`, passed as `withSpan('op', run)`) now receives the handle instead of `undefined`; wrap it, `withSpan('op', () => run())`. Zero-argument callbacks are unchanged.
+
 Changes to Traced Sessions (`loggercf/workers`):
 
 - `traced` and `logger` are no longer RPC members of a Traced Session (a `TracedSession` subclass, `tracedWorker`'s, or `withLogging({ session: true })`'s). In 0.0.1 a caller holding a session stub could call `session.traced(...)` or read `session.logger`; now both fail as missing methods. `this.traced(fn, op)` and `this.logger` inside a subclass work as before.
@@ -988,7 +994,7 @@ Wrapping hot paths (each query, each cache read) in Spans multiplies the log vol
 | ------------------------ | --------------------------------------------------------------- | ----------------------------------------------------- |
 | OK, no `slowMs`          | `span.end` at `level`                                           | nothing                                               |
 | OK, faster than `slowMs` | `span.end` at `level`                                           | nothing                                               |
-| OK, `slowMs` or slower   | `span.end` at `WARN`                                            | nothing                                               |
+| OK, `slowMs` or slower   | `span.end` at `WARN`, or at `level` when that is more severe    | nothing                                               |
 | Throws or rejects        | `span.end` at `ERROR` with `err`, whatever `level` and `slowMs` | `<operation> failed` at `ERROR` with `err`, no timing |
 
 A fast Span is never dropped: it is written at `level`. To keep fast Spans out of the log, give them `level: 'debug'` and let the logger's level filter them:
@@ -1014,7 +1020,9 @@ await withSpan('payment.charge', () => charge(), { level: 'info' }) // INFO, WAR
 
 The Workers helpers build their Root Logger from env, so there the Span Defaults come from `LOG_SPAN_LEVEL` and `LOG_SPAN_SLOW_MS` (see [Cloudflare Worker Requirements](#cloudflare-worker-requirements)). They apply to every Span in that Root Logger's Logging Contexts: `withSpan`, `traced()`, `withLogging`'s method Spans, `span.end scheduled`, a queue message's or Workflow run's Span, `tracedStep`, and `tracedFetch` with `spans: true`. A `TracedEntrypoint` can set them in code from its `[TracedEntrypoint.loggerOptions]` hook (`{ ...loggerOptionsFromEnv(this.env), spans: { slowMs: 500 } }`). `withLogging`'s method Spans and the handler helpers take no per-call options: the method or handler is the Span, so there is no call to pass them to. `tracedStep` keeps `step.do`'s exact arguments, so it takes none either.
 
-A Root Logger from `createLogger` keeps its Span Defaults in its `.child()` loggers and in every Logging Context it opens. A hand-written `Logger` has none, so its Spans use the built-in ones (`'info'`, no Slow Threshold).
+A Root Logger from `createLogger` keeps its Span Defaults in its `.child()` loggers and in every Logging Context it opens. A hand-written `Logger` has none, so its Spans use the built-in ones (`'info'`, no Slow Threshold). Neither does `getLogger()` called outside every Logging Context (it returns a forwarder, not the Root Logger), so `runWithLogger({ logger: getLogger() })` there gets the built-in defaults; pass the Root Logger itself instead.
+
+In Workers, `Date.now()` advances only across I/O, so a Span that does only synchronous CPU work measures `0` ms and never reaches its Slow Threshold.
 
 ### Span Fields
 

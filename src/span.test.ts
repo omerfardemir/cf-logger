@@ -209,6 +209,7 @@ describe('Span Defaults (createLogger spans)', () => {
       withSpan('fast', () => elapse(10))
       withSpan('slow', () => elapse(100))
       withSpan('level.override', () => elapse(10), { level: 'info' })
+      withSpan('level.override.slow', () => elapse(150), { level: 'info' })
       withSpan('slow.override', () => elapse(150), { slowMs: 200 })
       withSpan('slow.off', () => elapse(1e6), { slowMs: Infinity })
     })
@@ -217,6 +218,7 @@ describe('Span Defaults (createLogger spans)', () => {
       ['span.end fast', 'DEBUG'],
       ['span.end slow', 'WARN'],
       ['span.end level.override', 'INFO'],
+      ['span.end level.override.slow', 'WARN'],
       ['span.end slow.override', 'DEBUG'],
       ['span.end slow.off', 'DEBUG'],
     ])
@@ -235,13 +237,15 @@ describe('Span Defaults (createLogger spans)', () => {
 
   it('are kept by .child() loggers, nested Spans, and Spans in a child context', () => {
     const entries = _captureEntries()
-    const logger = allLevels({ level: 'debug' }).child({ region: 'eu' })
+    const logger = allLevels({ level: 'debug', slowMs: 100 }).child({ region: 'eu' })
     runWithLogger({ logger, traceparent: SAMPLED }, () => {
       withSpan('outer', () => withSpan('inner', () => 1))
+      withSpan('slow', () => elapse(100))
     })
     expect(entries.map((e) => [e.message, e.level, e.region])).toEqual([
       ['span.end inner', 'DEBUG', 'eu'],
       ['span.end outer', 'DEBUG', 'eu'],
+      ['span.end slow', 'WARN', 'eu'],
     ])
   })
 
@@ -317,6 +321,26 @@ describe('Span Fields', () => {
       'span.end cache.read',
       'after span',
     ])
+  })
+
+  it('concurrent sibling Spans do not see each other’s span.set() fields', async () => {
+    const entries = _captureEntries()
+    await runWithLogger({ logger: allLevels(), traceparent: SAMPLED }, () =>
+      Promise.all(
+        ['a', 'b'].map((op) =>
+          withSpan(op, async (span) => {
+            await Promise.resolve()
+            span.set({ [op]: true })
+            await Promise.resolve()
+          }),
+        ),
+      ),
+    )
+    const byOp = Object.fromEntries(entries.map((e) => [e.message, e]))
+    expect(byOp['span.end a']).toMatchObject({ a: true })
+    expect(byOp['span.end a']).not.toHaveProperty('b')
+    expect(byOp['span.end b']).toMatchObject({ b: true })
+    expect(byOp['span.end b']).not.toHaveProperty('a')
   })
 
   it('a later span.set() wins over an earlier one, and over fields', () => {

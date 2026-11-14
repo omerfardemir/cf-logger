@@ -129,6 +129,11 @@ const event = (payload: unknown = {}, instanceId = 'inst-1') => ({
 /** A step callback that logs nothing. */
 const plainCallback = async () => 'plain'
 
+/** A handler whose first parameter is optional: a wrapper that passes it an argument changes what it does. */
+async function handle(dryRun = false) {
+  return dryRun
+}
+
 beforeEach(() => {
   vi.restoreAllMocks()
   _reset()
@@ -283,6 +288,11 @@ describe('withScheduled', () => {
 describe('withQueueMessage', () => {
   beforeEach(() => {
     Object.assign(workersEnv, ENV)
+  })
+
+  it('calls fn with no arguments, as without the wrapper', async () => {
+    const m = queueMessage({ n: 1 })
+    await expect(withQueueMessage(batch(m), m, handle)).resolves.toBe(false)
   })
 
   it('opens one Logging Context per message with queue, messageId and attempts', async () => {

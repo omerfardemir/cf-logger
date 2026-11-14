@@ -20,7 +20,7 @@ Imports come from exactly three entry points:
 - **Logging Context**: the scope of one unit of work (HTTP request, RPC call, queue message, cron run). Holds one trace, its Context Fields, and the logger every line is written through. Every line logged inside it gets `traceId`, `spanId` and `parentSpanId` automatically.
 - **Context Fields**: per-unit-of-work data (`requestId`, `userId`, ...) on every line in a Logging Context.
 - **Trace Carrier**: `{ traceparent, tracestate? }`, the wire form of a trace.
-- **Span**: a named, timed sub-operation, logged once as `span.end` when the trace is sampled: at its `level` (default `info`), or at `WARN` once it reaches its Slow Threshold `slowMs`. A Span that throws is always logged at `ERROR`: as its `span.end`, or for an unsampled trace as one `<operation> failed` line.
+- **Span**: a named, timed sub-operation, logged once as `span.end` when the trace is sampled: at its `level` (default `info`), or at `WARN` once it reaches its Slow Threshold `slowMs` (at its `level` instead, when that is more severe). A Span that throws is always logged at `ERROR`: as its `span.end`, or for an unsampled trace as one `<operation> failed` line.
 - **Span Fields**: fields that go on one Span's `span.end` line only (`fields` option, `span.set()`), never on other lines or into the Logging Context.
 - **Traced Session**: the RPC target a service binding's `session()` returns. Every method on it continues the caller's trace.
 
@@ -422,7 +422,7 @@ export async function readCached(key: string): Promise<string | null> {
 - `withLogging` method Spans, the handler helpers' Spans and `tracedStep` take no per-call options: only the defaults apply.
 - Span Fields never reach other lines: not the work's own lines, not a nested Span, not the unsampled `<operation> failed` line. For fields on every line, use `setLoggerContext`.
 - `span.set()` after the Span ended, or on an unsampled trace, does nothing. It never throws.
-- Span Fields cannot set `span` or `err` (the line's own keys): they are dropped, with one `WARN` naming them. Values for the moved keys (`message`, `level`, `traceId`, ...) land in `args`, as for any log call.
+- Span Fields cannot set `span` or `err` (the Span Owned Keys): they are dropped, with one `WARN` naming them. Values for the moved keys (`message`, `level`, `traceId`, ...) land in `args`, as for any log call.
 
 ### Log call shape
 

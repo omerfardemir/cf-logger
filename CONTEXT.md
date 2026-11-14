@@ -27,7 +27,7 @@ The keys the Hono middleware writes itself on the Request Lines and as Context F
 _Avoid_: protected keys, own keys, reserved keys
 
 **Root Logger**:
-The logger built once per process or isolate from Logger Options, carrying only per-process data (`service`, `environment`, `version`). It never holds per-unit-of-work data, because an isolate serves many requests concurrently.
+The logger built once per process or isolate from Logger Options, carrying only per-process data (`service`, `environment`, `version`) and its Span Defaults. It never holds per-unit-of-work data, because an isolate serves many requests concurrently.
 _Avoid_: base logger, factory
 
 **Default Logger**:
@@ -81,7 +81,7 @@ The wire form of a Trace Context: a `traceparent` value plus an optional `traces
 _Avoid_: trace headers, propagation context
 
 **Span**:
-A named, timed operation within a Logging Context, reported once on completion with its duration and status, as its `span.end` line: at its level when it succeeds (`info` unless its options or the Span Defaults say otherwise), at `WARN` once it reaches its Slow Threshold, and always at `ERROR` when it throws. For an unsampled trace only a failure is reported: one `<operation> failed` line at `ERROR`, with no timing.
+A named, timed operation within a Logging Context, reported once on completion with its duration and status, as its `span.end` line: at its level when it succeeds (`info` unless its options or the Span Defaults say otherwise), at `WARN` once it reaches its Slow Threshold (or at its level, when that is more severe), and always at `ERROR` when it throws. For an unsampled trace only a failure is reported: one `<operation> failed` line at `ERROR`, with no timing.
 
 **Slow Threshold**:
 A Span's `slowMs`: the duration, in milliseconds, at or above which a Span that succeeds writes its `span.end` at `WARN` (or at its level, when that is more severe). A faster Span is still written, at its level; to keep fast Spans out of the log, give them a level the logger filters.
