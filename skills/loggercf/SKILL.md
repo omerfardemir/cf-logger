@@ -188,7 +188,7 @@ app.use(async (c, next) => {
 })
 ```
 
-`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, returns a Promise or an unknown level, or returns an object that throws when read) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`. Keys `useLogger` owns (`requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration`, `err`, ...) are dropped from a `fields`/`endFields` result, with one WARN listing them in `droppedKeys`: pick other names.
+`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, returns a Promise or an unknown level, or returns an object that throws when read) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`. Keys `useLogger` owns, its Owned Keys (`requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration`, `err`, ...) are dropped from a `fields`/`endFields` result, with one WARN listing them in `droppedKeys`: pick other names. For a streamed body, `request.end` is written when the handler returns the `Response`, so `duration` leaves out the streaming and an error while streaming is not on it: log that from the stream's error callback.
 
 ### Context helpers need a Logging Context
 
