@@ -236,6 +236,30 @@ describe('tracedFetcher', () => {
     expect(forwarded.bodyUsed).toBe(plainSource.bodyUsed)
   })
 
+  it("fetch(url, request): keeps workerd's fetcher, so the global fetch reaches the same destination", async () => {
+    const via = { fetch: async () => new Response('via') }
+    const routed = Object.defineProperty(new Request('https://old/api'), 'fetcher', { value: via })
+    const unrouted = Object.defineProperty(new Request('https://old/api'), 'fetcher', {
+      value: null,
+    })
+    const calls: unknown[][] = []
+    const binding = {
+      fetch: vi.fn(async (...a: unknown[]) => {
+        calls.push(a)
+        return new Response('ok')
+      }),
+    }
+
+    await inContext(async () => {
+      await tracedFetcher(binding).fetch('https://svc/api', routed)
+      await tracedFetcher(binding).fetch('https://svc/api', unrouted)
+    })
+
+    expect((calls[0][1] as { fetcher?: unknown }).fetcher).toBe(via)
+    // `fetcher: null` means no fetcher: it is left out, like any member that is not set.
+    expect(calls[1][1]).not.toHaveProperty('fetcher')
+  })
+
   it('outside a Logging Context, passes the same arguments through and returns the same promise', async () => {
     const response = new Response('ok')
     const promise = Promise.resolve(response)

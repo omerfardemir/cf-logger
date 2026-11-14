@@ -46,6 +46,10 @@ const SPAN_OPERATION = 'fetch'
  * The `RequestInit` members `fetch(url, request)` reads from a `Request` used as `init`
  * (besides `headers`, which are rebuilt). A member the runtime's `Request` does not have is
  * `undefined` there and is left out, as `fetch` itself would.
+ *
+ * `fetcher` is workerd's: a Request built with a `fetcher` is sent through it by the global
+ * `fetch`, so `tracedFetch(url, request)` keeps it to reach the same destination. Through a
+ * binding it makes no difference: the binding is used either way.
  */
 const REQUEST_INIT_KEYS = [
   'method',
@@ -62,6 +66,7 @@ const REQUEST_INIT_KEYS = [
   'referrer',
   'referrerPolicy',
   'duplex',
+  'fetcher',
 ] as const
 
 /**
@@ -100,7 +105,9 @@ function initFromRequest(request: Request, headers: Headers): RequestInit {
   const init: Record<string, unknown> = {}
   for (const key of REQUEST_INIT_KEYS) {
     const value = source[key]
-    if (value !== undefined) init[key] = value
+    // workerd's Request has `fetcher: null` when it has none, which is the same as no fetcher.
+    if (value === undefined || (key === 'fetcher' && value === null)) continue
+    init[key] = value
   }
   // Node requires `duplex` with a stream body, and a Request's body is always a stream.
   if (init.body != null && init.duplex === undefined) init.duplex = 'half'
