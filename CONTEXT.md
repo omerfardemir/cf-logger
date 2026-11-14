@@ -23,7 +23,7 @@ The logger built once per process or isolate from Logger Options, carrying only 
 _Avoid_: base logger, factory
 
 **Default Logger**:
-The Root Logger (or a `.child()` of one with per-process fields only) an isolate registers for code that runs outside every Logging Context (module scope, plain RPC methods, `scheduled`, shared packages); `getLogger()` writes through it there. Set with `setDefaultLogger`, or registered by `useLogger`, `TracedEntrypoint`, `tracedWorker` or `defaultLoggerFromEnv` the first time they see a Root Logger, unless one is already set. It carries no Context Fields, so no unit of work's data reaches another through it. `getLogger()` outside a Logging Context resolves it when each line is written, so a logger kept at module scope before registration still uses it.
+The Root Logger (or a `.child()` of one with per-process fields only) an isolate registers for code that runs outside every Logging Context (module scope, plain RPC methods, `scheduled`, shared packages); `getLogger()` writes through it there. Set with `setDefaultLogger`, or registered by `useLogger`, `TracedEntrypoint`, `tracedWorker`, `withLogging` or `defaultLoggerFromEnv` the first time they see a Root Logger, unless one is already set. It carries no Context Fields, so no unit of work's data reaches another through it. `getLogger()` outside a Logging Context resolves it when each line is written, so a logger kept at module scope before registration still uses it.
 _Avoid_: global logger, fallback logger
 
 **Logger Options**:
