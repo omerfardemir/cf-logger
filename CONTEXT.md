@@ -19,7 +19,7 @@ The Context Field (`requestId`) that names one HTTP request in its Logging Conte
 _Avoid_: correlation ID, trace ID (that is the Trace Context's)
 
 **Request Lines**:
-The lines the Hono middleware writes about one HTTP request itself: an optional `request.start`, and one `request.end` that records the outcome (`statusCode`, `duration`, `route`, and `err` when Hono caught an error) at a level chosen from it. `route` is the matched route pattern, not the concrete path; the query string is never on them.
+The lines the Hono middleware writes about one HTTP request itself: an optional `request.start`, and one `request.end` that records the outcome (`statusCode`, `duration`, `route`, and `err` when Hono caught an error) at a level chosen from it. `route` is the matched route pattern, not the concrete path; the query string is never on them. For a throw that escapes the middleware, the response is decided above it (an outer middleware, Hono calling `onError` again, or the runtime), so `request.end` records an assumed `statusCode: 500`, marked `statusCodeAssumed: true`.
 _Avoid_: access log, `request.error` (folded into `request.end`)
 
 **Root Logger**:

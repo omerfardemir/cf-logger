@@ -137,7 +137,7 @@ export default app
 
 ### Request lines in Hono
 
-`useLogger` writes `request.start` and one `request.end` per request. `request.end` has `method`, `path` (never the query string), `route` (the matched pattern, such as `/users/:id`; group by it, not by `path`), `statusCode`, `duration`, and `err` when Hono caught an error. There is no `request.error` line: find failed requests by `err` or by the level of `request.end`. That level is by default `error` for a caught error or a 5xx, `warn` for a 4xx and `info` otherwise; the `level` option changes it, so check the app's `useLogger` options before relying on it. Use the options instead of logging your own per-request summary line:
+`useLogger` writes `request.start` and one `request.end` per request. `request.end` has `method`, `path` (never the query string), `route` (the matched pattern, such as `/users/:id`; group by it, not by `path`), `statusCode`, `duration`, and `err` when Hono caught an error. A throw that escapes `useLogger` (a non-`Error` value, or an `onError` that throws) is rethrown unchanged after a `request.end` at `error` with `statusCode: 500` and `statusCodeAssumed: true`: that 500 is a guess, because an outer middleware or the runtime sends the real response, and Hono hands an `Error` thrown by `onError` back to `onError` (an `HTTPException(502)` it throws becomes a 502). Don't read `statusCode` as the sent status on a line with `statusCodeAssumed`. There is no `request.error` line: find failed requests by `err` or by the level of `request.end`. That level is by default `error` for a caught error or a 5xx, `warn` for a 4xx and `info` otherwise; the `level` option changes it, so check the app's `useLogger` options before relying on it. Use the options instead of logging your own per-request summary line:
 
 ```ts
 import { Hono } from 'hono'
@@ -165,7 +165,7 @@ app.use(async (c, next) => {
 })
 ```
 
-`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, or returns a Promise or an unknown level) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`.
+`fields` and `endFields` must be synchronous and return a plain object: an `async` one is a failure. A `fields`, `endFields` or `level` option that fails (throws, returns a Promise or an unknown level, or returns an object that throws when read) does not break the request or drop `request.end`: the line is written without it (or at the default level), with one WARN per option naming it in `hook`. Keys `useLogger` owns (`requestId`, `cfRay`, `method`, `path`, `route`, `statusCode`, `duration`, `err`, ...) are dropped from a `fields`/`endFields` result, with one WARN listing them in `droppedKeys`: pick other names.
 
 ### Context helpers need a Logging Context
 
