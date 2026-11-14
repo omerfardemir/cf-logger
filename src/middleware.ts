@@ -2,6 +2,7 @@ import type { Context, MiddlewareHandler } from 'hono'
 import { matchedRoutes, routePath } from 'hono/route'
 import type { LogFields, LogLevel, Logger } from './types'
 import { extractCarrier, injectCarrier } from './trace'
+import { REQUEST_ID_HEADER, SAFE_HEADER_VALUE } from './headers'
 import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './logger'
 import { registerDefaultLogger } from './logger'
 
@@ -43,8 +44,8 @@ export interface RequestIdOptions {
   /**
    * `false` always generates the ID: every source in `from` and `c.var.requestId` are ignored,
    * and the `cf-ray` header is not recorded as `cfRay`, so no request header chooses the request
-   * ID or adds `cfRay`. Trace headers (`traceparent`, `tracestate`) are still continued.
-   * Defaults to `true`.
+   * ID or adds `cfRay`. An incoming Trace Carrier (`traceparent`, `tracestate`) is still
+   * continued. Defaults to `true`.
    */
   trustIncoming?: boolean
   /**
@@ -462,12 +463,6 @@ const DEFAULT_REQUEST_ID_PATTERN = /^[\w\-=:.]{1,128}$/
  */
 const CF_RAY_PATTERN = DEFAULT_REQUEST_ID_PATTERN
 
-/**
- * A value that can be echoed in a response header unchanged: printable ASCII with no leading or
- * trailing space (`Headers` would trim it, and the header and the log line would differ).
- */
-const SAFE_HEADER_VALUE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/
-
 const UNSAFE_GENERATED_ID_WARNING =
   'useLogger: requestId.generate threw or returned a value that is not a safe header value; using crypto.randomUUID()'
 
@@ -748,7 +743,7 @@ export function useLogger<T extends LogFields = LogFields>(
       )
       if (escaped) throw escaped.thrown
 
-      c.header('X-Request-Id', requestId)
+      c.header(REQUEST_ID_HEADER, requestId)
       c.header('X-Trace-Id', trace.traceId)
       injectCarrier(getTraceCarrier(), (name, value) => c.header(name, value))
     })
