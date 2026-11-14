@@ -498,13 +498,70 @@ describe('useLogger request ID', () => {
     expect(ctx.entries.filter((e) => e.level === 'WARN')).toHaveLength(0)
   })
 
-  it('writes the unsafe generated ID WARN the first time', async () => {
+  it("writes the unsafe generated ID WARN the first time, through the app's Root Logger", async () => {
     _resetMiddlewareWarnings()
     const ctx = requestIdApp({ requestId: { generate: () => 'x\ny' } })
     await requestIdOf(ctx)
     const warns = ctx.entries.filter((e) => e.level === 'WARN')
     expect(warns).toHaveLength(1)
     expect(String(warns[0]!.message)).toContain('requestId.generate')
+    expect(warns[0]!.service).toBe('test-mw')
+  })
+
+  it('falls back to a UUID with a WARN when generate throws, and still logs the request', async () => {
+    _resetMiddlewareWarnings()
+    const ctx = requestIdApp({
+      requestId: {
+        generate: () => {
+          throw new Error('boom')
+        },
+      },
+    })
+    expect(await requestIdOf(ctx)).toMatch(UUID_RE)
+    expect(ctx.entries.filter((e) => e.level === 'WARN')).toHaveLength(1)
+    expect(ctx.entries.some(messageStartsWith('request.start'))).toBe(true)
+  })
+
+  it('treats a validate that throws as a rejection', async () => {
+    const ctx = requestIdApp({
+      requestId: {
+        validate: () => {
+          throw new Error('boom')
+        },
+      },
+    })
+    expect(await requestIdOf(ctx, { 'X-Request-Id': 'r-1' })).toMatch(UUID_RE)
+    expect(ctx.entries.find(messageStartsWith('request.end'))!.requestIdRejected).toBe(true)
+  })
+
+  it('treats a from function that throws or returns a non-string as no value, not a rejection', async () => {
+    const sources = [
+      () => {
+        throw new Error('boom')
+      },
+      () => 42 as unknown as string,
+    ]
+    const ctx = requestIdApp({ requestId: { from: sources } })
+    expect(await requestIdOf(ctx)).toMatch(UUID_RE)
+    for (const entry of ctx.entries) expect(entry).not.toHaveProperty('requestIdRejected')
+  })
+
+  it('does not mark an empty X-Request-Id as rejected', async () => {
+    const ctx = requestIdApp()
+    expect(await requestIdOf(ctx, { 'X-Request-Id': '' })).toMatch(UUID_RE)
+    for (const entry of ctx.entries) expect(entry).not.toHaveProperty('requestIdRejected')
+  })
+
+  it('marks an app-set c.var.requestId that fails validation as rejected', async () => {
+    const ctx = requestIdApp(undefined, setRequestIdVar('bad id'))
+    expect(await requestIdOf(ctx)).toMatch(UUID_RE)
+    expect(ctx.entries.find(messageStartsWith('request.end'))!.requestIdRejected).toBe(true)
+  })
+
+  it('trustIncoming: false never marks requestIdRejected, even for a bad header', async () => {
+    const ctx = requestIdApp({ requestId: { trustIncoming: false } })
+    expect(await requestIdOf(ctx, { 'X-Request-Id': 'bad id' })).toMatch(UUID_RE)
+    for (const entry of ctx.entries) expect(entry).not.toHaveProperty('requestIdRejected')
   })
 
   it('uses a custom generate function, called once with the Hono context', async () => {

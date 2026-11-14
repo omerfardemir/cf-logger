@@ -268,9 +268,9 @@ Any client can send an `X-Request-Id`, so `useLogger` only reuses one that looks
 
 With `trustIncoming: false`, steps 1 and 2 are skipped and the ID is always generated.
 
-Every value from steps 1 and 2 must pass `requestId.validate`. The default accepts 1 to 128 characters of `A-Z a-z 0-9 _ - = : .` (`/^[\w\-=:.]{1,128}$/`), which covers UUIDs and `cf-ray` values. A value that fails, such as a 100 KB string or one with spaces or quotes, is skipped, so the line, `c.var.requestId` and the `X-Request-Id` response header carry the next valid value or a generated one. When a value was skipped, every line of the request also gets `requestIdRejected: true`, so you can tell "the client sent a bad ID" from "the client sent none". The rejected value itself is never logged.
+Every value from steps 1 and 2 must pass `requestId.validate`. The default accepts 1 to 128 characters of `A-Z a-z 0-9 _ - = : .` (`/^[\w\-=:.]{1,128}$/`), which covers UUIDs and `cf-ray` values. A value that fails, such as a 100 KB string or one with spaces or quotes, is skipped, so the line, `c.var.requestId` and the `X-Request-Id` response header carry the next valid value or a generated one. When a non-empty value was rejected (by the checks, or by a `validate` that throws), every line of the request also gets `requestIdRejected: true`, so you can tell "the client sent a bad ID" from "the client sent none". An empty value, or a source that returns nothing, a non-string or throws, counts as "none". The rejected value itself is never logged.
 
-Because the ID is echoed in the `X-Request-Id` response header, it must also be a safe header value (printable ASCII, no leading or trailing space) whatever `validate` says. The generated ID is not validated, but a `generate` result that is not a safe header value (for example `''` or a string with a newline) is replaced by `crypto.randomUUID()`, with one `WARN` per isolate. So the line, `c.var.requestId` and the response header always agree.
+Because the ID is echoed in the `X-Request-Id` response header, it must also be a safe header value (printable ASCII, no leading or trailing space) whatever `validate` says. The generated ID is not validated, but a `generate` that throws or returns a value that is not a safe header value (for example `''` or a string with a newline) is replaced by `crypto.randomUUID()`, with one `WARN` per isolate. So the line, `c.var.requestId` and the response header always agree.
 
 ```ts
 import { Hono } from 'hono'
@@ -285,7 +285,7 @@ app.use(
     requestId: {
       // a source is a header name (case-insensitive) or a function (c) => string | undefined
       from: ['cf-ray', 'x-request-id'], // prefer Cloudflare's Ray ID, then the client's header
-      trustIncoming: true, // false: always generate, read no client input
+      trustIncoming: true, // false: always generate; no header chooses the ID or adds cfRay (trace headers still apply)
       validate: /^[\w\-=:.]{1,128}$/, // or (id, c) => boolean; replaces the default, length cap included
       generate: () => crypto.randomUUID(),
     },

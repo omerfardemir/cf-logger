@@ -34,8 +34,9 @@ export interface RequestIdOptions {
   from?: RequestIdSource[]
   /**
    * `false` always generates the ID: every source in `from` and `c.var.requestId` are ignored,
-   * and the `cf-ray` header is not recorded as `cfRay`. No client input reaches the request ID,
-   * the log line or the response header. Defaults to `true`.
+   * and the `cf-ray` header is not recorded as `cfRay`, so no request header chooses the request
+   * ID or adds `cfRay`. Trace headers (`traceparent`, `tracestate`) are still continued.
+   * Defaults to `true`.
    */
   trustIncoming?: boolean
   /**
@@ -58,8 +59,11 @@ export interface UseLoggerOptions {
 /** The default `requestId.validate`. Accepts UUIDs and `cf-ray` values. */
 const DEFAULT_REQUEST_ID_PATTERN = /^[\w\-=:.]{1,128}$/
 
-/** The check a `cf-ray` header must pass to be recorded as `cfRay`. A custom `validate` doesn't apply. */
-const CF_RAY_PATTERN = /^[\w\-=:.]{1,128}$/
+/**
+ * The check a `cf-ray` header must pass to be recorded as `cfRay`: the default request ID check,
+ * whatever `validate` says.
+ */
+const CF_RAY_PATTERN = DEFAULT_REQUEST_ID_PATTERN
 
 /**
  * A value that can be echoed in a response header unchanged: printable ASCII with no leading or
@@ -68,7 +72,7 @@ const CF_RAY_PATTERN = /^[\w\-=:.]{1,128}$/
 const SAFE_HEADER_VALUE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/
 
 const UNSAFE_GENERATED_ID_WARNING =
-  'useLogger: requestId.generate returned a value that is not a safe header value; using crypto.randomUUID()'
+  'useLogger: requestId.generate threw or returned a value that is not a safe header value; using crypto.randomUUID()'
 
 /** Whether the unsafe-generated-ID warning has been written in this isolate. */
 let warnedUnsafeGeneratedId = false
@@ -76,16 +80,31 @@ let warnedUnsafeGeneratedId = false
 /**
  * Re-arm the one-time unsafe-generated-ID warning.
  *
+ * Not called from `logger.ts`'s `_reset()`, so the core entry never imports the Hono module.
+ *
  * @internal Test helper, not part of the public API.
  */
 export function _resetMiddlewareWarnings(): void {
   warnedUnsafeGeneratedId = false
 }
 
-/** The request ID `useLogger` chose, and whether an incoming value was rejected on the way. */
+/** What `useLogger` takes from the request for its Context Fields. */
 interface PickedRequestId {
+  /** The request ID: a valid incoming value, or a generated one. */
   id: string
+  /** Whether a non-empty incoming value was rejected on the way. */
   rejected: boolean
+  /** The `cf-ray` header, when incoming headers are trusted and it is well formed. */
+  cfRay?: string
+}
+
+/** Calls an app callback; a throw counts as "no usable value", never as a failed request. */
+function attempt<R>(fn: () => R): R | undefined {
+  try {
+    return fn()
+  } catch {
+    return undefined
+  }
 }
 
 const DEFAULT_REQUEST_ID_SOURCES: readonly RequestIdSource[] = ['x-request-id']
@@ -103,7 +122,9 @@ function matches(pattern: RegExp, value: string): boolean {
  * Builds the per-request request ID picker from the options, once per middleware.
  * Throws a `TypeError` for a header name in `from` that no request could carry.
  */
-function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => PickedRequestId {
+function requestIdPicker(
+  options: RequestIdOptions = {},
+): (c: Context, logger: Logger) => PickedRequestId {
   const {
     from = DEFAULT_REQUEST_ID_SOURCES,
     trustIncoming = true,
@@ -121,30 +142,41 @@ function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => Picked
     return (c) => c.req.header(source)
   })
   readers.push((c) => c.get('requestId' as never))
-  // Header names are still checked above, so a bad `from` fails at setup either way.
-  if (!trustIncoming) readers.length = 0
+  // The header names above are checked either way, so a bad `from` always fails at setup.
+  const sources = trustIncoming ? readers : []
 
   const accepts = typeof validate === 'function' ? validate : (id: string) => matches(validate, id)
 
-  const generateSafe = (c: Context): string => {
-    const id = generate(c)
+  const generateSafe = (c: Context, logger: Logger): string => {
+    const id = attempt(() => generate(c))
     if (typeof id === 'string' && SAFE_HEADER_VALUE.test(id)) return id
     if (!warnedUnsafeGeneratedId) {
       warnedUnsafeGeneratedId = true
-      getLogger().warn(UNSAFE_GENERATED_ID_WARNING)
+      logger.warn(UNSAFE_GENERATED_ID_WARNING)
     }
     return crypto.randomUUID()
   }
 
-  return (c) => {
+  const readCfRay = (c: Context): string | undefined => {
+    if (!trustIncoming) return undefined
+    const cfRay = c.req.header('cf-ray')
+    return cfRay !== undefined && matches(CF_RAY_PATTERN, cfRay) ? cfRay : undefined
+  }
+
+  return (c, logger) => {
+    const cfRay = readCfRay(c)
     let rejected = false
-    for (const read of readers) {
-      const id = read(c)
+    for (const read of sources) {
+      const id = attempt(() => read(c))
+      // No value (absent, empty, or a source that threw or returned a non-string) is not a rejection.
       if (typeof id !== 'string' || id === '') continue
-      if (SAFE_HEADER_VALUE.test(id) && accepts(id, c)) return { id, rejected }
+      // A `validate` that throws rejects the value.
+      if (SAFE_HEADER_VALUE.test(id) && attempt(() => accepts(id, c))) {
+        return { id, rejected, cfRay }
+      }
       rejected = true
     }
-    return { id: generateSafe(c), rejected }
+    return { id: generateSafe(c, logger), rejected, cfRay }
   }
 }
 
@@ -158,8 +190,9 @@ function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => Picked
  * Handles `X-Request-Id`, `X-Trace-Id`, `traceparent`, and `tracestate` headers:
  * - Continues the incoming trace, or starts a new one.
  * - Reuses a valid incoming request ID, otherwise generates one (see `RequestIdOptions`).
- * - Adds `requestId`, and `cfRay` when the `cf-ray` header is present, to the Context Fields
- *   so they appear on every log line.
+ * - Adds `requestId` (plus `requestIdRejected` when an incoming ID was rejected, and `cfRay`
+ *   when the `cf-ray` header is trusted and well formed) to the Context Fields, so they appear
+ *   on every log line.
  * - Logs `request.start` / `request.end` (and `request.error` when Hono caught one).
  * - Sets `c.var.logger`, `c.var.requestId`, `c.var.traceId` and the response headers.
  *
@@ -186,13 +219,11 @@ export function useLogger<T extends LogFields = LogFields>(
   options: UseLoggerOptions = {},
 ): MiddlewareHandler {
   const pickRequestId = requestIdPicker(options.requestId)
-  const trustIncoming = options.requestId?.trustIncoming ?? true
 
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
 
-    const { id: requestId, rejected } = pickRequestId(c)
-    const cfRay = trustIncoming ? c.req.header('cf-ray') : undefined
+    const { id: requestId, rejected, cfRay } = pickRequestId(c, rootLogger as Logger)
     const method = c.req.method
     const path = new URL(c.req.url).pathname
 
@@ -202,7 +233,7 @@ export function useLogger<T extends LogFields = LogFields>(
       fields: {
         requestId,
         ...(rejected && { requestIdRejected: true }),
-        ...(cfRay !== undefined && matches(CF_RAY_PATTERN, cfRay) && { cfRay }),
+        ...(cfRay !== undefined && { cfRay }),
       },
     }
     await runWithLogger(contextOptions, async () => {
