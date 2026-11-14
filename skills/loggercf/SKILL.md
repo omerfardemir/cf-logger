@@ -428,7 +428,7 @@ logger.info('loaded order %s', order) // message stays 'loaded order %s', order'
 
 `%s` with an `Error` prints its message and still routes the `Error` to `err`: `logger.error('failed: %s', e)` gives `failed: boom`, with `err` and its stack. `%s` with a `Date` prints its ISO string.
 
-`traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call's objects can't set them, or the other moved keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`): an object's values for those keys land in `args` instead. Logger bindings (`createLogger`, `.child()`) and Context Fields can't set `time`, `level`, `message`, `errors` or `args` either; their values for those keys land in `args` too. An object's `err`, and a string `message` when the call has no other message, are used while still unset. To read the trace IDs, call `getTraceContext()`.
+`traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call's objects can't set them, or the other moved keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`, `err`): an object's values for those keys land in `args` instead. Logger bindings (`createLogger`, `.child()`) and Context Fields can't set `time`, `level`, `message`, `errors` or `args` either; their values for those keys land in `args` too. An object's `err`, and a string `message` when the call has no other message, are used while still unset. To read the trace IDs, call `getTraceContext()`.
 
 ## Wrangler setup
 

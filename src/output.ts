@@ -498,7 +498,8 @@ const MAX_REWRITTEN_VALUES = 10_000
  * How many characters of keys and strings one line may write again inside
  * repeats, before a repeat is `"[Repeated]"`: a shared object holding a long
  * string costs its length, not one value. A long string (see `LONG_STRING`)
- * written again outside a repeat costs its length too.
+ * written again outside a repeat costs its length too, in the message and
+ * in the record.
  */
 const MAX_REWRITTEN_CHARS = 64 * 1024
 
@@ -511,7 +512,8 @@ const LONG_STRING = 1024
 
 /**
  * What one line may still write again inside repeats. One per line, shared
- * by its message's `%j` / `%o` / `%O` placeholders and the walk of its record.
+ * by its message (its `%j` / `%o` / `%O` placeholders, and the long strings
+ * it holds again) and the walk of its record.
  */
 export interface Budget {
   /** Values left (see `MAX_REWRITTEN_VALUES`). */
@@ -657,7 +659,7 @@ function standIn(walk: Walk, text: string): string {
  * function `[Function: name]`, a symbol `Symbol(description)` (boxed or
  * not); a real cycle is `"[Circular]"` (a `toJSON` result that refers back to
  * its object included); a repeated object (one with a `toJSON` included), or
- * a repeated long string, is written again within a budget per line (see `MAX_REWRITTEN_VALUES`), then
+ * a repeated long string, is written again within a budget per line (see `MAX_REWRITTEN_VALUES` and `MAX_REWRITTEN_CHARS`), then
  * is `"[Repeated]"`; a getter or a `toJSON` that throws is `unserializable()`
  * for that value only.
  *
@@ -758,7 +760,9 @@ const BOXES: readonly [object, (this: unknown) => unknown][] = [
  * told by its brand, as `JSON.stringify` tells it. Only an object that
  * inherits from that primitive's prototype is checked, since a failed check
  * throws, which is slow; a boxed primitive moved to another prototype
- * (`Object.setPrototypeOf`) is written as an object.
+ * (`Object.setPrototypeOf`) is written as an object here. The fast path of
+ * `stringifyRecord()` writes it as `JSON.stringify` does, through that
+ * prototype's methods (`null` for a Number moved to `{}`).
  *
  * @param {object} object - Any object that is not a plain object or an array.
  * @returns {{ value: unknown } | undefined} The primitive, or `undefined` when `object` is not boxed.
