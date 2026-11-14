@@ -113,7 +113,7 @@ Context Fields do not cross RPC on their own. To carry them to another Worker, p
 
 ### Request ID in Hono
 
-`useLogger` reuses an incoming `X-Request-Id` only when it is 1 to 128 characters of `A-Z a-z 0-9 _ - = : .`; otherwise it falls back to `c.var.requestId` set by an earlier middleware, then generates a UUID. The chosen ID is on every line, in `c.var.requestId`, and in the `X-Request-Id` response header. When the request has a `cf-ray` header, every line also gets `cfRay`. Configure it with the second argument, not with your own header parsing:
+`useLogger` reuses an incoming `X-Request-Id` only when it is 1 to 128 characters of `A-Z a-z 0-9 _ - = : .`; otherwise it falls back to `c.var.requestId` set by an earlier middleware, then generates a UUID. The chosen ID is on every line, in `c.var.requestId`, and in the `X-Request-Id` response header. When an incoming ID was rejected, every line also gets `requestIdRejected: true` (never the rejected value). When the request has a `cf-ray` header, every line also gets `cfRay`; trust it only on requests straight from Cloudflare's edge, since a Worker calling over a service binding `fetch` can set any `cf-ray`. Configure it with the second argument, not with your own header parsing:
 
 ```ts
 import { Hono } from 'hono'
@@ -125,7 +125,7 @@ app.use(
   useLogger(createLogger({ service: 'api' }), {
     requestId: {
       from: ['cf-ray', 'x-request-id'], // header names or (c) => string | undefined, first valid wins
-      trustIncoming: true, // false: ignore `from`; c.var.requestId from your own middleware still applies
+      trustIncoming: true, // false: always generate; ignores `from`, c.var.requestId and cf-ray
       // validate: RegExp | (id, c) => boolean, replaces the default check and its 128 cap
       // generate: (c) => string, used when no source is valid
     },

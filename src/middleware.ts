@@ -12,12 +12,18 @@ export type RequestIdSource = string | ((c: Context) => string | undefined)
 /**
  * How `useLogger` picks the request ID. The first valid value wins:
  *
- * 1. each source in `from`, in order (skipped entirely when `trustIncoming` is `false`),
+ * 1. each source in `from`, in order,
  * 2. `c.var.requestId`, when an earlier middleware set it,
  * 3. `generate(c)`.
  *
- * Every value from steps 1 and 2 must pass `validate`; one that fails is skipped.
- * The generated ID is used as is.
+ * With `trustIncoming: false`, steps 1 and 2 are skipped: the ID is always generated.
+ *
+ * Every value from steps 1 and 2 must pass `validate`; one that fails is skipped, and the
+ * request's lines get `requestIdRejected: true` (the rejected value is not logged).
+ * Whatever `validate` says, a value must also be a safe header value (printable ASCII, no
+ * leading or trailing space), because it is echoed in the `X-Request-Id` response header.
+ * The generated ID is not validated, but one that is not a safe header value is replaced by
+ * `crypto.randomUUID()`, with one `WARN` per isolate.
  */
 export interface RequestIdOptions {
   /**
@@ -27,15 +33,15 @@ export interface RequestIdOptions {
    */
   from?: RequestIdSource[]
   /**
-   * `false` ignores every source in `from`, so `useLogger` reads no request header for the ID.
-   * `c.var.requestId` from an earlier middleware is still used (validated), because the app set
-   * it; a middleware that copies a client header there (such as `generateId`) passes it through.
-   * Defaults to `true`.
+   * `false` always generates the ID: every source in `from` and `c.var.requestId` are ignored,
+   * and the `cf-ray` header is not recorded as `cfRay`. No client input reaches the request ID,
+   * the log line or the response header. Defaults to `true`.
    */
   trustIncoming?: boolean
   /**
    * Accepts or rejects an incoming ID. Replaces the default check, including its length cap,
-   * so anchor a pattern (`^...$`) and bound its length.
+   * so anchor a pattern (`^...$`) and bound its length. The safe-header-value check always
+   * applies on top of it.
    * Defaults to `/^[\w\-=:.]{1,128}$/`: 1 to 128 of `A-Z a-z 0-9 _ - = : .`.
    */
   validate?: RegExp | ((id: string, c: Context) => boolean)
@@ -49,11 +55,38 @@ export interface UseLoggerOptions {
   requestId?: RequestIdOptions
 }
 
-/**
- * The default `requestId.validate`. Accepts UUIDs and `cf-ray` values. It is also the check
- * a `cf-ray` header must pass to be recorded as `cfRay`.
- */
+/** The default `requestId.validate`. Accepts UUIDs and `cf-ray` values. */
 const DEFAULT_REQUEST_ID_PATTERN = /^[\w\-=:.]{1,128}$/
+
+/** The check a `cf-ray` header must pass to be recorded as `cfRay`. A custom `validate` doesn't apply. */
+const CF_RAY_PATTERN = /^[\w\-=:.]{1,128}$/
+
+/**
+ * A value that can be echoed in a response header unchanged: printable ASCII with no leading or
+ * trailing space (`Headers` would trim it, and the header and the log line would differ).
+ */
+const SAFE_HEADER_VALUE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/
+
+const UNSAFE_GENERATED_ID_WARNING =
+  'useLogger: requestId.generate returned a value that is not a safe header value; using crypto.randomUUID()'
+
+/** Whether the unsafe-generated-ID warning has been written in this isolate. */
+let warnedUnsafeGeneratedId = false
+
+/**
+ * Re-arm the one-time unsafe-generated-ID warning.
+ *
+ * @internal Test helper, not part of the public API.
+ */
+export function _resetMiddlewareWarnings(): void {
+  warnedUnsafeGeneratedId = false
+}
+
+/** The request ID `useLogger` chose, and whether an incoming value was rejected on the way. */
+interface PickedRequestId {
+  id: string
+  rejected: boolean
+}
 
 const DEFAULT_REQUEST_ID_SOURCES: readonly RequestIdSource[] = ['x-request-id']
 
@@ -70,7 +103,7 @@ function matches(pattern: RegExp, value: string): boolean {
  * Builds the per-request request ID picker from the options, once per middleware.
  * Throws a `TypeError` for a header name in `from` that no request could carry.
  */
-function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => string {
+function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => PickedRequestId {
   const {
     from = DEFAULT_REQUEST_ID_SOURCES,
     trustIncoming = true,
@@ -78,7 +111,7 @@ function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => string
     generate = () => crypto.randomUUID(),
   } = options
 
-  const readers = (trustIncoming ? from : []).map((source): ((c: Context) => unknown) => {
+  const readers = from.map((source): ((c: Context) => unknown) => {
     if (typeof source === 'function') return source
     if (!HEADER_NAME.test(source)) {
       throw new TypeError(
@@ -88,17 +121,30 @@ function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => string
     return (c) => c.req.header(source)
   })
   readers.push((c) => c.get('requestId' as never))
+  // Header names are still checked above, so a bad `from` fails at setup either way.
+  if (!trustIncoming) readers.length = 0
 
   const accepts = typeof validate === 'function' ? validate : (id: string) => matches(validate, id)
-  const isValid = (id: unknown, c: Context): id is string =>
-    typeof id === 'string' && id !== '' && accepts(id, c)
+
+  const generateSafe = (c: Context): string => {
+    const id = generate(c)
+    if (typeof id === 'string' && SAFE_HEADER_VALUE.test(id)) return id
+    if (!warnedUnsafeGeneratedId) {
+      warnedUnsafeGeneratedId = true
+      getLogger().warn(UNSAFE_GENERATED_ID_WARNING)
+    }
+    return crypto.randomUUID()
+  }
 
   return (c) => {
+    let rejected = false
     for (const read of readers) {
       const id = read(c)
-      if (isValid(id, c)) return id
+      if (typeof id !== 'string' || id === '') continue
+      if (SAFE_HEADER_VALUE.test(id) && accepts(id, c)) return { id, rejected }
+      rejected = true
     }
-    return generate(c)
+    return { id: generateSafe(c), rejected }
   }
 }
 
@@ -140,12 +186,13 @@ export function useLogger<T extends LogFields = LogFields>(
   options: UseLoggerOptions = {},
 ): MiddlewareHandler {
   const pickRequestId = requestIdPicker(options.requestId)
+  const trustIncoming = options.requestId?.trustIncoming ?? true
 
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
 
-    const requestId = pickRequestId(c)
-    const cfRay = c.req.header('cf-ray')
+    const { id: requestId, rejected } = pickRequestId(c)
+    const cfRay = trustIncoming ? c.req.header('cf-ray') : undefined
     const method = c.req.method
     const path = new URL(c.req.url).pathname
 
@@ -154,7 +201,8 @@ export function useLogger<T extends LogFields = LogFields>(
       ...extractCarrier((name) => c.req.header(name)),
       fields: {
         requestId,
-        ...(cfRay !== undefined && matches(DEFAULT_REQUEST_ID_PATTERN, cfRay) && { cfRay }),
+        ...(rejected && { requestIdRejected: true }),
+        ...(cfRay !== undefined && matches(CF_RAY_PATTERN, cfRay) && { cfRay }),
       },
     }
     await runWithLogger(contextOptions, async () => {
