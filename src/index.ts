@@ -13,6 +13,7 @@ export {
   runWithLogger,
   withSpan,
   getLogger,
+  setDefaultLogger,
   setLoggerContext,
   getTraceContext,
   getTraceCarrier,

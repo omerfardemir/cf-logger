@@ -229,7 +229,37 @@ function topLevelKeys(json) {
   return keys
 }
 
+/** Lines outside a Logging Context carry the Default Logger's per-process fields, no trace IDs. */
+function checkDefaultLogger(failures) {
+  const records = readLogRecords().map(({ record }) => record)
+  const received = records.find((r) => r.message === 'bind.multiHop received')
+  if (!received) {
+    failures.push('logs: no bind.multiHop received line (logged outside a Logging Context)')
+  } else if (
+    received.service !== 'bind-test' ||
+    received.environment !== 'development' ||
+    received.version !== '1.0.0' ||
+    'traceId' in received
+  ) {
+    failures.push(
+      `logs: bind.multiHop received is not from the Default Logger: ${JSON.stringify(received)}`,
+    )
+  }
+  // main-worker builds its Root Logger with defaultLoggerFromEnv() at module scope.
+  const start = records.find(
+    (r) => r.traceId === TRACE_ID && String(r.message).startsWith('request.start '),
+  )
+  if (!start) {
+    failures.push(
+      'logs: no main-worker request.start line for the module-scope Default Logger check',
+    )
+  } else if (start.service !== 'pino-log-test' || start.environment !== 'development') {
+    failures.push(`logs: main-worker request.start lacks its env fields: ${JSON.stringify(start)}`)
+  }
+}
+
 function checkLogs(failures) {
+  checkDefaultLogger(failures)
   const lines = readLogRecords().filter(({ record }) => record.traceId === TRACE_ID)
   if (lines.length === 0) {
     failures.push('logs: no Worker log lines carry the request traceId')
