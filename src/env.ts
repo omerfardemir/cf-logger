@@ -1,5 +1,6 @@
-import { createLogger, isMaxRecordBytes, isMaxStringLength, MIN_RECORD_BYTES } from './logger'
-import type { LogLimits, LoggerOptions, LogLevel, SpanDefaults } from './types'
+import { createLogger } from './logger'
+import { isMaxRecordBytes, isMaxStringLength, MIN_RECORD_BYTES } from './limits'
+import type { LineLimits, LoggerOptions, LogLevel, SpanDefaults } from './types'
 
 type LoggerLevel = NonNullable<LoggerOptions['level']>
 
@@ -228,14 +229,14 @@ function numberFrom(value: string | undefined): number {
  * @param {(key: 'maxStringLength' | 'maxRecordBytes') => string | undefined} field - Reads one field.
  * @param {(key: 'maxStringLength' | 'maxRecordBytes') => string} name - The var a field is read from.
  * @param {LoggerOptions} options - The other Logger Options, for the warnings.
- * @returns {LogLimits | undefined} The limits, or `undefined` when none is set.
+ * @returns {LineLimits | undefined} The limits, or `undefined` when none is set.
  */
 function resolveLimits(
   field: (key: 'maxStringLength' | 'maxRecordBytes') => string | undefined,
   name: (key: 'maxStringLength' | 'maxRecordBytes') => string,
   options: LoggerOptions,
-): LogLimits | undefined {
-  const limits: LogLimits = {}
+): LineLimits | undefined {
+  const limits: LineLimits = {}
   const maxString = field('maxStringLength')
   const chars = numberFrom(maxString)
   if (isMaxStringLength(chars)) {

@@ -2486,6 +2486,21 @@ describe('serializeError and limits in the Workers helpers', () => {
     })
   })
 
+  it('TracedEntrypoint: an inline omitErrorKeys in the hook gives one Root Logger, not one per access', () => {
+    class Entry extends TracedEntrypoint {
+      protected override get [TracedEntrypoint.loggerOptions](): LoggerOptions {
+        return { ...super[TracedEntrypoint.loggerOptions], serializeError: omitErrorKeys(['body']) }
+      }
+    }
+    const roots = new Set<Logger>()
+    for (let i = 0; i < 100; i++) {
+      const entry = new Entry({} as any, { NAME: 'svc' }) as any
+      roots.add(entry[TracedEntrypoint.rootLogger])
+      roots.add(entry[TracedEntrypoint.rootLogger])
+    }
+    expect(roots.size).toBe(1)
+  })
+
   it('defaultLoggerFromEnv: serializeError as its second argument; each serializer its own Root Logger', () => {
     Object.assign(workersEnv, { NAME: 'svc', LOG_MAX_RECORD_BYTES: '1024' })
     const entries = _captureEntries()

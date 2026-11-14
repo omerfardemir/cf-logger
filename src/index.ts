@@ -8,7 +8,7 @@ export type {
   SpanDefaults,
   LoggerOptions,
   ErrorSerializer,
-  LogLimits,
+  LineLimits,
   Logger,
   LogLevel,
 } from './types'

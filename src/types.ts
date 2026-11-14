@@ -181,7 +181,14 @@ export interface ALSStore<T extends LogFields = LogFields> {
  * written by this serializer too, where it loops it is `"[Circular]"`, and
  * the Re-write Budget and `limits` apply. A throw is never passed on: that
  * `Error` is written in the default shape, with `serializeErrorFailed`
- * describing the failure.
+ * describing the failure. So is a result that is not an object, or is a
+ * Promise (`serializeError returned undefined`, `... a Promise`): it must
+ * return an object, synchronously.
+ *
+ * A line logged while it runs (its own code logs), through any logger, writes
+ * each `Error` as only `{ type, message, serializeErrorFailed: 'logged from
+ * inside serializeError' }`, so it can't call itself again or write what it
+ * leaves out.
  *
  * `defaultSerialize(e)` gives `e`'s default shape, with the values inside it
  * (`cause`, an `Error`-valued property, `errors`) kept as they are: loggercf
@@ -206,7 +213,7 @@ export type ErrorSerializer = (
  * const logger = createLogger({ service: 'api', limits: { maxStringLength: 8_192, maxRecordBytes: 200_000 } })
  * ```
  */
-export interface LogLimits {
+export interface LineLimits {
   /**
    * A string value longer than this many characters keeps its first
    * `maxStringLength` characters, followed by `…[truncated from <length> chars]`.
@@ -254,10 +261,12 @@ export interface LoggerOptions {
   /**
    * Writes every `Error` on this logger's lines, at any depth, in place of the
    * default shape. See `omitErrorKeys()` for leaving out keys that hold user data.
+   * Define it once, at module scope: the Workers helpers cache their Root Logger
+   * by this function.
    */
   serializeError?: ErrorSerializer
-  /** Size limits on each line. Off by default. */
-  limits?: LogLimits
+  /** The Line Limits: size limits on each line. Off by default. */
+  limits?: LineLimits
 }
 
 /**

@@ -101,6 +101,7 @@ Changes to the Logger Options read from env:
 - `LOG_LEVEL: "SILENT"` (any level name not in lowercase) falls back to `'info'` with one `WARN`; 0.0.1 passed it on and threw. `"silent"` still mutes all logs, as in 0.0.1.
 
 - The env helpers read two new vars, `LOG_SPAN_LEVEL` and `LOG_SPAN_SLOW_MS`, as the Span Defaults (see [Span Logging](#span-logging)). An invalid value is ignored with one `WARN`.
+- They also read `LOG_MAX_STRING_LENGTH` and `LOG_MAX_RECORD_BYTES`, as the [`limits`](#errors-and-size-limits). Unset, nothing is cut or trimmed, as in 0.0.1. A Worker that already sets a var by either name for something else now has its lines cut or trimmed: rename that var, or map the field to another one. An invalid value is ignored with one `WARN`.
 
 Changes to Spans:
 
@@ -1146,7 +1147,7 @@ Every runtime builds the same JSON line, one per log call (covered by a test tha
 
 ### Errors and size limits
 
-Two Logger Options change how a line is written. Both are off by default: without them, every `Error` is written with all its own properties and nothing is cut. Whatever they leave out or shorten is marked in the line, never silently gone.
+Two Logger Options change how a line is written. Both are off by default: without them, every `Error` is written with all its own properties and nothing is cut. Whatever they leave out, cut or trim is marked in the line, never silently gone.
 
 #### `serializeError`: write Errors your way
 
@@ -1172,7 +1173,10 @@ const logger = createLogger({
 - It is called once per `Error` and line, however often the `Error` appears on the line.
 - What it returns is written like any other value. An `Error` inside it is written by `serializeError` too, where the line meets it. `defaultSerialize(err)` keeps `cause`, an `errors` item or an `Error`-valued field as the `Error` itself, so it goes through `serializeError` afterwards: read `err.cause` itself, not `defaultSerialize(err).cause.message`. A loop is `"[Circular]"`, Errors nest up to 5 levels, the [Re-write Budget](#the-line) applies and so do the `limits` below. Returning the `Error` itself (or another one) writes its default shape.
 - It is your code, so it may throw. A log call still never throws: that `Error` is written in the default shape, with `serializeErrorFailed: "<the reason>"`.
-- A line logged from inside `serializeError` writes its Errors in the default shape, so a serializer that logs can't call itself again.
+- It must return an object, synchronously. Anything else counts as a failure too, so the `Error` is never lost: `undefined`, `null` or another primitive is written as the default shape with `serializeErrorFailed: "serializeError returned undefined"` (or `null`, `a number`, ...), and a Promise (an `async` serializer) or another thenable with `"serializeError returned a Promise"` (or `a thenable`).
+- A line logged from inside `serializeError`, through any logger, writes each `Error` as only `{ type, message, serializeErrorFailed: "logged from inside serializeError" }`: no own properties, `cause` or `stack`. So a serializer that logs can't call itself again, and can't write the keys it is there to leave out.
+- Define it once, at module scope. The [Workers helpers](#per-environment) cache their Root Logger by the function, so a new function on each call (an arrow function written in a hook or in the call) builds a Root Logger each time. Those are garbage-collected with the function, but once an isolate has seen more than 16 functions, one `WARN` says `serializeError is a new function each call; define it once at module scope`.
+- A Span that throws writes `span.error`, on its `span.end` or `<operation> failed` line: the thrown `Error`'s message as a plain string, not an `Error`. `serializeError` doesn't change it, so `omitErrorKeys(['message'])` leaves it in; only `maxStringLength` cuts it. `err` on the same line goes through `serializeError` as usual.
 
 #### `omitErrorKeys(keys, serializer?)`: leave out keys that hold user data
 
@@ -1189,9 +1193,11 @@ logger.error(apiCallError, 'llm failed')
 // "err":{"type":"APICallError","message":"rate limited","stack":"…","statusCode":429,"omitted":["requestBodyValues","responseBody"]}
 ```
 
-- Only the `Error`'s own properties are left out, and `omitted` lists only those it had. `type` is not an own property, so it always stays. An own `message`, `stack` or `cause` can be left out like any other key.
+- Only the `Error`'s own properties are left out, and `omitted` lists only those it had. An own `message`, `stack` or `cause` can be left out like any other key.
+- `type` is a Protected Field (see `maxRecordBytes` below), so it is never left out: it is always the class name. The default shape writes the class name as `type`, never an `Error`'s own `type` property. `'type'` in `keys` also replaces a `type` your serializer copied from that property with the class name, and lists `type` in `omitted` for an `Error` that has one.
 - loggercf has no list of its own. Which keys are unsafe or too large is your application's decision.
-- To combine it with your own serializer, pass that as the second argument: `omitErrorKeys(['responseBody'], mySerializer)`. The keys are left out of what `mySerializer` returns, and out of anything it writes with `defaultSerialize`. When `mySerializer` throws, the `Error` is written in the default shape, still without the keys.
+- Without a second argument, the same keys (in any order, repeats ignored) give the same function, so `omitErrorKeys([...])` written inline still gives a Workers helper one Root Logger.
+- To combine it with your own serializer, pass that as the second argument: `omitErrorKeys(['responseBody'], mySerializer)`. The keys are left out of what `mySerializer` returns, and out of anything it writes with `defaultSerialize`. When `mySerializer` throws or returns anything but an object, the `Error` is written in the default shape, still without the keys, with `serializeErrorFailed`. Each call with a second argument is a new function: make it once, at module scope.
 
 #### `limits`: keep each line under the platform's limit
 
@@ -1203,10 +1209,10 @@ const logger = createLogger({
 ```
 
 - **`maxStringLength`** (an integer, 1 or more): a string value longer than this keeps its first `maxStringLength` characters, followed by `…[truncated from <original length> chars]`. It applies at any depth, to `message` and `err.message` too, and to the text of a `BigInt`, a function or a symbol. Keys are never cut, and neither are `time`, `level`, the trace IDs, `service`, `environment`, `version` or `err.type`.
-- **`maxRecordBytes`** (an integer, 1,024 or more): a line larger than this many bytes (UTF-8, as JSON) is trimmed until it fits, largest values first. A large string is cut just enough, with the same marker. A large object or array is trimmed inside, and a smaller one is replaced with `"[Trimmed: <bytes> bytes]"`. An array of many small items keeps its first items and ends with `"[Trimmed: <n> items, <bytes> bytes]"`. The protected fields stay whole: `time`, `level`, `message`, the trace IDs, `service`, `environment`, `version`, and `err`'s `type` and `message`. If the line still doesn't fit (thousands of small top-level fields, say), only the protected fields are kept, with `logError` saying so. If even those are too large, `message` and `err.message` are cut too, and as a last resort the line is `time`, `level` and `logError`.
+- **`maxRecordBytes`** (an integer, 1,024 or more): a line larger than this many bytes (UTF-8, as JSON) is trimmed until it fits, largest values first. A large string is cut just enough, with the same marker. A large object or array is trimmed inside, and a smaller one is replaced with `"[Trimmed: <bytes> bytes]"`. An array of many small items keeps its first items and ends with `"[Trimmed: <n> items, <bytes> bytes]"`. The Protected Fields stay whole: `time`, `level`, `message`, the trace IDs, `service`, `environment`, `version`, and `err`'s `type` and `message`. If the line still doesn't fit (thousands of small top-level fields, say), only the Protected Fields are kept, with `logError` saying so. If even those are too large, `message` and `err.message` are cut too, and as a last resort the line is `time`, `level` and `logError`.
 - A line that already fits costs at most one pass over its characters. Trimming one takes time about linear in its size: it reads the line back once, measures it once, and writes it once more (a 1 MB line takes tens of milliseconds). It never throws.
 
-Why production apps usually want `limits`: Workers Logs caps each log at 256 KB. Cloudflare's docs say ["a single log has a maximum size limit of 256 KB. Logs exceeding that size will be truncated and the log's `$cloudflare.truncated` field will be set to true"](https://developers.cloudflare.com/workers/observability/logs/workers-logs/#limits). A line cut there is no longer valid JSON, so its fields can't be queried. The [Workers limits](https://developers.cloudflare.com/workers/platform/limits/#log-size) also cap the log data of one request at 256 KB (`console.log` output, exceptions, request metadata and headers): past that, nothing more is recorded for the request. A `maxRecordBytes` of `200_000` keeps each line valid and leaves room for the platform's own fields. It can't bound how many lines one request writes.
+Why production apps usually want `limits`: Workers Logs caps each log at 256 KB. Cloudflare's docs say ["a single log has a maximum size limit of 256 KB. Logs exceeding that size will be truncated and the log's `$cloudflare.truncated` field will be set to true"](https://developers.cloudflare.com/workers/observability/logs/workers-logs/#limits). A line truncated there is no longer valid JSON, so its fields can't be queried. The [Workers limits](https://developers.cloudflare.com/workers/platform/limits/#log-size) also cap the log data of one request at 256 KB (`console.log` output, exceptions, request metadata and headers): past that, Cloudflare says it does not record additional context for that request in logs, tail logs or Tail Workers. A `maxRecordBytes` of `200_000` keeps each line valid and leaves room for the platform's own fields. It can't bound how many lines one request writes.
 
 #### Per environment
 
@@ -1247,7 +1253,7 @@ The Workers helpers build their Root Logger from env, so the limits come from th
 ```ts
 import { env } from 'cloudflare:workers'
 import { omitErrorKeys } from 'loggercf'
-import { withLogging, withScheduled } from 'loggercf/workers'
+import { withLogging, withQueueMessage, withScheduled } from 'loggercf/workers'
 
 const serializeError =
   env.ENVIRONMENT === 'production'
@@ -1256,9 +1262,27 @@ const serializeError =
 
 export default withLogging(BillingWorker, { serializeError })
 export const nightly = withScheduled(runNightly, { serializeError })
+
+// The same module-scope function in the message loop, never a new one per message:
+export const queueHandler = {
+  async queue(batch: MessageBatch<Order>) {
+    for (const message of batch.messages)
+      await withQueueMessage(batch, message, () => handle(message), { serializeError })
+  },
+}
 ```
 
-Use one serializer function per Worker: the helpers share one Root Logger per isolate for the same env and the same `serializeError`, and a different function gets a Root Logger of its own.
+A `TracedEntrypoint` reads the same module-scope function in its hook:
+
+```ts
+export class Api extends TracedEntrypoint<Env> {
+  protected override get [TracedEntrypoint.loggerOptions](): LoggerOptions {
+    return { ...super[TracedEntrypoint.loggerOptions], serializeError }
+  }
+}
+```
+
+Use one serializer function per Worker: the helpers share one Root Logger per isolate for the same env and the same `serializeError`, and a different function gets a Root Logger of its own. The hook is read on each request, and the helpers' options on each call, so a function written inline there (`serializeError: (err, d) => ...`) is a new one each time: see the `Define it once` bullet above.
 
 ### Where a line goes
 

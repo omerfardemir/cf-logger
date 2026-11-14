@@ -27,9 +27,10 @@ import {
   prototypeMethods,
   registerRootLogger,
   runLogged,
-  sameEnvMapping,
+  sameRootLoggerSource,
   withSerializer,
   type Method,
+  type RootLoggerSource,
 } from './workers-shared'
 
 export { loggerOptionsFromEnv } from './env'
@@ -90,7 +91,7 @@ export function defaultLoggerFromEnv<E = Cloudflare.Env>(
   mapping?: EnvMapping<E>,
   options: { serializeError?: ErrorSerializer } = {},
 ): Logger {
-  const logger = envRootLogger(workersEnv, mapping, options.serializeError)
+  const logger = envRootLogger(workersEnv, { env: mapping, serializeError: options.serializeError })
   registerDefaultLogger(logger)
   return logger
 }
@@ -335,15 +336,7 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
  *
  * @template E - The worker environment type.
  */
-export interface TracedWorkerOptions<E = unknown> {
-  /** Where the Root Logger's options come from in env (see `loggerOptionsFromEnv`). */
-  env?: EnvMapping<E>
-  /**
-   * The Root Logger's `serializeError` (see `LoggerOptions`): code, so it can't come
-   * from env. The same function gives the same Root Logger.
-   */
-  serializeError?: ErrorSerializer
-}
+export type TracedWorkerOptions<E = unknown> = RootLoggerSource<E>
 
 /**
  * The env type of a `TracedSession` subclass.
@@ -481,7 +474,7 @@ export async function withTrace<T, R>(
  *
  * @template E - The worker environment type.
  */
-export interface WithLoggingOptions<E = unknown> {
+export interface WithLoggingOptions<E = unknown> extends RootLoggerSource<E> {
   /**
    * Record each call as a Span: one `span.end` with duration and status, at `ERROR`
    * (with `err`) when the method throws or rejects. Default `false`: no `span.end`,
@@ -504,13 +497,6 @@ export interface WithLoggingOptions<E = unknown> {
    * unchanged.
    */
   fetch?: boolean
-  /** Where the Root Logger's options come from in env (see `loggerOptionsFromEnv`). */
-  env?: EnvMapping<E>
-  /**
-   * The Root Logger's `serializeError` (see `LoggerOptions`): code, so it can't come
-   * from env. The same function gives the same Root Logger.
-   */
-  serializeError?: ErrorSerializer
 }
 
 /** A `WorkerEntrypoint` subclass, as `withLogging()` accepts it. */
@@ -637,7 +623,8 @@ const loggedClasses = new WeakMap<object, WithLoggingOptions<any>>()
 /**
  * Whether two `withLogging()` options produce the same wrapping: the same `spans` and
  * `session` (default `false`), the same `fetch` (default `true`), and Env Mappings
- * with the same keys and values (a derive function compares by identity).
+ * with the same keys and values (a derive function compares by identity), and the
+ * same `serializeError` function (see `sameRootLoggerSource()`).
  *
  * @param {WithLoggingOptions} a - One set of options.
  * @param {WithLoggingOptions} b - The other.
@@ -648,8 +635,7 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
     !!a.spans === !!b.spans &&
     !!a.session === !!b.session &&
     (a.fetch ?? true) === (b.fetch ?? true) &&
-    sameEnvMapping(a.env, b.env) &&
-    a.serializeError === b.serializeError
+    sameRootLoggerSource(a, b)
   )
 }
 
@@ -793,6 +779,8 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
     )
   }
 
+  const source: RootLoggerSource<any> = { env: mapping, serializeError }
+
   /**
    * The Root Logger for one wrapped instance (an entrypoint or a Durable Object): its own
    * Root Logger hook for a `TracedEntrypoint`, otherwise the cached one for its env and the
@@ -804,7 +792,7 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
   const instanceRootLogger = (target: object): Logger =>
     isTracedEntrypoint
       ? (target as unknown as { [ROOT_LOGGER]: Logger })[ROOT_LOGGER]
-      : envRootLogger((target as { env: unknown }).env, mapping, serializeError)
+      : envRootLogger((target as { env: unknown }).env, source)
 
   /** Each instance's own Context Fields (a Durable Object's `objectId`), read in its constructor. */
   const instanceFields = new WeakMap<object, LogFields>()

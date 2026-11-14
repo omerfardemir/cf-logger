@@ -1,6 +1,29 @@
 // The Logger Options' `limits`: `maxStringLength` and `maxRecordBytes`.
 // Internal: `output.ts` applies them when it writes a line.
 
+/**
+ * Whether `n` is a `maxStringLength`: an integer, 1 or more.
+ *
+ * @param {unknown} n - Any value.
+ * @returns {boolean} `true` for a valid limit.
+ */
+export function isMaxStringLength(n: unknown): n is number {
+  return Number.isInteger(n) && (n as number) >= 1
+}
+
+/** The smallest `maxRecordBytes`: room for the last-resort line, whatever is trimmed. */
+export const MIN_RECORD_BYTES = 1024
+
+/**
+ * Whether `n` is a `maxRecordBytes`: an integer, `MIN_RECORD_BYTES` or more.
+ *
+ * @param {unknown} n - Any value.
+ * @returns {boolean} `true` for a valid limit.
+ */
+export function isMaxRecordBytes(n: unknown): n is number {
+  return Number.isInteger(n) && (n as number) >= MIN_RECORD_BYTES
+}
+
 /** A record, as `fitLine()` reads it back from its line. */
 type Tree = Record<string, unknown>
 
@@ -42,7 +65,7 @@ function safeEnd(text: string, end: number): number {
  * @param {number} max - `maxStringLength`.
  * @returns {string} The cut string.
  */
-export function clipString(text: string, max: number): string {
+export function cutString(text: string, max: number): string {
   return text.slice(0, safeEnd(text, max)) + cutMarker(text.length)
 }
 
@@ -167,8 +190,12 @@ function cutToBytes(text: string, bytes: number): string {
   return text.slice(0, safeEnd(text, end)) + marker
 }
 
-/** The top-level keys `maxRecordBytes` keeps whole while anything else can go (see `PROTECTED`). */
-const PROTECTED_KEYS: readonly string[] = [
+/**
+ * The top-level Protected Fields: the keys `maxRecordBytes` keeps whole while
+ * anything else can go (see `PROTECTED`). `maxStringLength` never cuts them
+ * either, but `message` (see `keepsLength()` in `output.ts`).
+ */
+export const PROTECTED_KEYS: readonly string[] = [
   'time',
   'level',
   'message',
@@ -320,7 +347,7 @@ function protectedOnly(root: Tree, bytes: number, max: number): Tree {
       out.err = err
     }
   }
-  out.logError = `line of ${bytes} bytes over maxRecordBytes (${max}): only the protected fields are kept`
+  out.logError = `line of ${bytes} bytes over maxRecordBytes (${max}): only the Protected Fields are kept`
   return out
 }
 

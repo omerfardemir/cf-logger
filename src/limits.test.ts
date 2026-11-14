@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { createLogger, runWithLogger, getLogger, _captureLines, _reset } from './logger'
 import { omitErrorKeys } from './omit'
 import { fitLine, utf8Bytes } from './limits'
-import type { LogLimits } from './types'
+import type { LineLimits } from './types'
 
 const TRACEPARENT = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
 
@@ -35,7 +35,7 @@ function trimTime(n: number): number {
 }
 
 /** A logger with `limits`, inside a Logging Context, and the lines it writes. */
-function limited(limits: LogLimits) {
+function limited(limits: LineLimits) {
   const lines = _captureLines()
   const logger = createLogger(
     { service: 'svc', environment: 'production', version: '1.0.0', limits },
@@ -246,7 +246,7 @@ describe('limits.maxRecordBytes', () => {
       spanId: expect.any(String),
       parentSpanId: 'b7ad6b7169203331',
       logError: expect.stringMatching(
-        /^line of \d+ bytes over maxRecordBytes \(1024\): only the protected fields are kept$/,
+        /^line of \d+ bytes over maxRecordBytes \(1024\): only the Protected Fields are kept$/,
       ),
     })
   })

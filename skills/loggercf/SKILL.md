@@ -482,9 +482,52 @@ const logger = createLogger({
 ```
 
 - `serializeError(err, defaultSerialize)` writes every `Error` on the line, at any depth; `omitErrorKeys(keys, serializer?)` builds one, and lists what it left out as `omitted`. Don't strip keys from an `Error` before logging it, and don't log `err.message` instead of `err`: you lose the stack and `cause`.
-- A serializer that throws never breaks the log call: that `Error` is written the default way, with `serializeErrorFailed`.
+- A serializer that throws, or returns anything but an object (`undefined`, a Promise from an `async` one), never breaks the log call: that `Error` is written the default way, with `serializeErrorFailed`. Keep it synchronous.
+- A line logged from inside the serializer writes each `Error` as only `{ type, message, serializeErrorFailed: 'logged from inside serializeError' }`, so it can't leak the keys being left out.
+- `type` is never left out: it is always the class name.
 - `maxStringLength` cuts longer strings to that many characters plus `…[truncated from <n> chars]`. `maxRecordBytes` trims a larger line to fit, largest values first, keeping the Protected Fields. Workers Logs caps each log at 256 KB and truncates a larger one, which breaks its JSON; `200_000` leaves room.
-- The Workers helpers (`withLogging`, `withScheduled`, `withQueueMessage`, `withWorkflow`, `tracedWorker`, `defaultLoggerFromEnv`) read the limits from the vars `LOG_MAX_STRING_LENGTH` and `LOG_MAX_RECORD_BYTES`, and take `serializeError` as an option (`defaultLoggerFromEnv(mapping, { serializeError })`). Choose it at module scope from `env` (`import { env } from 'cloudflare:workers'`), once per Worker. A `TracedEntrypoint` sets both in its `[TracedEntrypoint.loggerOptions]` getter.
+- A Span's `span.error` is the thrown message as a plain string: `serializeError` and `omitErrorKeys(['message'])` don't change it.
+- The Workers helpers (`withLogging`, `withScheduled`, `withQueueMessage`, `withWorkflow`, `tracedWorker`, `defaultLoggerFromEnv`) read the limits from the vars `LOG_MAX_STRING_LENGTH` and `LOG_MAX_RECORD_BYTES`, and take `serializeError` as an option (`defaultLoggerFromEnv(mapping, { serializeError })`). A `TracedEntrypoint` sets both in its `[TracedEntrypoint.loggerOptions]` getter.
+- Define `serializeError` once, at module scope, choosing it from `env` (`import { env } from 'cloudflare:workers'`), and pass that same constant everywhere. The helpers cache their Root Logger by the function, and the hook and the helpers' options are read on every request or message. `omitErrorKeys(keys)` with no second argument gives the same function for the same keys, but any other function written inline builds a Root Logger per call, and past 16 of them one `WARN` says so.
+
+```ts
+import { env } from 'cloudflare:workers'
+import { omitErrorKeys, type LoggerOptions } from 'loggercf'
+import { TracedEntrypoint, withQueueMessage } from 'loggercf/workers'
+
+interface Job {
+  orderId: string
+}
+
+// Once, at module scope.
+const serializeError =
+  (env as { ENVIRONMENT?: string }).ENVIRONMENT === 'production'
+    ? omitErrorKeys(['requestBodyValues', 'responseBody'])
+    : undefined
+
+export default class extends TracedEntrypoint {
+  protected override get [TracedEntrypoint.loggerOptions](): LoggerOptions {
+    return { ...super[TracedEntrypoint.loggerOptions], serializeError }
+  }
+
+  async queue(batch: MessageBatch<Job>) {
+    for (const message of batch.messages) {
+      await withQueueMessage(batch, message, async () => message.ack(), { serializeError })
+    }
+  }
+}
+```
+
+```ts wrong
+// A new function on every request or message: a new Root Logger each time.
+return {
+  ...super[TracedEntrypoint.loggerOptions],
+  serializeError: (err, d) => ({ ...d(err), body: undefined }),
+}
+await withQueueMessage(batch, message, fn, {
+  serializeError: omitErrorKeys(['body'], mySerializer),
+})
+```
 
 ## Wrangler setup
 

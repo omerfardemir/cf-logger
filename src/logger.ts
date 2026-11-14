@@ -12,7 +12,7 @@ import type {
   SpanContext,
   SpanDefaults,
   SpanOptions,
-  LogLimits,
+  LineLimits,
 } from './types'
 import { resolveTrace, generateSpanId, toCarrier } from './trace'
 import {
@@ -33,6 +33,7 @@ import {
   type LogRecord,
   type Sink,
 } from './output'
+import { isMaxRecordBytes, isMaxStringLength } from './limits'
 import { _resetEnvWarnings } from './env'
 import { routeArgs } from './route'
 
@@ -120,40 +121,17 @@ function checkSpanDefaults(spans: SpanDefaults | undefined): SpanDefaults {
 }
 
 /**
- * Whether `n` is a `maxStringLength`: an integer, 1 or more.
- *
- * @param {unknown} n - Any value.
- * @returns {boolean} `true` for a valid limit.
- */
-export function isMaxStringLength(n: unknown): n is number {
-  return Number.isInteger(n) && (n as number) >= 1
-}
-
-/** The smallest `maxRecordBytes`: room for the last-resort line, whatever is trimmed. */
-export const MIN_RECORD_BYTES = 1024
-
-/**
- * Whether `n` is a `maxRecordBytes`: an integer, `MIN_RECORD_BYTES` or more.
- *
- * @param {unknown} n - Any value.
- * @returns {boolean} `true` for a valid limit.
- */
-export function isMaxRecordBytes(n: unknown): n is number {
-  return Number.isInteger(n) && (n as number) >= MIN_RECORD_BYTES
-}
-
-/**
  * Validate the `serializeError` and `limits` Logger Options, as `createLogger` validates `level`.
  *
  * @param {LoggerOptions['serializeError']} serializeError - The option.
- * @param {LogLimits | undefined} limits - The option.
+ * @param {LineLimits | undefined} limits - The option.
  * @returns {LineOptions | undefined} The options that are set, or `undefined` when none is.
  * @throws {TypeError} When `serializeError` is not a function.
  * @throws {Error} `invalid limits.maxStringLength <value>`, or `invalid limits.maxRecordBytes <value>`.
  */
 function checkLineOptions(
   serializeError: LoggerOptions['serializeError'],
-  limits: LogLimits | undefined,
+  limits: LineLimits | undefined,
 ): LineOptions | undefined {
   if (serializeError !== undefined && typeof serializeError !== 'function')
     throw new TypeError('serializeError must be a function')

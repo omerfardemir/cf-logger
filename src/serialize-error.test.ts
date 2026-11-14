@@ -35,6 +35,9 @@ const wrapping: ErrorSerializer = (err, defaultSerialize) => ({
   first: err.cause instanceof Error ? defaultSerialize(err.cause) : undefined,
 })
 
+/** A serializer that writes the default shape. */
+const passThrough: ErrorSerializer = (err, defaultSerialize) => defaultSerialize(err)
+
 /** A serializer that writes `{ type, message, tag }`, and counts its calls by Error. */
 function tagging(tag = 'custom') {
   const calls = new Map<Error, number>()
@@ -209,7 +212,7 @@ describe('serializeError in Logger Options', () => {
     })
   })
 
-  it('a serializer that calls defaultSerialize on a non-Error, or returns a primitive, is fine', () => {
+  it('a serializer that calls defaultSerialize on a non-Error is fine; a primitive result is a failure', () => {
     const entries = _captureEntries()
     createLogger({
       service: 'svc',
@@ -219,7 +222,14 @@ describe('serializeError in Logger Options', () => {
           : { cause: defaultSerialize(err.cause as Error) },
     }).error(new Error('outer', { cause: 'not an error' }), 'm', new Error('text'))
     expect(entries[0].err).toEqual({ cause: 'not an error' })
-    expect(entries[0].errors).toEqual(['text'])
+    expect(entries[0].errors).toEqual([
+      {
+        type: 'Error',
+        message: 'text',
+        stack: expect.any(String),
+        serializeErrorFailed: 'serializeError returned a string',
+      },
+    ])
   })
 
   it('a serializer that throws: the default shape with serializeErrorFailed, and the log call does not throw', () => {
@@ -292,9 +302,79 @@ describe('serializeError in Logger Options', () => {
     logger.error(new Error('x'))
     expect(calls).toBe(1)
     expect(entries.map((e) => e.message)).toEqual(['serializing', 'x'])
-    expect(entries[0].err).toMatchObject({ type: 'Error', message: 'x', stack: expect.any(String) })
+    // The line logged from inside writes only `type` and `message`, marked.
+    expect(entries[0].err).toEqual({
+      type: 'Error',
+      message: 'x',
+      serializeErrorFailed: 'logged from inside serializeError',
+    })
     expect(entries[1].err).toEqual({ message: 'x', by: 'custom' })
   })
+
+  it('a line logged from inside it never writes the keys omitErrorKeys leaves out', () => {
+    const entries = _captureEntries()
+    const secret = new APICallError('api')
+    let logger: ReturnType<typeof createLogger> | undefined
+    const other = createLogger({ service: 'other' }) // a logger without serializeError
+    const user: ErrorSerializer = (err, defaultSerialize) => {
+      logger!.warn({ seen: err }, 'unexpected error shape')
+      other.warn(err, 'through another logger')
+      getLogger().warn({ nested: { err } }, 'through getLogger')
+      return defaultSerialize(err)
+    }
+    logger = createLogger({
+      service: 'svc',
+      serializeError: omitErrorKeys(['requestBodyValues', 'responseBody'], user),
+    })
+    runWithLogger({ logger }, () => logger!.error(secret, 'outer'))
+    expect(entries.map((e) => e.message)).toEqual([
+      'unexpected error shape',
+      'through another logger',
+      'through getLogger',
+      'outer',
+    ])
+    expect(JSON.stringify(entries)).not.toContain('user secret prompt')
+    const minimal = {
+      type: 'APICallError',
+      message: 'api',
+      serializeErrorFailed: 'logged from inside serializeError',
+    }
+    expect(entries[0].seen).toEqual(minimal)
+    expect(entries[1].err).toEqual(minimal)
+    expect(entries[2].nested).toEqual({ err: minimal })
+    expect(entries[3].err).toMatchObject({ omitted: ['requestBodyValues', 'responseBody'] })
+  })
+
+  it.each([
+    ['undefined', () => undefined, 'serializeError returned undefined'],
+    ['null', () => null, 'serializeError returned null'],
+    ['a number', () => 42, 'serializeError returned a number'],
+    ['a boolean', () => false, 'serializeError returned a boolean'],
+    ['a function', () => () => 1, 'serializeError returned a function'],
+    [
+      'a Promise (an async serializer)',
+      async () => ({ a: 1 }),
+      'serializeError returned a Promise',
+    ],
+    // oxlint-disable-next-line unicorn/no-thenable
+    ['a thenable', () => ({ then: () => 1 }), 'serializeError returned a thenable'],
+  ])(
+    'a serializer that returns %s: the default shape with serializeErrorFailed',
+    (_, fn, failed) => {
+      const entries = _captureEntries()
+      const serializeError = fn as unknown as ErrorSerializer
+      createLogger({ service: 'svc', serializeError }).error(new Error('x'), 'm', {
+        nested: new Error('y'),
+      })
+      expect(entries[0].err).toEqual({
+        type: 'Error',
+        message: 'x',
+        stack: expect.any(String),
+        serializeErrorFailed: failed,
+      })
+      expect(entries[0].nested).toMatchObject({ message: 'y', serializeErrorFailed: failed })
+    },
+  )
 
   it('a non-function serializeError throws at createLogger', () => {
     expect(() => createLogger({ service: 'svc', serializeError: 'no' as never })).toThrow(
@@ -416,6 +496,67 @@ describe('omitErrorKeys', () => {
       serializeError: omitErrorKeys(['requestBodyValues'], (err) => err as never),
     }).error(new APICallError())
     expect(entries[0].err).toMatchObject({ type: 'APICallError', omitted: ['requestBodyValues'] })
+  })
+
+  it("never leaves out type: 'type' writes the class name in place of an own type property", () => {
+    const entries = _captureEntries()
+    const typed = Object.assign(new Error('t'), { type: 'OWN_TYPE', code: 'E1' })
+    createLogger({ service: 'svc', serializeError: omitErrorKeys(['type', 'code']) }).error(typed)
+    expect(entries[0].err).toEqual({
+      type: 'Error',
+      message: 't',
+      stack: expect.any(String),
+      omitted: ['type', 'code'],
+    })
+  })
+
+  it('never leaves out type, even when the wrapped serializer writes the own type property', () => {
+    const entries = _captureEntries()
+    class Typed extends Error {
+      type = 'OWN_TYPE'
+    }
+    createLogger({
+      service: 'svc',
+      serializeError: omitErrorKeys(['type'], (err) => ({
+        type: (err as Typed).type,
+        message: err.message,
+      })),
+    }).error(new Typed('t'), 'm', new Error('plain'))
+    expect(entries[0].err).toEqual({ type: 'Typed', message: 't', omitted: ['type'] })
+    // No own `type`: nothing is left out, and the serializer's `type: undefined` is not written.
+    expect(entries[0].errors).toEqual([{ message: 'plain' }])
+  })
+
+  it.each([
+    ['undefined', () => undefined, 'serializeError returned undefined'],
+    ['a Promise', async () => ({}), 'serializeError returned a Promise'],
+  ])(
+    'a wrapped serializer that returns %s: the default shape, still without the keys',
+    (_, fn, failed) => {
+      const entries = _captureEntries()
+      createLogger({
+        service: 'svc',
+        serializeError: omitErrorKeys(['requestBodyValues'], fn as unknown as ErrorSerializer),
+      }).error(new APICallError())
+      expect(entries[0].err).toMatchObject({
+        type: 'APICallError',
+        omitted: ['requestBodyValues'],
+        serializeErrorFailed: failed,
+      })
+      expect(JSON.stringify(entries[0])).not.toContain('user secret prompt')
+    },
+  )
+
+  it('without a serializer, the same keys give the same function, in any order and with repeats', () => {
+    const serializeError = omitErrorKeys(['requestBodyValues', 'responseBody'])
+    expect(omitErrorKeys(['requestBodyValues', 'responseBody'])).toBe(serializeError)
+    expect(omitErrorKeys(['responseBody', 'requestBodyValues', 'responseBody'])).toBe(
+      serializeError,
+    )
+    expect(omitErrorKeys(['responseBody'])).not.toBe(serializeError)
+    expect(omitErrorKeys(['responseBody'], passThrough)).not.toBe(
+      omitErrorKeys(['responseBody'], passThrough),
+    )
   })
 
   it('rejects keys that are not an array of strings, and a serializer that is not a function', () => {

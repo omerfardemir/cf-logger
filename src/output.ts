@@ -1,5 +1,5 @@
 import type { ErrorSerializer, LogFields, TraceContext } from './types'
-import { clipString, fitLine } from './limits'
+import { cutString, fitLine, PROTECTED_KEYS } from './limits'
 
 /**
  * A finished log line, before serialization.
@@ -367,7 +367,7 @@ function spend(budget: Budget, cost: Cost): boolean {
  * @param {SerializedErrors} [cache] - The Errors this line has already serialized, and the ones `error` is nested in.
  * @returns {LogRecord} The serialized error.
  */
-export function serializeError(
+export function defaultErrorShape(
   error: Error,
   cache: SerializedErrors = newSerializedErrors(),
 ): LogRecord {
@@ -375,7 +375,7 @@ export function serializeError(
 }
 
 /**
- * `serializeError()`, with how far up the copy's `"[Circular]"`s point.
+ * `defaultErrorShape()`, with how far up the copy's `"[Circular]"`s point.
  *
  * @param {Error} error - The error to serialize.
  * @param {number} depth - Its nesting depth: how many Errors it is nested in (`cache.ancestors`).
@@ -422,6 +422,16 @@ function serializeErrorAt(error: Error, depth: number, cache: SerializedErrors):
 }
 
 /**
+ * The `type` of an `Error`'s default shape: its class name, or its `name`.
+ * Never throws.
+ *
+ * @param {Error} error - The `Error`.
+ * @returns {unknown} The name, or an `unserializable()` stand-in.
+ */
+export const errorTypeName = (error: Error): unknown =>
+  read(() => error.constructor?.name || error.name)
+
+/**
  * Write an `Error`'s shape into `out`: `{ type, message, stack, ...own
  * enumerable props, errors?, cause? }`. Never throws: a property whose getter
  * throws is `unserializable()`.
@@ -431,7 +441,7 @@ function serializeErrorAt(error: Error, depth: number, cache: SerializedErrors):
  * @param {(value: unknown) => unknown} nested - What an own property, an `errors` item or `cause` is written as.
  */
 function fillError(out: LogRecord, error: Error, nested: (value: unknown) => unknown): void {
-  out.type = read(() => error.constructor?.name || error.name)
+  out.type = errorTypeName(error)
   out.message = read(() => error.message)
   out.stack = read(() => error.stack)
   let entries: [string, unknown][]
@@ -455,7 +465,7 @@ function fillError(out: LogRecord, error: Error, nested: (value: unknown) => unk
 }
 
 /**
- * How an `Error` is written on one line: its `serializeError()` copy, or what
+ * How an `Error` is written on one line: its `defaultErrorShape()` copy, or what
  * the Logger Options' `serializeError` wrote for it, when that is set.
  *
  * @param {Error} error - The `Error`.
@@ -464,6 +474,7 @@ function fillError(out: LogRecord, error: Error, nested: (value: unknown) => unk
  * @returns {unknown} The copy, still to be walked.
  */
 function errorCopy(error: Error, depth: number, cache: SerializedErrors): unknown {
+  if (serializing > 0) return reenteredCopy(error)
   return cache.custom
     ? customCopy(error, cache.custom, cache)
     : serializeErrorAt(error, depth, cache).out
@@ -471,11 +482,50 @@ function errorCopy(error: Error, depth: number, cache: SerializedErrors): unknow
 
 /**
  * How many custom `serializeError` calls are running. A line logged from
- * inside one (the serializer's own code logs) writes its Errors in their
- * default shape, so a serializer that logs an `Error` can't call itself
- * again and again.
+ * inside one (the serializer's own code logs), through any logger, writes its
+ * Errors as `reenteredCopy()`, so a serializer that logs an `Error` can't call
+ * itself again and again, and can't write the keys it is there to leave out.
  */
 let serializing = 0
+
+/** `serializeErrorFailed` on an `Error` logged from inside a `serializeError` call. */
+export const REENTERED = 'logged from inside serializeError'
+
+/**
+ * How an `Error` is written on a line logged while a custom `serializeError`
+ * runs: only its `type` and `message`, marked with `REENTERED`. No own
+ * property, `cause` or `stack`, since the serializer that would have left
+ * keys out can't run.
+ *
+ * @param {Error} error - The `Error`.
+ * @returns {LogRecord} The copy.
+ */
+function reenteredCopy(error: Error): LogRecord {
+  return {
+    type: errorTypeName(error),
+    message: read(() => error.message),
+    serializeErrorFailed: REENTERED,
+  }
+}
+
+/**
+ * Why a custom serializer's result can't be written, when it can't: anything
+ * but an object, or a thenable (an `async` serializer). Its `Error` is then
+ * written as if the serializer threw.
+ *
+ * @param {unknown} result - What the serializer returned.
+ * @returns {string | undefined} `serializeError returned <kind>`, or `undefined` for an object.
+ * @throws When `result` is an object whose `then` can't be read (a `Proxy` whose traps throw).
+ */
+export function invalidResult(result: unknown): string | undefined {
+  if (result === null) return 'serializeError returned null'
+  if (typeof result === 'object') {
+    if (typeof (result as { then?: unknown }).then !== 'function') return undefined
+    return `serializeError returned ${result instanceof Promise ? 'a Promise' : 'a thenable'}`
+  }
+  const kind = typeof result
+  return `serializeError returned ${kind === 'undefined' ? 'undefined' : `a ${kind}`}`
+}
 
 /**
  * The default shape of `error`, as `defaultSerialize` gives it to a custom
@@ -517,7 +567,8 @@ function shallowCopy(error: Error, cache: SerializedErrors): LogRecord {
  * inside it is serialized where the walk meets it (by this serializer too),
  * it is `"[Circular]"` where it loops, `MAX_CAUSE_DEPTH` and the Re-write
  * Budget apply. An `Error` it returns (`error` itself included) is written in
- * its default shape. When it throws, `error` is written in its default shape,
+ * its default shape. When it throws, or returns anything but an object (or a
+ * thenable, see `invalidResult()`), `error` is written in its default shape,
  * with `serializeErrorFailed` describing the failure. Never throws.
  *
  * @param {Error} error - The `Error`.
@@ -528,20 +579,21 @@ function shallowCopy(error: Error, cache: SerializedErrors): LogRecord {
 function customCopy(error: Error, custom: CustomErrors, cache: SerializedErrors): unknown {
   if (custom.copies.has(error)) return custom.copies.get(error)
   let copy: unknown
-  if (serializing > 0) {
-    copy = defaultCopy(error, custom, cache)
-  } else {
-    serializing++
-    try {
-      const result = custom.serialize(error, (e) => defaultCopy(e, custom, cache))
-      copy = ownedCopy(result, error, custom, cache)
-    } catch (thrown) {
-      const out = shallowCopy(error, cache)
-      out.serializeErrorFailed = describeFailure(thrown)
-      copy = out
-    } finally {
-      serializing--
-    }
+  let failed: string | undefined
+  serializing++
+  try {
+    const result = custom.serialize(error, (e) => defaultCopy(e, custom, cache))
+    failed = invalidResult(result)
+    if (failed === undefined) copy = ownedCopy(result as object, error, custom, cache)
+  } catch (thrown) {
+    failed = describeFailure(thrown)
+  } finally {
+    serializing--
+  }
+  if (failed !== undefined) {
+    const out = shallowCopy(error, cache)
+    out.serializeErrorFailed = failed
+    copy = out
   }
   custom.copies.set(error, copy)
   return copy
@@ -550,9 +602,11 @@ function customCopy(error: Error, custom: CustomErrors, cache: SerializedErrors)
 /**
  * A custom serializer's result, as the line holds it: a plain object or an
  * array is copied (so the walk knows it is nested in `error`, and two Errors
- * never share one), an `Error` is its default shape, anything else is kept.
+ * never share one), an `Error` is its default shape, any other object (a
+ * class instance) is kept. Anything but an object never gets here (see
+ * `invalidResult()`).
  *
- * @param {unknown} result - What the serializer returned.
+ * @param {object} result - What the serializer returned.
  * @param {Error} error - The `Error` it serialized.
  * @param {CustomErrors} custom - The line's custom copies.
  * @param {SerializedErrors} cache - The line's cache.
@@ -560,12 +614,11 @@ function customCopy(error: Error, custom: CustomErrors, cache: SerializedErrors)
  * @throws When `result` can't be read (a `Proxy` whose traps throw).
  */
 function ownedCopy(
-  result: unknown,
+  result: object,
   error: Error,
   custom: CustomErrors,
   cache: SerializedErrors,
 ): unknown {
-  if (typeof result !== 'object' || result === null) return result
   if (isError(result)) return defaultCopy(result, custom, cache)
   let out: object = result
   if (Array.isArray(result)) {
@@ -703,7 +756,7 @@ export interface RecordEntry extends RoutedArgs {
 export interface LineOptions {
   /** Writes every `Error` on the line, at any depth (see `customCopy()`). */
   serializeError?: ErrorSerializer
-  /** A string value longer than this is cut, with a marker (see `clipString()`). */
+  /** A string value longer than this is cut, with a marker (see `cutString()`). */
   maxStringLength?: number
   /** A line longer than this, in UTF-8 bytes, is trimmed to fit (see `fitLine()`). */
   maxRecordBytes?: number
@@ -717,7 +770,7 @@ export interface LineOptions {
  * call → logger bindings (`createLogger` / `.child()`) → Context Fields.
  * A binding or Context Field for one of the Record Keys (trace IDs
  * aside) moves to `args`, after the call's own `args`, bindings first, so it
- * is not dropped. `Error` values are serialized with `serializeError()` here
+ * is not dropped. `Error` values are serialized with `defaultErrorShape()` here
  * at the top level, in `errors`, and in `args` items (one level down, e.g.
  * `args: [{ err }]`), so most lines with an `Error` stay on the fast path of
  * `stringifyRecord()`. It serializes one at any other depth, through the
@@ -851,18 +904,10 @@ export function withLineOptions(record: LogRecord, options: LineOptions | undefi
 
 /**
  * The top-level keys `maxStringLength` never cuts: the Protected Fields but
- * `message` (and `err`'s `type`, see `keepsLength()`).
+ * `message`, which it cuts like any string (`maxRecordBytes` keeps it whole
+ * instead). `err`'s `type` is never cut either, see `keepsLength()`.
  */
-const UNCUT_KEYS: ReadonlySet<string> = new Set([
-  'time',
-  'level',
-  'traceId',
-  'spanId',
-  'parentSpanId',
-  'service',
-  'environment',
-  'version',
-])
+const UNCUT_KEYS: ReadonlySet<string> = new Set(PROTECTED_KEYS.filter((key) => key !== 'message'))
 
 /**
  * Whether the string at `key` in `holder` keeps its length under
@@ -1026,7 +1071,7 @@ function standIn(walk: Walk, text: string): string {
  * primitives are unwrapped. Beyond JSON: a `Map` is an array of
  * `[key, value]` pairs, a `Set` an array; a `BigInt` is its digits, a
  * function `[Function: name]`, a symbol `Symbol(description)` (boxed or
- * not); an `Error` is its `serializeError()` copy (see `errorToJSONValue()`),
+ * not); an `Error` is its `defaultErrorShape()` copy (see `errorToJSONValue()`),
  * unless it has a `toJSON`, which JSON calls first; a real cycle is
  * `"[Circular]"` (a `toJSON` result that refers back to
  * its object included); a repeated object (one with a `toJSON` included), or
@@ -1112,7 +1157,7 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
 }
 
 /**
- * The `Error` part of `toJSONValue()`: its copy from `serializeError()`,
+ * The `Error` part of `toJSONValue()`: its copy from `defaultErrorShape()`,
  * through the line's cache, nested in the Errors whose copies the walk is
  * inside. So it has the shape of a top-level `Error`, the same `Error` at the
  * same depth is the same copy (a repeat), an `Error` inside its own copy is
@@ -1260,7 +1305,7 @@ function objectToJSONValue(object: object, walk: Walk): unknown {
       const converted = toJSONValue(item, String(i), walk) ?? null
       out.push(
         typeof converted === 'string' && converted.length > walk.maxString
-          ? clipString(converted, walk.maxString)
+          ? cutString(converted, walk.maxString)
           : converted,
       )
     }
@@ -1281,7 +1326,7 @@ function objectToJSONValue(object: object, walk: Walk): unknown {
       typeof converted === 'string' &&
       converted.length > walk.maxString &&
       !keepsLength(object, key, walk.record!)
-        ? clipString(converted, walk.maxString)
+        ? cutString(converted, walk.maxString)
         : converted
   }
   return out
@@ -1368,7 +1413,7 @@ export function stringifyRecord(record: LogRecord): string {
 
 /**
  * `stringifyRecord()` before `maxRecordBytes`: the line, with every string
- * value longer than `maxStringLength` cut (see `clipString()`), but those
+ * value longer than `maxStringLength` cut (see `cutString()`), but those
  * `keepsLength()` keeps.
  *
  * @param {LogRecord} record - The record to serialize.
@@ -1396,7 +1441,7 @@ function writeRecord(record: LogRecord, options: LineOptions | undefined): strin
             strings.add(text)
           }
           return text.length > maxString && !keepsLength(this, key, record)
-            ? clipString(text, maxString)
+            ? cutString(text, maxString)
             : text
         }
         if (chars > MAX_FAST_CHARS) throw NEEDS_WALK
