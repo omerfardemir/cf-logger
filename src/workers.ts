@@ -9,6 +9,8 @@ import {
   recordSpan,
   registerDefaultLogger,
   runWithLogger,
+  setLoggerContext,
+  withSpan,
 } from './logger'
 import { loggerOptionsFromEnv, type EnvMapping } from './env'
 
@@ -56,6 +58,17 @@ function rootLoggerFor(options: LoggerOptions): Logger {
     rootLoggers.set(key, logger)
   }
   return logger
+}
+
+/**
+ * Register the isolate's Root Logger as the Default Logger unless one is already set
+ * (first seen wins). Shared by `TracedEntrypoint` and `withLogging()` entrypoints.
+ *
+ * @param {() => Logger} rootLogger - Resolves the Root Logger; called only while no default is set.
+ */
+function registerRootLogger(rootLogger: () => Logger): void {
+  // Once a default is set, skip working out the Logger Options on every request or RPC call.
+  if (!hasDefaultLogger()) registerDefaultLogger(rootLogger())
 }
 
 /**
@@ -205,8 +218,7 @@ export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
    */
   constructor(ctx: ExecutionContext, env: E) {
     super(ctx, env)
-    // Once a default is set, skip working out the Logger Options on every request or RPC call.
-    if (!hasDefaultLogger()) registerDefaultLogger(this.rootLogger)
+    registerRootLogger(() => this.rootLogger)
   }
 
   /**
@@ -367,4 +379,260 @@ export async function withTrace<T, R>(
 ): Promise<R> {
   const session = tracedSession(binding, fields)
   return fn(session)
+}
+
+/**
+ * Options for `withLogging()`.
+ *
+ * @template E - The worker environment type.
+ */
+export interface WithLoggingOptions<E = unknown> {
+  /**
+   * Record each call as a Span: one `span.end` with duration and status, at `ERROR`
+   * (with `err`) when the method throws or rejects. Default `false`.
+   */
+  spans?: boolean
+  /**
+   * Add `session(init)`, which returns a Traced Session over the same methods, so
+   * callers that use `tracedSession()` / `withTrace()` continue their trace.
+   * Default `false`: the entrypoint exposes exactly the methods it already has.
+   */
+  session?: boolean
+  /** Where the Root Logger's options come from in env (see `loggerOptionsFromEnv`). */
+  env?: EnvMapping<E>
+}
+
+/** A `WorkerEntrypoint` subclass, as `withLogging()` accepts it. */
+type EntrypointClass = new (ctx: ExecutionContext<any>, env: any) => WorkerEntrypoint<any, any>
+
+/**
+ * The env type of an entrypoint class, read from its constructor.
+ *
+ * @template C - The entrypoint class.
+ */
+type EntrypointEnv<C> = C extends new (ctx: any, env: infer E) => any ? E : unknown
+
+/** Event handlers, which JSRPC never calls by name. */
+type HandlerName =
+  | 'fetch'
+  | 'connect'
+  | 'email'
+  | 'queue'
+  | 'scheduled'
+  | 'tail'
+  | 'tailStream'
+  | 'test'
+  | 'trace'
+
+const HANDLERS: ReadonlySet<string> = new Set<HandlerName>([
+  'fetch',
+  'connect',
+  'email',
+  'queue',
+  'scheduled',
+  'tail',
+  'tailStream',
+  'test',
+  'trace',
+])
+
+/**
+ * The RPC methods of an entrypoint instance: its public methods minus the event handlers.
+ *
+ * @template T - The entrypoint instance type.
+ */
+type RpcMethodsOf<T> = {
+  [
+    K in keyof T as K extends HandlerName ? never : T[K] extends (...args: any[]) => any ? K : never
+  ]: T[K]
+}
+
+/** Any method, as stored on a prototype. */
+type Method = (...args: any[]) => unknown
+
+/**
+ * Define a method the way a class body does: non-enumerable, writable, configurable.
+ *
+ * @param {object} target - The prototype.
+ * @param {string} name - The method name; also the function's `name`.
+ * @param {Method} fn - The method.
+ */
+function defineMethod(target: object, name: string, fn: Method): void {
+  Object.defineProperty(fn, 'name', { value: name, configurable: true })
+  Object.defineProperty(target, name, {
+    value: fn,
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  })
+}
+
+/**
+ * The methods JSRPC can see on an entrypoint class: functions on its prototype
+ * chain below `WorkerEntrypoint.prototype`, nearest definition first, without
+ * `constructor`, accessors, or a method an accessor shadows.
+ *
+ * @param {EntrypointClass} Class - The entrypoint class.
+ * @returns {Map<string, Method>} Method name to the class's implementation.
+ */
+function prototypeMethods(Class: EntrypointClass): Map<string, Method> {
+  const methods = new Map<string, Method>()
+  const seen = new Set<string>(['constructor'])
+  for (
+    let proto: object | null = Class.prototype;
+    proto && proto !== WorkerEntrypoint.prototype && proto !== Object.prototype;
+    proto = Object.getPrototypeOf(proto)
+  ) {
+    for (const name of Object.getOwnPropertyNames(proto)) {
+      if (seen.has(name)) continue
+      seen.add(name)
+      const { value } = Object.getOwnPropertyDescriptor(proto, name)!
+      if (typeof value === 'function') methods.set(name, value as Method)
+    }
+  }
+  return methods
+}
+
+/**
+ * The Trace Carrier in a `fetch` call's request headers.
+ *
+ * @param {unknown} request - The first argument `fetch` was called with.
+ * @returns {TraceCarrier} The carrier; empty when there are no headers to read.
+ */
+function carrierFromRequest(request: unknown): TraceCarrier {
+  const headers = (request as { headers?: Headers } | undefined)?.headers
+  if (typeof headers?.get !== 'function') return {}
+  return {
+    traceparent: headers.get('traceparent') ?? undefined,
+    tracestate: headers.get('tracestate') ?? undefined,
+  }
+}
+
+/**
+ * Open a Logging Context around every public method of a plain `WorkerEntrypoint`,
+ * with no caller changes.
+ *
+ * Each RPC method call, and `fetch`, runs in its own Logging Context from the
+ * isolate's Root Logger, built with `loggerOptionsFromEnv(this.env, options.env)` and
+ * cached like `TracedEntrypoint`'s. A plain RPC call carries no Trace Carrier, so
+ * each one starts a new root trace; `fetch` continues the request's `traceparent`
+ * header when there is one. Every line carries the Context Fields `rpcMethod` (the
+ * method name) and `entrypoint` (the class name). A method called from inside a
+ * Logging Context (one public method calling another) stays in that context, as a
+ * child Span when `spans` is on.
+ *
+ * The methods are wrapped, never changed: arguments, return values (sync or async,
+ * an `RpcTarget` or a stub included) and thrown errors pass through as they are.
+ * The returned class has the same RPC methods as `Class`; `scheduled`, `queue`,
+ * `tail` and the other handlers are inherited unchanged. Its constructor registers
+ * the Root Logger as the Default Logger unless one is already set (first seen
+ * wins), so `getLogger()` in those handlers logs with `service` too.
+ *
+ * `session: true` adds `session(init)` for gradual migration: callers that move to
+ * `tracedSession()` / `withTrace()` continue their trace, while the rest keep
+ * calling the methods directly.
+ *
+ * @template C - The entrypoint class.
+ * @param {C} Class - A `WorkerEntrypoint` subclass.
+ * @param {WithLoggingOptions} [options] - `spans`, `session`, and the `env` mapping.
+ * @returns A subclass of `Class` whose public methods run in a Logging Context.
+ *
+ * @example
+ * ```ts
+ * class SearchWorker extends WorkerEntrypoint<Env> {
+ *   async search(q: string) {
+ *     getLogger().info({ q }, 'searching') // service, traceId, spanId, rpcMethod, entrypoint
+ *   }
+ * }
+ *
+ * export default withLogging(SearchWorker, { spans: true, session: true })
+ * ```
+ */
+export function withLogging<C extends EntrypointClass>(
+  Class: C,
+  options: WithLoggingOptions<EntrypointEnv<C>> & { session: true },
+): (new (...args: ConstructorParameters<C>) => InstanceType<C> & {
+  session(init: SessionInit): TracedSession<EntrypointEnv<C>> & RpcMethodsOf<InstanceType<C>>
+}) &
+  C
+export function withLogging<C extends EntrypointClass>(
+  Class: C,
+  options?: WithLoggingOptions<EntrypointEnv<C>>,
+): C
+export function withLogging<C extends EntrypointClass>(
+  Class: C,
+  options: WithLoggingOptions<EntrypointEnv<C>> = {},
+): C {
+  const { spans = false, session = false, env: mapping } = options
+  const entrypoint = Class.name
+  const methods = prototypeMethods(Class)
+  if (session && methods.has('session')) {
+    throw new TypeError(
+      `withLogging(${entrypoint}, { session: true }): ${entrypoint} already defines session()`,
+    )
+  }
+
+  const rootLoggerOf = (target: object): Logger =>
+    rootLoggerFor(loggerOptionsFromEnv((target as { env: unknown }).env, mapping as EnvMapping))
+  const fieldsOf = (name: string): LogFields =>
+    entrypoint ? { rpcMethod: name, entrypoint } : { rpcMethod: name }
+  const operationOf = (name: string): string | undefined =>
+    spans ? (entrypoint ? `${entrypoint}.${name}` : name) : undefined
+
+  const Logged = class extends (Class as EntrypointClass) {
+    constructor(ctx: ExecutionContext, env: unknown) {
+      super(ctx, env)
+      registerRootLogger(() => rootLoggerOf(this))
+    }
+  }
+  Object.defineProperty(Logged, 'name', { value: entrypoint, configurable: true })
+
+  for (const [name, method] of methods) {
+    if (HANDLERS.has(name) && name !== 'fetch') continue
+    defineMethod(Logged.prototype, name, function (this: object, ...args: unknown[]) {
+      const call = () => method.apply(this, args)
+      const operation = operationOf(name)
+      if (getTraceContext()) return operation ? withSpan(operation, call) : call()
+      return runWithLogger(
+        {
+          logger: rootLoggerOf(this),
+          ...(name === 'fetch' ? carrierFromRequest(args[0]) : {}),
+          fields: fieldsOf(name),
+        },
+        operation ? () => recordSpan(operation, call) : call,
+      )
+    })
+  }
+
+  if (session) {
+    const rpcMethods = [...methods].filter(([name]) => !HANDLERS.has(name))
+
+    /** What `session(init)` returns: the same RPC methods, continuing the caller's trace. */
+    class LoggedSession extends TracedSession<unknown> {
+      #target: object
+
+      constructor(init: SessionInit, rootLogger: Logger, env: unknown, target: object) {
+        super(init, rootLogger, env)
+        this.#target = target
+      }
+
+      static {
+        for (const [name, method] of rpcMethods) {
+          defineMethod(this.prototype, name, function (this: LoggedSession, ...args: unknown[]) {
+            const target = this.#target
+            return this.traced(() => {
+              setLoggerContext(fieldsOf(name))
+              return method.apply(target, args)
+            }, operationOf(name))
+          })
+        }
+      }
+    }
+
+    defineMethod(Logged.prototype, 'session', function (this: object, init?: SessionInit) {
+      return new LoggedSession(init ?? {}, rootLoggerOf(this), (this as { env: unknown }).env, this)
+    })
+  }
+
+  return Logged as unknown as C
 }
