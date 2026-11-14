@@ -159,7 +159,7 @@ export class TracedSession<E = unknown> extends RpcTarget {
 
   /**
    * @param {SessionInit} init - The caller's Trace Carrier and Context Fields.
-   * @param {Logger} rootLogger - The isolate's Root Logger (see `TracedEntrypoint.rootLogger`).
+   * @param {Logger} rootLogger - The isolate's Root Logger (`this[TracedEntrypoint.rootLogger]` in a `TracedEntrypoint`).
    * @param {E} env - The worker environment bindings.
    */
   constructor(init: SessionInit, rootLogger: Logger, env: E) {
@@ -203,72 +203,103 @@ export class TracedSession<E = unknown> extends RpcTarget {
 }
 
 /**
+ * The keys of TracedEntrypoint's hooks, public as its statics (`TracedEntrypoint.envMapping`, ...).
+ * Symbols, so the hooks are not RPC members: JSRPC exposes an entrypoint's string-keyed
+ * methods and getters, never its symbol-keyed ones, and never its constructor's statics.
+ */
+const ENV_MAPPING: unique symbol = Symbol('loggercf.envMapping')
+const LOGGER_OPTIONS: unique symbol = Symbol('loggercf.loggerOptions')
+const ROOT_LOGGER: unique symbol = Symbol('loggercf.rootLogger')
+
+/**
  * Base class for RPC worker entrypoints that build Traced Sessions by hand.
  *
- * Reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` from env by default.
- * Override the `envMapping` getter to read other vars or derive fields, or the
- * `loggerOptions` getter to build Logger Options yourself.
+ * Reads `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION` from env by default. Its three
+ * hooks are getters keyed by symbols, `TracedEntrypoint.envMapping`,
+ * `TracedEntrypoint.loggerOptions` and `TracedEntrypoint.rootLogger` (as
+ * `Symbol.iterator` keys an iterator): override `[TracedEntrypoint.envMapping]` to read
+ * other vars or derive fields, `[TracedEntrypoint.loggerOptions]` to build Logger Options
+ * yourself, or `[TracedEntrypoint.rootLogger]` to supply the Root Logger, and read
+ * `this[TracedEntrypoint.rootLogger]` to hand it to a Traced Session. A caller holding a
+ * service binding cannot reach them: JSRPC exposes only the string-keyed methods and
+ * getters your subclass declares.
  *
- * The constructor registers `rootLogger` as the Default Logger unless one is
- * already set (first seen wins), so `getLogger()` in `scheduled()`, `queue()` or a
- * plain RPC method logs with its `service`. The first instance in an isolate reads
- * `rootLogger` before subclass fields are initialized: build `envMapping` /
- * `loggerOptions` overrides from `this.env`, not from instance fields, and not from
- * `this.ctx.props` (which differ per caller). A Worker that exports several
- * entrypoints with different services should register its default explicitly at
- * module scope (`defaultLoggerFromEnv()` or `setDefaultLogger()`), because otherwise
- * whichever class is constructed first in an isolate wins.
+ * The constructor registers the Root Logger hook's value as the Default Logger unless one
+ * is already set (first seen wins), so `getLogger()` in `scheduled()`, `queue()` or a
+ * plain RPC method logs with its `service`. The first instance in an isolate reads it
+ * before subclass fields are initialized: build hook overrides from `this.env`, not from
+ * instance fields, and not from `this.ctx.props` (which differ per caller). A Worker that
+ * exports several entrypoints with different services should register its default
+ * explicitly at module scope (`defaultLoggerFromEnv()` or `setDefaultLogger()`), because
+ * otherwise whichever class is constructed first in an isolate wins.
  *
  * @template E - The worker environment type.
  *
  * @example
  * ```ts
  * export default class extends TracedEntrypoint<Env> {
- *   protected override get envMapping(): EnvMapping<Env> {
+ *   protected override get [TracedEntrypoint.envMapping](): EnvMapping<Env> {
  *     return { version: (env) => env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id }
  *   }
  *
  *   session(init: SessionInit) {
- *     return new MySession(init, this.rootLogger, this.env)
+ *     return new MySession(init, this[TracedEntrypoint.rootLogger], this.env)
  *   }
  * }
  * ```
  */
 export class TracedEntrypoint<E = unknown> extends WorkerEntrypoint<E> {
+  /** The key of the Env Mapping hook: where the Logger Options hook reads each field from. */
+  static readonly envMapping: typeof ENV_MAPPING = ENV_MAPPING
+  /** The key of the Logger Options hook: the Logger Options the Root Logger is built from. */
+  static readonly loggerOptions: typeof LOGGER_OPTIONS = LOGGER_OPTIONS
+  /** The key of the Root Logger hook: the isolate's Root Logger. */
+  static readonly rootLogger: typeof ROOT_LOGGER = ROOT_LOGGER
+
+  // Type-only guards (`declare` emits nothing, so the RPC surface stays empty): a subclass
+  // that still declares a hook under its old string name, `override` or not, fails to
+  // compile instead of being silently ignored and exposed over RPC.
+  /** Not a hook: override `[TracedEntrypoint.envMapping]` instead. */
+  declare protected readonly envMapping?: never
+  /** Not a hook: override `[TracedEntrypoint.loggerOptions]` instead. */
+  declare protected readonly loggerOptions?: never
+  /** Not a hook: override `[TracedEntrypoint.rootLogger]` instead. */
+  declare protected readonly rootLogger?: never
+
   /**
    * @param {ExecutionContext} ctx - The execution context.
    * @param {E} env - The worker environment bindings.
    */
   constructor(ctx: ExecutionContext, env: E) {
     super(ctx, env)
-    registerRootLogger(() => this.rootLogger)
+    registerRootLogger(() => this[ROOT_LOGGER])
   }
 
   /**
-   * Where `loggerOptions` reads each field from. Default: no overrides.
+   * Where the Logger Options hook reads each field from. Default: no overrides.
    *
    * @returns {EnvMapping<E>} The per-field var name or derive function.
    */
-  protected get envMapping(): EnvMapping<E> {
+  protected get [ENV_MAPPING](): EnvMapping<E> {
     return {}
   }
 
   /**
-   * Logger Options from env through `envMapping` (see `loggerOptionsFromEnv`).
+   * Logger Options from env through the Env Mapping hook (see `loggerOptionsFromEnv`).
    *
    * @returns {LoggerOptions} The Logger Options.
    */
-  protected get loggerOptions(): LoggerOptions {
-    return loggerOptionsFromEnv(this.env, this.envMapping)
+  protected get [LOGGER_OPTIONS](): LoggerOptions {
+    return loggerOptionsFromEnv(this.env, this[ENV_MAPPING])
   }
 
   /**
-   * The isolate's Root Logger for `loggerOptions`, created once and shared.
+   * The isolate's Root Logger for the Logger Options hook, created once and shared.
    *
    * @returns {Logger} The Root Logger.
    */
-  protected get rootLogger(): Logger {
-    return cachedRootLogger(this.loggerOptions)
+  protected get [ROOT_LOGGER](): Logger {
+    return cachedRootLogger(this[LOGGER_OPTIONS])
   }
 }
 
@@ -333,9 +364,11 @@ export function tracedWorker<S extends TracedSession>(
     fetch(request: Request): Response | Promise<Response>
   }
 } {
+  const mapping: EnvMapping<SessionEnv<S>> = options.env ?? {}
   return class extends TracedEntrypoint<SessionEnv<S>> {
-    protected override get envMapping(): EnvMapping<SessionEnv<S>> {
-      return options.env ?? {}
+    /** The closed-over mapping, behind the symbol-keyed hook: not an RPC member. */
+    protected override get [ENV_MAPPING](): EnvMapping<SessionEnv<S>> {
+      return mapping
     }
 
     /**
@@ -348,7 +381,7 @@ export function tracedWorker<S extends TracedSession>(
     }
 
     session(init: SessionInit): S {
-      return new SessionClass(init ?? {}, this.rootLogger, this.env)
+      return new SessionClass(init ?? {}, this[ROOT_LOGGER], this.env)
     }
   } as any
 }
@@ -583,8 +616,8 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
  * Each RPC method call, and `fetch`, runs in its own Logging Context from the
  * isolate's Root Logger, built with `loggerOptionsFromEnv(this.env, options.env)` and
  * cached like `TracedEntrypoint`'s. When `Class` is a `TracedEntrypoint` subclass,
- * its own `rootLogger` (from its `envMapping` / `loggerOptions`) is used instead, and
- * passing `options.env` throws. A plain RPC call carries no Trace Carrier, so each
+ * its own Root Logger hook (from its Env Mapping / Logger Options hooks) is used instead,
+ * and passing `options.env` throws. A plain RPC call carries no Trace Carrier, so each
  * one starts a new root trace; `fetch` continues the request's `traceparent` header
  * when there is one. `fetch: false` leaves `fetch` unwrapped: use it when `fetch`
  * hands the request to a Hono app that uses `useLogger`, which opens its own Logging
@@ -701,13 +734,13 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
   const isTracedEntrypoint = Class.prototype instanceof TracedEntrypoint
   if (isTracedEntrypoint && mapping) {
     throw new TypeError(
-      `${where}: ${entrypoint} is a TracedEntrypoint; override its envMapping getter instead of passing env`,
+      `${where}: ${entrypoint} is a TracedEntrypoint; override its [TracedEntrypoint.envMapping] getter instead of passing env`,
     )
   }
 
   /**
    * The Root Logger for one wrapped instance (an entrypoint or a Durable Object): its own
-   * `rootLogger` for a `TracedEntrypoint`, otherwise the cached one for its env and the
+   * Root Logger hook for a `TracedEntrypoint`, otherwise the cached one for its env and the
    * Env Mapping.
    *
    * @param {object} target - The wrapped instance.
@@ -715,7 +748,7 @@ export function withLogging<C extends EntrypointClass | DurableObjectSubclass>(
    */
   const instanceRootLogger = (target: object): Logger =>
     isTracedEntrypoint
-      ? (target as unknown as { rootLogger: Logger }).rootLogger
+      ? (target as unknown as { [ROOT_LOGGER]: Logger })[ROOT_LOGGER]
       : envRootLogger((target as { env: unknown }).env, mapping)
 
   /** Each instance's own Context Fields (a Durable Object's `objectId`), read in its constructor. */

@@ -24,6 +24,9 @@
 //   - Traced Session surface (dev/main-worker/src/session-surface.ts): through tracedWorker's and
 //     withLogging's session stubs, `traced`, `logger` and `env` are not RPC members, and a
 //     session method still continues the caller's trace.
+//   - Entrypoint surface (same file): through tracedWorker's entrypoint and a hand-written
+//     TracedEntrypoint subclass, `envMapping`, `loggerOptions` and `rootLogger` are not RPC
+//     members, and the subclass's session logs through the Root Logger its Env Mapping hook built.
 //
 // Runs on Linux, macOS and Windows.
 //
@@ -747,6 +750,43 @@ function checkSessionSurface(results, failures) {
     )
 }
 
+/**
+ * GET /entrypoint-surface: TracedEntrypoint's hooks are symbol-keyed, so reading `envMapping`,
+ * `loggerOptions` or `rootLogger` through bind's (tracedWorker) or math's TracedMath binding fails
+ * as a missing member. TracedMath's `cube` still continues main's span, logged with the `version`
+ * its Env Mapping hook derives.
+ */
+function checkEntrypointSurface(results, failures) {
+  const body = results.find((r) => r.path === '/entrypoint-surface')?.body ?? {}
+  const missing = /does not implement the method/
+  for (const entrypoint of ['bind', 'traced']) {
+    for (const member of ['envMapping', 'loggerOptions', 'rootLogger']) {
+      const outcome = body[entrypoint]?.[member]
+      if (outcome?.ok !== false || !missing.test(outcome.error ?? ''))
+        failures.push(
+          `/entrypoint-surface: ${entrypoint} ${member} is reachable over RPC: ${show(outcome)}`,
+        )
+    }
+  }
+  if (body.traced?.cube?.value !== 27)
+    failures.push(
+      `/entrypoint-surface: TracedMath cube(3) gave ${show(body.traced?.cube)}, expected 27`,
+    )
+  const cubed = readLogRecords()
+    .map(({ record }) => record)
+    .find((r) => r.message === 'Cubed 3 = 27')
+  if (
+    cubed?.service !== 'math-test' ||
+    !String(cubed.version).startsWith('traced-') ||
+    cubed.traceId !== TRACE_ID ||
+    typeof body.spanId !== 'string' ||
+    cubed.parentSpanId !== body.spanId
+  )
+    failures.push(
+      `logs: TracedMath cube(3) does not continue main's span ${body.spanId} with its mapped version: ${show(cubed)}`,
+    )
+}
+
 async function main() {
   if (await portInUse(PORT))
     throw new Error(`Port ${PORT} is already in use. Stop it before running e2e.`)
@@ -768,6 +808,7 @@ async function main() {
       ['/queue', 200],
       ['/workflow', 200],
       ['/session-surface', 200],
+      ['/entrypoint-surface', 200],
     ]) {
       results.push(await probe(base, path, status))
     }
@@ -794,6 +835,7 @@ async function main() {
     checkUnits(results, failures)
     checkForwards(forwards, base, failures)
     checkSessionSurface(results, failures)
+    checkEntrypointSurface(results, failures)
 
     if (failures.length > 0) {
       console.error(`E2E failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`)

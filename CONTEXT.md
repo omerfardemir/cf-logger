@@ -65,6 +65,11 @@ _Avoid_: extras, rest, leftovers
 What one log line may write again of what it already holds: 10,000 values, or 65,536 characters of keys and strings, inside repeats (an object written before on the line, an object whose `toJSON` was already called, a string of 1,024 characters or more the line already holds, or the text of a `BigInt`, a function or a symbol that long). The message and the rest of the line spend from the same one. A repeat that doesn't fit is `"[Repeated]"` as a whole, so a line holds its first copies plus about one budget, however shared its values are. Serializing an `Error` again, in a graph of Errors with cycles, has a budget of its own of the same size.
 _Avoid_: quota, limit, the line's budget
 
+**Entrypoint Hook**:
+One of the three getters a `TracedEntrypoint` subclass overrides to supply its Env Mapping, Logger Options or Root Logger, keyed by the symbols `TracedEntrypoint.envMapping`, `.loggerOptions` and `.rootLogger`. Symbol-keyed so they stay off the entrypoint's RPC surface: a caller holding its Service Binding reaches only the string-keyed methods and getters the subclass declares.
+_Avoid_: config getter
+Not to be confused with the Hono middleware's `fields` / `endFields` hooks.
+
 ### Tracing
 
 **Trace Context**:
