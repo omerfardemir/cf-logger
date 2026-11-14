@@ -412,7 +412,8 @@ function standIn(walk: Walk, text: string): string {
  * primitives are unwrapped. Beyond JSON: a `Map` is an array of
  * `[key, value]` pairs, a `Set` an array; a `BigInt` is its digits, a
  * function `[Function: name]`, a symbol `Symbol(description)`; a real cycle
- * is `"[Circular]"`; a repeated object is written again, within a budget per line
+ * is `"[Circular]"` (a `toJSON` result that refers back to its object
+ * included); a repeated object is written again, within a budget per line
  * (see `MAX_REWRITTEN_VALUES`), then is `"[Repeated]"`; a getter or a
  * `toJSON` that throws is `unserializable()` for that value only.
  *
@@ -430,22 +431,32 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
   if (typeof value !== 'object' || value === null) return value
   const object = value
 
+  if (walk.ancestors.has(object)) return standIn(walk, '[Circular]')
+
   if (useToJSON) {
-    let replaced: unknown
-    let hasToJSON = false
+    let toJSON: unknown
     try {
-      const toJSON = (object as { toJSON?: unknown }).toJSON
-      if (typeof toJSON === 'function') {
-        replaced = toJSON.call(object, key)
-        hasToJSON = true
-      }
+      toJSON = (object as { toJSON?: unknown }).toJSON
     } catch (thrown) {
       return standIn(walk, unserializable(thrown))
     }
-    if (hasToJSON) return toJSONValue(replaced, key, walk, false)
+    if (typeof toJSON === 'function') {
+      // On the path while its result is written, so a result that refers back is a cycle.
+      walk.ancestors.add(object)
+      try {
+        let replaced: unknown
+        try {
+          replaced = toJSON.call(object, key)
+        } catch (thrown) {
+          return standIn(walk, unserializable(thrown))
+        }
+        if (replaced !== object) return toJSONValue(replaced, key, walk, false)
+      } finally {
+        walk.ancestors.delete(object)
+      }
+    }
   }
 
-  if (walk.ancestors.has(object)) return standIn(walk, '[Circular]')
   walk.ancestors.add(object)
   try {
     if (walk.seen.has(object)) return repeatToJSONValue(object, walk)
@@ -475,8 +486,8 @@ function nonJSONText(value: unknown): string | undefined {
   return undefined
 }
 
-/** `Object.prototype.toString` of the boxed primitives JSON unwraps. */
-const BOXED = new Set(['[object Number]', '[object String]', '[object Boolean]'])
+/** `Object.prototype.toString` of the boxed primitives JSON unwraps, and of a boxed `BigInt` (written as its digits). */
+const BOXED = new Set(['[object Number]', '[object String]', '[object Boolean]', '[object BigInt]'])
 
 /**
  * The object part of `toJSONValue()`: its items or entries, each converted.

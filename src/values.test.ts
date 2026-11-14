@@ -353,6 +353,34 @@ describe('the serializer', () => {
     )
   })
 
+  it('a boxed BigInt is its digits, like a BigInt', () => {
+    expect(stringifyRecord({ n: Object(10n), list: [Object(10n)] })).toBe(
+      '{"n":"10","list":["10"]}',
+    )
+  })
+
+  it('a toJSON whose result refers back to its object is "[Circular]" there', () => {
+    const self = {
+      toJSON() {
+        return { x: this }
+      },
+    }
+    expect(JSON.parse(stringifyRecord({ self }))).toEqual({ self: { x: '[Circular]' } })
+  })
+
+  it('a toJSON that returns its own object writes its keys, as JSON does', () => {
+    const own = {
+      a: 1,
+      toJSON() {
+        return this
+      },
+    }
+    expect(JSON.parse(stringifyRecord({ own, again: own }))).toEqual({
+      own: { a: 1, toJSON: '[Function: toJSON]' },
+      again: { a: 1, toJSON: '[Function: toJSON]' },
+    })
+  })
+
   it('an own __proto__ key stays a key', () => {
     const record = JSON.parse('{"__proto__":{"x":1},"a":1}')
     expect(stringifyRecord(record)).toBe('{"__proto__":{"x":1},"a":1}')
