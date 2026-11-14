@@ -28,8 +28,8 @@ export type RequestIdSource = string | ((c: Context) => string | undefined)
  * a safe header value, `crypto.randomUUID()` is used instead.
  *
  * A source, `validate` or `generate` that throws never fails the request. Each `useLogger()`
- * writes one `WARN` through its Root Logger the first time that happens (no error message,
- * since it may echo the ID).
+ * writes at most one `WARN` for a throwing source or `validate`, and one for a bad `generate`
+ * result, through its Root Logger (no error message, since it may echo the ID).
  */
 export interface RequestIdOptions {
   /**
@@ -48,7 +48,8 @@ export interface RequestIdOptions {
   /**
    * Accepts or rejects an incoming ID. Replaces the default check, including its length cap,
    * so anchor a pattern (`^...$`) and bound its length. The safe-header-value check always
-   * applies on top of it.
+   * applies on top of it. Only a literal `true` accepts; any other result, a throw, or a
+   * Promise rejects the value.
    * Defaults to `/^[\w\-=:.]{1,128}$/`: 1 to 128 of `A-Z a-z 0-9 _ - = : .`.
    */
   validate?: RegExp | ((id: string, c: Context) => boolean)
@@ -93,12 +94,21 @@ interface PickedRequestId {
   cfRay?: string
 }
 
-/** Calls an app callback; a throw counts as "no usable value", never as a failed request. */
-function tryCall<R>(fn: () => R, onThrow: () => void): R | undefined {
+/**
+ * Calls an app callback; a throw counts as "no usable value", never as a failed request.
+ * A returned Promise gets a no-op rejection handler, so it can't become an unhandled rejection.
+ *
+ * @param fn - The app callback.
+ * @param [onThrow] - Called when `fn` throws.
+ * @returns What `fn` returned, or `undefined` when it threw.
+ */
+function tryCall<R>(fn: () => R, onThrow?: () => void): R | undefined {
   try {
-    return fn()
+    const value = fn()
+    if (value instanceof Promise) value.catch(() => {})
+    return value
   } catch {
-    onThrow()
+    onThrow?.()
     return undefined
   }
 }
@@ -128,16 +138,21 @@ function requestIdPicker(
     generate = () => crypto.randomUUID(),
   } = options
 
-  const readers = from.map((source): ((c: Context) => unknown) => {
-    if (typeof source === 'function') return source
+  interface Reader {
+    read: (c: Context) => unknown
+    /** Whether this source is the `cf-ray` header, whose rejected value must not become `cfRay`. */
+    isCfRay: boolean
+  }
+  const readers: Reader[] = from.map((source): Reader => {
+    if (typeof source === 'function') return { read: source, isCfRay: false }
     if (!HEADER_NAME.test(source)) {
       throw new TypeError(
         `useLogger: invalid header name in requestId.from: ${JSON.stringify(source)}`,
       )
     }
-    return (c) => c.req.header(source)
+    return { read: (c) => c.req.header(source), isCfRay: source.toLowerCase() === 'cf-ray' }
   })
-  readers.push((c) => c.get('requestId' as never))
+  readers.push({ read: (c) => c.get('requestId' as never), isCfRay: false })
   // The header names above are checked either way, so a bad `from` always fails at setup.
   const sources = trustIncoming ? readers : []
 
@@ -156,10 +171,7 @@ function requestIdPicker(
   }
 
   const generateSafe = (c: Context, logger: Pick<Logger, 'warn'>): string => {
-    const id = tryCall(
-      () => generate(c),
-      () => {},
-    )
+    const id = tryCall(() => generate(c))
     if (typeof id === 'string' && SAFE_HEADER_VALUE.test(id)) return id
     warnOnce(logger, 'generate')
     return crypto.randomUUID()
@@ -175,7 +187,7 @@ function requestIdPicker(
     const threw = () => warnOnce(logger, 'callback')
     let cfRay = readCfRay(c)
     let rejected = false
-    for (const read of sources) {
+    for (const { read, isCfRay } of sources) {
       const id = tryCall(() => read(c), threw)
       // No value (absent, empty, or a source that threw or returned a non-string) is not a rejection.
       if (typeof id !== 'string' || id === '') continue
@@ -184,8 +196,9 @@ function requestIdPicker(
         return { id, rejected, cfRay }
       }
       rejected = true
-      // A rejected value is never logged, so it can't come back as `cfRay` either.
-      if (id === cfRay) cfRay = undefined
+      // A `cf-ray` rejected as the request ID is not logged as `cfRay` either. Only that
+      // source counts: a client can't drop a genuine `cfRay` by sending its Ray ID elsewhere.
+      if (isCfRay) cfRay = undefined
     }
     return { id: generateSafe(c, logger), rejected, cfRay }
   }

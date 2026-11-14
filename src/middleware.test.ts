@@ -571,16 +571,29 @@ describe('useLogger request ID', () => {
     }
   })
 
-  it('treats a validate that throws as a rejection', async () => {
+  it('treats a validate that throws as a rejection, with one WARN without the message', async () => {
     const ctx = requestIdApp({
       requestId: {
         validate: () => {
-          throw new Error('boom')
+          throw new Error('secret-id')
         },
       },
     })
     expect(await requestIdOf(ctx, { 'X-Request-Id': 'r-1' })).toMatch(UUID_RE)
+    await ctx.app.request('/', { headers: { 'X-Request-Id': 'r-2' } })
     expect(ctx.entries.find(messageStartsWith('request.end'))!.requestIdRejected).toBe(true)
+    const warns = ctx.entries.filter((e) => e.level === 'WARN')
+    expect(warns).toHaveLength(1)
+    expect(JSON.stringify(warns[0])).not.toContain('secret-id')
+  })
+
+  it('keeps a genuine cfRay when a client sends the same value in X-Request-Id and it is rejected', async () => {
+    const ray = '8f1c2a3b4d5e6f70-AMS'
+    const ctx = requestIdApp({ requestId: { validate: /^req_/ } })
+    expect(await requestIdOf(ctx, { 'cf-ray': ray, 'X-Request-Id': ray })).toMatch(UUID_RE)
+    const end = ctx.entries.find(messageStartsWith('request.end'))!
+    expect(end.requestIdRejected).toBe(true)
+    expect(end.cfRay).toBe(ray)
   })
 
   it('treats a from function that throws or returns a non-string as no value, not a rejection', async () => {
