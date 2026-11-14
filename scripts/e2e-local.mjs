@@ -4,6 +4,12 @@
 // `pnpm dev`, sends requests carrying a known traceparent, and asserts:
 //   - HTTP: status, X-Request-Id / X-Trace-Id / traceparent / tracestate response headers, bodies.
 //   - Request ID: an invalid incoming X-Request-Id is replaced by a generated UUID.
+//   - Service binding fetch: a request through tracedFetcher(env.BIND) arrives with the
+//     caller's trace ID and X-Request-Id, and bind-worker's useLogger continues the trace.
+//   - Forwarding c.req.raw: a POST with a body, a stale client X-Request-Id and a client
+//     traceparent / tracestate, forwarded through tracedFetcher(env.BIND), arrives with the
+//     gateway's Request ID and trace (the fetch span as parent), the gateway's tracestate (none
+//     when the trace did not continue from the client's), and the same method and body.
 //   - Logs: the Workers' own output continues the trace across every RPC hop,
 //     with the span chain intact and no duplicate keys on any line, and each
 //     Worker's `version` read through its Env Mapping.
@@ -48,6 +54,16 @@ const REQUEST_HEADERS = {
   tracestate: 'vendor=value',
   'X-Request-Id': REQUEST_ID,
 }
+
+// POST /fetcher-forward: a gateway forwarding its own incoming Request (c.req.raw).
+const FORWARD_TRACE_ID = '33333333333333333333333333333333'
+const FORWARD_PARENT_SPAN_ID = '4444444444444444'
+const FORWARD_TRACESTATE = 'vendor=forward'
+// Fails useLogger's default check (spaces), so the gateway generates its own Request ID.
+const STALE_REQUEST_ID = 'stale client id'
+const STALE_TRACESTATE = 'stale=client'
+const FORWARD_BODY = '{"item":"forwarded"}'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -160,7 +176,7 @@ async function checkInvalidRequestId(base, failures) {
   const res = await fetch(`${base}/trace`, { headers: { 'X-Request-Id': 'not a valid id' } })
   await res.arrayBuffer()
   const echoed = res.headers.get('X-Request-Id') ?? ''
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(echoed))
+  if (!UUID_RE.test(echoed))
     failures.push(
       `invalid X-Request-Id: response X-Request-Id ${JSON.stringify(echoed)}, expected a UUID`,
     )
@@ -199,6 +215,166 @@ function checkResponses(results, failures) {
   expectBody('/logged', 'pong', 'pong')
   expectBody('/logged', 'error', 'LoggedMath failure')
   expectBody('/logged', 'traceId', TRACE_ID)
+  expectBody('/fetcher', 'traceId', TRACE_ID)
+
+  // bind-worker's useLogger, reached through tracedFetcher(env.BIND), continued the trace.
+  const downstream = byPath['/fetcher']?.body?.downstream ?? {}
+  if (downstream.traceId !== TRACE_ID)
+    failures.push(`/fetcher downstream traceId ${downstream.traceId}, expected ${TRACE_ID}`)
+  if (!traceparentRe.test(downstream.traceparent ?? ''))
+    failures.push(`/fetcher downstream received traceparent ${downstream.traceparent}`)
+  if (downstream.requestId !== REQUEST_ID)
+    failures.push(`/fetcher downstream requestId ${downstream.requestId}, expected ${REQUEST_ID}`)
+}
+
+/**
+ * tracedFetcher({ spans: true }) logs one span.end fetch in main-worker, and the receiver's
+ * lines continue from that span.
+ */
+function checkFetcher(records, downstream, failures) {
+  const spans = records.filter(
+    (r) => r.service === 'pino-log-test' && r.message === 'span.end fetch',
+  )
+  if (spans.length !== 1) {
+    failures.push(`logs: ${spans.length} span.end fetch lines in main-worker, expected 1`)
+    return
+  }
+  const [span] = spans
+  const expected = { method: 'GET', host: 'bind-test', path: '/echo-trace', statusCode: 200 }
+  for (const [key, value] of Object.entries(expected)) {
+    if (span[key] !== value)
+      failures.push(`logs: span.end fetch ${key} ${JSON.stringify(span[key])}, expected ${value}`)
+  }
+  if (span.span?.status !== 'OK') failures.push(`logs: span.end fetch status ${span.span?.status}`)
+  if (JSON.stringify(span).includes('not-logged'))
+    failures.push('logs: span.end fetch logged the query string')
+  if (downstream?.parentSpanId !== span.spanId)
+    failures.push(
+      `logs: bind-worker parent span ${downstream?.parentSpanId} is not the fetch span ${span.spanId}`,
+    )
+
+  const echo = records.find((r) => r.message === 'bind.echoTrace')
+  if (!echo) {
+    failures.push('logs: no bind.echoTrace line from bind-worker')
+  } else if (
+    echo.service !== 'bind-test' ||
+    echo.requestId !== REQUEST_ID ||
+    echo.parentSpanId !== span.spanId
+  ) {
+    failures.push(`logs: bind.echoTrace does not continue the fetch span: ${JSON.stringify(echo)}`)
+  }
+}
+
+/**
+ * POST /fetcher-forward twice, each with a body and a stale client X-Request-Id:
+ * - `continued`: a valid client traceparent + tracestate, which the gateway's useLogger
+ *   continues, so its context keeps that tracestate;
+ * - `new trace`: an invalid traceparent, so the gateway starts a new trace with no tracestate
+ *   and the client's tracestate (now stale) must not reach the receiver.
+ */
+async function sendForwards(base) {
+  const send = async (label, traceHeaders) => {
+    const res = await fetch(`${base}/fetcher-forward`, {
+      method: 'POST',
+      headers: {
+        ...traceHeaders,
+        'X-Request-Id': STALE_REQUEST_ID,
+        'Content-Type': 'application/json',
+      },
+      body: FORWARD_BODY,
+    })
+    const text = await res.text()
+    let body = text
+    try {
+      body = JSON.parse(text)
+    } catch {
+      // keep raw text
+    }
+    return {
+      label,
+      status: res.status,
+      xRequestId: res.headers.get('X-Request-Id'),
+      xTraceId: res.headers.get('X-Trace-Id'),
+      tracestate: res.headers.get('tracestate'),
+      body,
+    }
+  }
+  return [
+    await send('continued', {
+      traceparent: `00-${FORWARD_TRACE_ID}-${FORWARD_PARENT_SPAN_ID}-01`,
+      tracestate: FORWARD_TRACESTATE,
+    }),
+    await send('new trace', { traceparent: 'not-a-traceparent', tracestate: STALE_TRACESTATE }),
+  ]
+}
+
+/**
+ * What bind-worker received from `tracedFetcher(env.BIND, { forwardRequestId, spans })
+ * .fetch(c.req.raw)`, against the gateway's own Request ID, trace and fetch span.
+ */
+function checkForwards(forwards, base, failures) {
+  const records = readLogRecords().map(({ record }) => record)
+  for (const f of forwards) {
+    const fail = (what) => failures.push(`/fetcher-forward (${f.label}): ${what}`)
+    if (f.status !== 200) {
+      fail(`status ${f.status}, body ${JSON.stringify(f.body)}`)
+      continue
+    }
+    const continued = f.label === 'continued'
+    const traceId = continued ? FORWARD_TRACE_ID : f.xTraceId
+    const tracestate = continued ? FORWARD_TRACESTATE : null
+
+    // The gateway: its own Request ID (the client's was rejected), its trace and tracestate.
+    if (!UUID_RE.test(f.xRequestId ?? '')) fail(`gateway X-Request-Id ${f.xRequestId}`)
+    const traceOk = continued
+      ? f.xTraceId === FORWARD_TRACE_ID
+      : /^[0-9a-f]{32}$/.test(f.xTraceId ?? '') && f.xTraceId !== FORWARD_TRACE_ID
+    if (!traceOk)
+      fail(
+        `gateway X-Trace-Id ${f.xTraceId}, expected ${continued ? FORWARD_TRACE_ID : 'a new one'}`,
+      )
+    if (f.tracestate !== tracestate)
+      fail(`gateway tracestate ${f.tracestate}, expected ${tracestate}`)
+
+    const spans = records.filter(
+      (r) =>
+        r.service === 'pino-log-test' && r.traceId === traceId && r.message === 'span.end fetch',
+    )
+    if (spans.length !== 1) {
+      fail(`${spans.length} span.end fetch lines in main-worker, expected 1`)
+      continue
+    }
+    const [span] = spans
+    const expectedSpan = {
+      method: 'POST',
+      host: new URL(base).host,
+      path: '/fetcher-forward',
+      statusCode: 200,
+    }
+    for (const [key, value] of Object.entries(expectedSpan)) {
+      if (span[key] !== value) fail(`span.end fetch ${key} ${JSON.stringify(span[key])}`)
+    }
+
+    // The receiver: the gateway's Request ID, trace, fetch span and tracestate; same method and body.
+    const d = f.body?.downstream ?? {}
+    const expected = {
+      requestId: f.xRequestId,
+      xRequestId: f.xRequestId,
+      traceId,
+      parentSpanId: span.spanId,
+      traceparent: `00-${traceId}-${span.spanId}-01`,
+      tracestate,
+      method: 'POST',
+      body: FORWARD_BODY,
+    }
+    for (const [key, value] of Object.entries(expected)) {
+      if (d[key] !== value)
+        fail(`downstream ${key} ${JSON.stringify(d[key])}, expected ${JSON.stringify(value)}`)
+    }
+    if (JSON.stringify(d).includes(STALE_REQUEST_ID)) fail("the client's X-Request-Id reached bind")
+    if (JSON.stringify(d).includes(STALE_TRACESTATE))
+      fail("the client's stale tracestate reached bind")
+  }
 }
 
 /** Parse the JSON log lines out of wrangler's output (it adds prefixes and ANSI colors). */
@@ -435,13 +611,18 @@ async function waitForOutput(server, markers, timeoutMs = 30_000) {
   }
 }
 
-function checkLogs(failures) {
+function checkLogs(failures, results) {
   checkDefaultLogger(failures)
   const lines = readLogRecords().filter(({ record }) => record.traceId === TRACE_ID)
   if (lines.length === 0) {
     failures.push('logs: no Worker log lines carry the request traceId')
     return
   }
+  checkFetcher(
+    lines.map(({ record }) => record),
+    results.find((r) => r.path === '/fetcher')?.body?.downstream,
+    failures,
+  )
 
   for (const { json } of lines) {
     const keys = topLevelKeys(json)
@@ -535,6 +716,7 @@ async function main() {
       ['/multi-hop', 200],
       ['/trace', 200],
       ['/error', 500],
+      ['/fetcher', 200],
       ['/logged', 200],
       ['/durable-object', 200],
       ['/queue', 200],
@@ -542,6 +724,8 @@ async function main() {
     ]) {
       results.push(await probe(base, path, status))
     }
+
+    const forwards = await sendForwards(base)
 
     const failures = []
     await checkInvalidRequestId(base, failures)
@@ -558,9 +742,10 @@ async function main() {
     await server.flush()
 
     checkResponses(results, failures)
-    checkLogs(failures)
+    checkLogs(failures, results)
     checkWithLogging(results, failures)
     checkUnits(results, failures)
+    checkForwards(forwards, base, failures)
 
     if (failures.length > 0) {
       console.error(`E2E failed:\n${failures.map((f) => `  - ${f}`).join('\n')}`)
@@ -568,7 +753,7 @@ async function main() {
       process.exitCode = 1
       return
     }
-    console.log(JSON.stringify(results, null, 2))
+    console.log(JSON.stringify([...results, ...forwards], null, 2))
     console.log('E2E passed.')
   } finally {
     if (process.env.LOGGERCF_E2E_SKIP_CLEANUP !== '1') stopProcessTree(server.child)

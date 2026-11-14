@@ -98,9 +98,11 @@ export function buildTraceparent(trace: TraceContext): string {
  * Resolve a `TraceContext` from an incoming `traceparent` header.
  *
  * Parses and continues the trace if valid, otherwise starts a new root trace.
- * Always generates a new `spanId` for the current service.
+ * Always generates a new `spanId` for the current service. `tracestate` is kept only
+ * with a valid `traceparent` (W3C Trace Context), so a new root trace has none.
  *
  * @param {string | null} [traceparent] - The incoming `traceparent` header value, if any.
+ * @param {string | null} [tracestate] - The incoming `tracestate` header value, if any.
  * @returns {TraceContext} A trace context representing the current span.
  *
  * @example
@@ -119,7 +121,8 @@ export function resolveTrace(
     spanId: generateSpanId(),
     ...(parsed?.spanId ? { parentSpanId: parsed.spanId } : {}),
     traceFlags: parsed?.traceFlags ?? 1,
-    ...(tracestate ? { tracestate } : {}),
+    // W3C: a tracestate without a valid traceparent is ignored.
+    ...(parsed && tracestate ? { tracestate } : {}),
   }
 }
 

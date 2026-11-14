@@ -1,6 +1,12 @@
 import { Hono } from 'hono'
 import { logger, useLogger } from './logger'
-import { setLoggerContext, getTraceContext, getTraceCarrier, type Logger } from 'loggercf'
+import {
+  setLoggerContext,
+  getTraceContext,
+  getTraceCarrier,
+  tracedFetcher,
+  type Logger,
+} from 'loggercf'
 import { withTrace } from 'loggercf/workers'
 import type { BindService, LoggedMathService, ServiceSession } from './types'
 import { queue, scheduled, units, type Job } from './units'
@@ -9,7 +15,7 @@ export { Report, Room } from './units'
 
 type Context = {
   Bindings: {
-    BIND: ServiceSession<BindService>
+    BIND: ServiceSession<BindService> & Fetcher
     LOGGED: LoggedMathService & ServiceSession<LoggedMathService> & Pick<Fetcher, 'fetch'>
     NAME: string
     LOG_LEVEL: string
@@ -148,6 +154,33 @@ app.get('/trace', async (c) => {
     parentSpanId: trace?.parentSpanId,
     traceparent,
   })
+})
+
+/** GET /fetcher HTTP over a service binding: bind-worker's useLogger continues this trace */
+app.get('/fetcher', async (c) => {
+  // traceparent / tracestate and X-Request-Id go with the request; one span.end fetch is logged.
+  const bind = tracedFetcher(c.env.BIND, { forwardRequestId: true, spans: true })
+  // The query string is not logged on the span (it can carry tokens).
+  const res = await bind.fetch('https://bind-test/echo-trace?token=not-logged')
+  const downstream = await res.json()
+  c.var.logger.info({ downstream }, 'Service binding fetch complete')
+
+  return c.json({
+    message: 'HTTP over a service binding: main → bind-worker (useLogger)',
+    traceId: getTraceContext()?.traceId,
+    downstream,
+  })
+})
+
+/**
+ * POST /fetcher-forward A gateway forwarding its own incoming Request over a service binding.
+ * The client's X-Request-Id is replaced by this Worker's Request ID, and its tracestate goes
+ * only when this trace continued from the client's traceparent.
+ */
+app.post('/fetcher-forward', async (c) => {
+  const bind = tracedFetcher(c.env.BIND, { forwardRequestId: true, spans: true })
+  const res = await bind.fetch(c.req.raw)
+  return c.json({ traceId: getTraceContext()?.traceId, downstream: await res.json() })
 })
 
 export default {
