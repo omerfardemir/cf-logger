@@ -53,7 +53,7 @@ class BindSession extends TracedSession<Env> implements BindService {
 
 export default class extends tracedWorker(BindSession) {
   /** HTTP over the service binding: see ./http.ts. */
-  fetch(request?: Request): Response | Promise<Response> {
-    return http.fetch(request as Request)
+  fetch(request: Request): Response | Promise<Response> {
+    return http.fetch(request)
   }
 }

@@ -294,7 +294,8 @@ export function tracedWorker<S extends TracedSession>(
 ): {
   new (...args: any[]): {
     session(init: SessionInit): S
-    fetch(): Response | Promise<Response>
+    // Declared with the request, as `WorkerEntrypoint#fetch` is, so a subclass can take it.
+    fetch(request: Request): Response | Promise<Response>
   }
 } {
   return class extends TracedEntrypoint<SessionEnv<S>> {
