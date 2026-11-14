@@ -1,5 +1,6 @@
 import type { Context, MiddlewareHandler } from 'hono'
-import type { LogFields, Logger } from './types'
+import { routePath } from 'hono/route'
+import type { LogFields, LogLevel, Logger } from './types'
 import { extractCarrier, injectCarrier } from './trace'
 import { getLogger, getTraceCarrier, getTraceContext, runWithLogger } from './logger'
 
@@ -43,10 +44,119 @@ export interface RequestIdOptions {
   generate?: (c: Context) => string
 }
 
+/**
+ * Request details `useLogger` can add to `request.start` and `request.end`. Each is off by
+ * default and is left out when the request does not have it.
+ */
+export interface RequestDetailsOptions {
+  /** `userAgent`: the `User-Agent` request header, as sent. */
+  userAgent?: boolean
+  /**
+   * `cf`: `{ colo, country, asn }` from Cloudflare's `request.cf`. Only those three keys, and
+   * only values of the expected type. There is no `request.cf` on Node.js or in most tests.
+   */
+  cf?: boolean
+}
+
 /** Options for `useLogger`. */
 export interface UseLoggerOptions {
   /** How the request ID is read, validated and generated. */
   requestId?: RequestIdOptions
+  /** `false` writes no `request.start` line, only `request.end`. Defaults to `true`. */
+  requestStart?: boolean
+  /**
+   * Picks the level of `request.end` from the final status and the error Hono caught
+   * (`c.error`), if any. Defaults to `defaultRequestEndLevel`: `error` for an error or a 5xx,
+   * `warn` for a 4xx, `info` otherwise. When it throws or returns an unknown level, the default
+   * is used and one WARN is written.
+   */
+  level?: (statusCode: number, err: Error | undefined, c: Context) => LogLevel
+  /**
+   * Context Fields to add at the start of the request, so they are on every line of it,
+   * `request.start` included. Runs before the handlers, so it sees the request but not what
+   * later middleware sets. `requestId` and `cfRay` cannot be replaced. When it throws, the
+   * request is logged without these fields and one WARN is written.
+   */
+  fields?: (c: Context) => LogFields | undefined
+  /**
+   * Fields to add to `request.end` only. Runs after the handlers, so it sees `c.var` values
+   * they set (an authenticated user ID, for example). It cannot replace `method`, `path`,
+   * `route`, `statusCode`, `duration` or `err`. When it throws, `request.end` is written
+   * without these fields and one WARN is written.
+   */
+  endFields?: (c: Context) => LogFields | undefined
+  /** Request details to add to `request.start` and `request.end`. All off by default. */
+  include?: RequestDetailsOptions
+}
+
+/**
+ * The default `level` of `request.end`: `error` when Hono caught an error or the status is
+ * 5xx, `warn` for 4xx, `info` otherwise.
+ */
+export function defaultRequestEndLevel(statusCode: number, err: Error | undefined): LogLevel {
+  return err || statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
+}
+
+const LOG_LEVELS: ReadonlySet<unknown> = new Set<LogLevel>([
+  'trace',
+  'debug',
+  'info',
+  'warn',
+  'error',
+  'fatal',
+])
+
+type Hook = 'fields' | 'endFields' | 'level'
+
+const HOOK_FAILURE: Record<Hook, string> = {
+  fields: 'useLogger: the fields option failed; the request is logged without its fields',
+  endFields: 'useLogger: the endFields option failed; request.end is written without its fields',
+  level: 'useLogger: the level option failed; request.end uses the default level',
+}
+
+/**
+ * Reports an option hook that threw or returned an unknown level: one WARN per hook per
+ * `useLogger()` call, so a hook that fails on every request does not double the log volume.
+ */
+function hookFailureReporter() {
+  const reported = new Set<Hook>()
+  return (logger: Logger, hook: Hook, details: Record<string, unknown>): void => {
+    if (reported.has(hook)) return
+    reported.add(hook)
+    logger.warn({ hook, ...details }, HOOK_FAILURE[hook])
+  }
+}
+
+type Attempt<R> = { ok: true; value: R } | { ok: false; err: unknown }
+
+/** Runs an option hook, turning a throw into a value so it never reaches the app. */
+function attempt<R>(fn: () => R): Attempt<R> {
+  try {
+    return { ok: true, value: fn() }
+  } catch (err) {
+    return { ok: false, err }
+  }
+}
+
+/** The `include` details of a request; a detail the request does not have is left out. */
+function requestDetails(c: Context, include: RequestDetailsOptions): LogFields {
+  const details: LogFields = {}
+  if (include.userAgent) {
+    const userAgent = c.req.header('user-agent')
+    if (userAgent) details.userAgent = userAgent
+  }
+  if (include.cf) {
+    const cf = (c.req.raw as { cf?: unknown }).cf
+    if (cf !== null && typeof cf === 'object') {
+      const { colo, country, asn } = cf as Record<string, unknown>
+      const basics: LogFields = {}
+      if (typeof colo === 'string') basics.colo = colo
+      if (typeof country === 'string') basics.country = country
+      if (typeof asn === 'number') basics.asn = asn
+      if (Object.keys(basics).length > 0) details.cf = basics
+    }
+  }
+  return details
 }
 
 /**
@@ -114,12 +224,18 @@ function requestIdPicker(options: RequestIdOptions = {}): (c: Context) => string
  * - Reuses a valid incoming request ID, otherwise generates one (see `RequestIdOptions`).
  * - Adds `requestId`, and `cfRay` when the `cf-ray` header is present, to the Context Fields
  *   so they appear on every log line.
- * - Logs `request.start` / `request.end` (and `request.error` when Hono caught one).
+ * - Logs `request.start` (unless `requestStart: false`) and one `request.end` with `method`,
+ *   `path` (never the query string), `route` (the matched pattern), `statusCode`, `duration`,
+ *   and `err` when Hono caught an error. Its level comes from `options.level`.
  * - Sets `c.var.logger`, `c.var.requestId`, `c.var.traceId` and the response headers.
+ *
+ * An option hook (`fields`, `endFields`, `level`) that throws never changes the response
+ * and never drops `request.end`: the line is written without that hook's result, and one WARN
+ * per hook per `useLogger()` call names it.
  *
  * @template T - The type of user-defined log fields.
  * @param {Logger<T> | ((c: Context) => Logger<T>)} loggerOrFactory - A logger instance or a per-request factory.
- * @param {UseLoggerOptions} [options] - How the request ID is read, validated and generated.
+ * @param {UseLoggerOptions} [options] - Request ID, request lines and extra fields.
  * @returns {MiddlewareHandler} The middleware handler function.
  *
  * @example
@@ -140,6 +256,8 @@ export function useLogger<T extends LogFields = LogFields>(
   options: UseLoggerOptions = {},
 ): MiddlewareHandler {
   const pickRequestId = requestIdPicker(options.requestId)
+  const { requestStart = true, level, fields, endFields, include = {} } = options
+  const reportHookFailure = hookFailureReporter()
 
   return async (c, next) => {
     const rootLogger = 'info' in loggerOrFactory ? loggerOrFactory : loggerOrFactory(c)
@@ -147,12 +265,18 @@ export function useLogger<T extends LogFields = LogFields>(
     const requestId = pickRequestId(c)
     const cfRay = c.req.header('cf-ray')
     const method = c.req.method
+    // The pathname only: a query string often carries tokens and personal data.
     const path = new URL(c.req.url).pathname
+    // The last matched route is the handler's pattern, already known before the handler runs.
+    const route = routePath(c, -1)
+    const details = requestDetails(c, include)
+    const appFields = fields && attempt(() => fields(c))
 
     const contextOptions = {
       logger: rootLogger,
       ...extractCarrier((name) => c.req.header(name)),
       fields: {
+        ...(appFields?.ok && appFields.value),
         requestId,
         ...(cfRay !== undefined && matches(DEFAULT_REQUEST_ID_PATTERN, cfRay) && { cfRay }),
       },
@@ -164,21 +288,40 @@ export function useLogger<T extends LogFields = LogFields>(
       c.set('requestId' as never, requestId as never)
       c.set('traceId' as never, trace.traceId as never)
 
-      logger.info({ method, path }, `request.start ${method} ${path}`)
+      if (appFields && !appFields.ok) reportHookFailure(logger, 'fields', { err: appFields.err })
+      if (requestStart) {
+        logger.info({ ...details, method, path, route }, `request.start ${method} ${path}`)
+      }
 
       const start = Date.now()
       await next()
 
       const duration = Date.now() - start
       const statusCode = c.res.status
+      const err = c.error
 
-      if (c.error) {
-        logger.error(
-          { err: c.error, method, path, statusCode, duration },
-          `request.error ${method} ${path}`,
-        )
-      }
-      logger.info({ method, path, statusCode, duration }, `request.end ${method} ${path}`)
+      const extra = endFields && attempt(() => endFields(c))
+      if (extra && !extra.ok) reportHookFailure(logger, 'endFields', { err: extra.err })
+
+      let endLevel = defaultRequestEndLevel(statusCode, err)
+      const picked = level && attempt(() => level(statusCode, err, c))
+      if (picked && !picked.ok) reportHookFailure(logger, 'level', { err: picked.err })
+      else if (picked && LOG_LEVELS.has(picked.value)) endLevel = picked.value
+      else if (picked) reportHookFailure(logger, 'level', { returned: String(picked.value) })
+
+      logger[endLevel](
+        {
+          ...(extra?.ok && extra.value),
+          ...details,
+          method,
+          path,
+          route,
+          statusCode,
+          duration,
+          ...(err !== undefined && { err }),
+        },
+        `request.end ${method} ${path}`,
+      )
 
       c.header('X-Request-Id', requestId)
       c.header('X-Trace-Id', trace.traceId)
