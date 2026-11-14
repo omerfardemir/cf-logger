@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { Hono, type MiddlewareHandler } from 'hono'
 import { HTTPException } from 'hono/http-exception'
 import { createLogger, _captureEntries, _captureLines, _reset } from './logger'
-import type { Logger } from './types'
+import type { LogFields, Logger } from './types'
 import { useLogger, type UseLoggerOptions } from './middleware'
 
 function setup() {
@@ -1132,6 +1132,15 @@ describe('useLogger owned keys a hook returns', () => {
   })
 })
 
+/** A hook that returns a Proxy whose `traps` throw an Error with `message`. */
+function proxyThrowingIn(traps: (keyof ProxyHandler<object>)[], message: string): () => LogFields {
+  const trap = () => {
+    throw new Error(message)
+  }
+  const handler: ProxyHandler<LogFields> = Object.fromEntries(traps.map((name) => [name, trap]))
+  return () => new Proxy({}, handler)
+}
+
 function throwingHook(): never {
   throw new Error('broke')
 }
@@ -1331,10 +1340,7 @@ describe('useLogger hook errors', () => {
   })
 
   it('treats a Proxy result whose traps throw as a failure, for fields and endFields', async () => {
-    const trap = () => {
-      throw new Error('trap broke')
-    }
-    const hostile = () => new Proxy({}, { ownKeys: trap, get: trap, has: trap })
+    const hostile = proxyThrowingIn(['ownKeys', 'get', 'has'], 'trap broke')
     const { starts, ends, warnings, app } = optionsApp({ fields: hostile, endFields: hostile })
     app.get('/', (c) => c.text('handled'))
     const res = await app.request('/')
@@ -1349,15 +1355,7 @@ describe('useLogger hook errors', () => {
   })
 
   it('treats a Proxy result whose ownKeys trap alone throws as a failure', async () => {
-    const hostile = () =>
-      new Proxy(
-        {},
-        {
-          ownKeys() {
-            throw new Error('ownKeys broke')
-          },
-        },
-      )
+    const hostile = proxyThrowingIn(['ownKeys'], 'ownKeys broke')
     const { ends, warnings, app } = optionsApp({ endFields: hostile })
     app.get('/', (c) => c.text('handled'))
     expect((await app.request('/')).status).toBe(200)
@@ -1382,6 +1380,10 @@ describe('useLogger hook errors', () => {
     expect(warns).toHaveLength(2)
   })
 })
+
+function forgedEscapeKeys() {
+  return { statusCodeAssumed: 'forged', originalErr: 'forged' }
+}
 
 describe('useLogger throws that escape Hono', () => {
   beforeEach(() => _reset())
@@ -1517,8 +1519,7 @@ describe('useLogger throws that escape Hono', () => {
   })
 
   it('does not let a hook set statusCodeAssumed or originalErr', async () => {
-    const forged = () => ({ statusCodeAssumed: 'forged', originalErr: 'forged' })
-    const { entries, app } = optionsApp({ fields: forged, endFields: forged })
+    const { entries, app } = optionsApp({ fields: forgedEscapeKeys, endFields: forgedEscapeKeys })
     app.get('/x', (c) => c.text('ok'))
     await app.request('/x')
     expect(entries().length).toBeGreaterThan(0)
