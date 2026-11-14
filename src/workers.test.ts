@@ -1385,4 +1385,117 @@ describe('withLogging', () => {
     expect(entries[2]).toMatchObject({ message: 'fetch', path: '/fresh' })
     expect(entries[2]!.traceId).not.toBe('11111111111111111111111111111111')
   })
+
+  it('a nested call keeps the caller rpcMethod; only the child Span names the callee', () => {
+    const entries = _captureEntries()
+    const worker = new (withLogging(SearchWorker, { spans: true }))({} as any, ENV)
+
+    worker.nested()
+
+    expect(entries.find((e) => e.message === 'searching')).toMatchObject({ rpcMethod: 'nested' })
+    expect(spanEnds(entries)).toMatchObject([
+      { message: 'span.end SearchWorker.search', rpcMethod: 'nested' },
+      { message: 'span.end SearchWorker.nested', rpcMethod: 'nested' },
+    ])
+  })
+
+  it('user methods named traced and logger work on the entrypoint and on the session', () => {
+    const entries = _captureEntries()
+    class Shadowing extends WorkerEntrypoint<typeof ENV> {
+      traced(n: number) {
+        getLogger().info('in traced')
+        return n * 2
+      }
+
+      logger() {
+        return 'mine'
+      }
+    }
+    const worker = new (withLogging(Shadowing, { spans: true, session: true }))({} as any, ENV)
+
+    expect(worker.traced(2)).toBe(4)
+    expect(worker.logger()).toBe('mine')
+    const session = tracedSession(worker) as unknown as Shadowing
+    expect(session.traced(3)).toBe(6)
+    expect(session.logger()).toBe('mine')
+
+    expect(entries.filter((e) => e.message === 'in traced')).toMatchObject([
+      { rpcMethod: 'traced', entrypoint: 'Shadowing' },
+      { rpcMethod: 'traced', entrypoint: 'Shadowing' },
+    ])
+    expect(spanEnds(entries).map((e) => e.message)).toEqual([
+      'span.end Shadowing.traced',
+      'span.end Shadowing.logger',
+      'span.end Shadowing.traced',
+      'span.end Shadowing.logger',
+    ])
+  })
+
+  it('wrapping a TracedEntrypoint subclass uses its rootLogger (its envMapping)', () => {
+    const entries = _captureEntries()
+    interface Env {
+      NAME: string
+      SERVICE: string
+    }
+    class Mapped extends TracedEntrypoint<Env> {
+      protected override get envMapping(): EnvMapping<Env> {
+        return { service: 'SERVICE' }
+      }
+
+      hello() {
+        getLogger().info('hello')
+      }
+    }
+    const env = { NAME: 'wrong', SERVICE: 'mapped' }
+    const worker = new (withLogging(Mapped, { session: true }))({} as any, env)
+
+    worker.hello()
+    ;(tracedSession(worker) as unknown as Mapped).hello()
+
+    expect(entries.map((e) => e.service)).toEqual(['mapped', 'mapped'])
+    expect(_getDefaultLogger()).toBe((worker as any).rootLogger)
+    expect(() => withLogging(Mapped, { env: { service: 'NAME' } })).toThrow(
+      /TracedEntrypoint.*envMapping/,
+    )
+  })
+
+  it('session: true rejects a session getter, own or inherited', () => {
+    class Getter extends WorkerEntrypoint {
+      get session() {
+        return 1
+      }
+    }
+    class Inherits extends Getter {}
+    expect(() => withLogging(Getter, { session: true })).toThrow(/already defines session/)
+    expect(() => withLogging(Inherits, { session: true })).toThrow(/already defines session/)
+  })
+
+  it('wrapping a wrapped class returns it with the same options and throws with others', () => {
+    const entries = _captureEntries()
+    const mapping = { service: 'NAME' } as const
+    const Once = withLogging(SearchWorker, { spans: true, session: true, env: mapping })
+
+    const Twice = withLogging(Once, { spans: true, session: true, env: { service: 'NAME' } })
+    expect(Twice).toBe(Once)
+    new Twice({} as any, ENV).search('cats')
+    expect(spanEnds(entries)).toHaveLength(1)
+
+    expect(() => withLogging(Once, { session: true, env: mapping })).toThrow(
+      /already wrapped with other options/,
+    )
+    expect(() => withLogging(Once, { spans: true, env: mapping })).toThrow(
+      /already wrapped with other options/,
+    )
+    expect(() => withLogging(Once, { spans: true, session: true })).toThrow(
+      /already wrapped with other options/,
+    )
+    const Plain = withLogging(SearchWorker)
+    expect(withLogging(Plain)).toBe(Plain)
+    expect(withLogging(Plain, { spans: false, session: false, env: {} })).toBe(Plain)
+
+    class Sub extends Plain {}
+    expect(() => withLogging(Sub)).toThrow(/extends a class already wrapped/)
+    // The marker is not a visible property.
+    expect(Reflect.ownKeys(Once)).toEqual(Reflect.ownKeys(withLogging(SearchWorker)))
+  })
 })

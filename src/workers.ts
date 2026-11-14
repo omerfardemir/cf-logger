@@ -13,6 +13,7 @@ import {
   withSpan,
 } from './logger'
 import { loggerOptionsFromEnv, type EnvMapping } from './env'
+import { extractCarrier } from './trace'
 
 export { loggerOptionsFromEnv } from './env'
 export type { EnvMapping, EnvSource } from './env'
@@ -69,6 +70,24 @@ function rootLoggerFor(options: LoggerOptions): Logger {
 function registerRootLogger(rootLogger: () => Logger): void {
   // Once a default is set, skip working out the Logger Options on every request or RPC call.
   if (!hasDefaultLogger()) registerDefaultLogger(rootLogger())
+}
+
+/**
+ * Run `fn` in a new Logging Context, as a Span covering that context when
+ * `operation` is given. Shared by `TracedSession.traced()` and `withLogging()`.
+ *
+ * @template R - The return type of `fn`.
+ * @param {Parameters<typeof runWithLogger>[0]} context - The Logging Context to open.
+ * @param {() => R} fn - The function to run in it.
+ * @param {string} [operation] - Span operation name; no Span without it.
+ * @returns {R} The return value of `fn`, unchanged.
+ */
+function runLogged<R>(
+  context: Parameters<typeof runWithLogger>[0],
+  fn: () => R,
+  operation?: string,
+): R {
+  return runWithLogger(context, operation ? () => recordSpan(operation, fn) : fn)
 }
 
 /**
@@ -157,14 +176,15 @@ export class TracedSession<E = unknown> extends RpcTarget {
    * @returns {R} The return value of `fn`.
    */
   protected traced<R>(fn: () => R, operation?: string): R {
-    return runWithLogger(
+    return runLogged(
       {
         logger: this.#rootLogger,
         traceparent: this.#init.traceparent,
         tracestate: this.#init.tracestate,
         fields: this.#init.fields,
       },
-      operation ? () => recordSpan(operation, fn) : fn,
+      fn,
+      operation,
     )
   }
 
@@ -413,18 +433,7 @@ type EntrypointClass = new (ctx: ExecutionContext<any>, env: any) => WorkerEntry
 type EntrypointEnv<C> = C extends new (ctx: any, env: infer E) => any ? E : unknown
 
 /** Event handlers, which JSRPC never calls by name. */
-type HandlerName =
-  | 'fetch'
-  | 'connect'
-  | 'email'
-  | 'queue'
-  | 'scheduled'
-  | 'tail'
-  | 'tailStream'
-  | 'test'
-  | 'trace'
-
-const HANDLERS: ReadonlySet<string> = new Set<HandlerName>([
+const HANDLERS = [
   'fetch',
   'connect',
   'email',
@@ -434,7 +443,11 @@ const HANDLERS: ReadonlySet<string> = new Set<HandlerName>([
   'tailStream',
   'test',
   'trace',
-])
+] as const
+
+type HandlerName = (typeof HANDLERS)[number]
+
+const isHandler = (name: string): boolean => (HANDLERS as readonly string[]).includes(name)
 
 /**
  * The RPC methods of an entrypoint instance: its public methods minus the event handlers.
@@ -494,18 +507,29 @@ function prototypeMethods(Class: EntrypointClass): Map<string, Method> {
 }
 
 /**
- * The Trace Carrier in a `fetch` call's request headers.
- *
- * @param {unknown} request - The first argument `fetch` was called with.
- * @returns {TraceCarrier} The carrier; empty when there are no headers to read.
+ * The classes `withLogging()` returned, with the options each was made with. Kept
+ * here, not on the class, so the class carries no extra property.
  */
-function carrierFromRequest(request: unknown): TraceCarrier {
-  const headers = (request as { headers?: Headers } | undefined)?.headers
-  if (typeof headers?.get !== 'function') return {}
-  return {
-    traceparent: headers.get('traceparent') ?? undefined,
-    tracestate: headers.get('tracestate') ?? undefined,
-  }
+const loggedClasses = new WeakMap<object, WithLoggingOptions<any>>()
+
+/**
+ * Whether two `withLogging()` options produce the same wrapping: the same `spans` and
+ * `session` (default `false`), and Env Mappings with the same keys and values (a
+ * derive function compares by identity).
+ *
+ * @param {WithLoggingOptions} a - One set of options.
+ * @param {WithLoggingOptions} b - The other.
+ * @returns {boolean} `true` when they are the same.
+ */
+function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): boolean {
+  const envA = (a.env ?? {}) as Record<string, unknown>
+  const envB = (b.env ?? {}) as Record<string, unknown>
+  const keys = new Set([...Object.keys(envA), ...Object.keys(envB)])
+  return (
+    !!a.spans === !!b.spans &&
+    !!a.session === !!b.session &&
+    [...keys].every((key) => envA[key] === envB[key])
+  )
 }
 
 /**
@@ -514,23 +538,30 @@ function carrierFromRequest(request: unknown): TraceCarrier {
  *
  * Each RPC method call, and `fetch`, runs in its own Logging Context from the
  * isolate's Root Logger, built with `loggerOptionsFromEnv(this.env, options.env)` and
- * cached like `TracedEntrypoint`'s. A plain RPC call carries no Trace Carrier, so
- * each one starts a new root trace; `fetch` continues the request's `traceparent`
- * header when there is one. Every line carries the Context Fields `rpcMethod` (the
- * method name) and `entrypoint` (the class name). A method called from inside a
- * Logging Context (one public method calling another) stays in that context, as a
- * child Span when `spans` is on.
+ * cached like `TracedEntrypoint`'s. When `Class` is a `TracedEntrypoint` subclass,
+ * its own `rootLogger` (from its `envMapping` / `loggerOptions`) is used instead, and
+ * passing `options.env` throws. A plain RPC call carries no Trace Carrier, so each
+ * one starts a new root trace; `fetch` continues the request's `traceparent` header
+ * when there is one. Every line carries the Context Fields `rpcMethod` (the method
+ * name) and `entrypoint` (the class name). A method called from inside a Logging
+ * Context (one public method calling another) stays in that context, `rpcMethod`
+ * included, as a child Span when `spans` is on.
  *
  * The methods are wrapped, never changed: arguments, return values (sync or async,
  * an `RpcTarget` or a stub included) and thrown errors pass through as they are.
  * The returned class has the same RPC methods as `Class`; `scheduled`, `queue`,
  * `tail` and the other handlers are inherited unchanged. Its constructor registers
  * the Root Logger as the Default Logger unless one is already set (first seen
- * wins), so `getLogger()` in those handlers logs with `service` too.
+ * wins), so `getLogger()` in those handlers logs with `service` too. Getters, and
+ * the body of an `async *` method (which runs on each `.next()`), run outside the
+ * Logging Context.
  *
  * `session: true` adds `session(init)` for gradual migration: callers that move to
  * `tracedSession()` / `withTrace()` continue their trace, while the rest keep
  * calling the methods directly.
+ *
+ * Wrapping a class `withLogging()` returned gives back that class when the options
+ * are the same, and throws when they differ. Wrapping a subclass of one throws.
  *
  * @template C - The entrypoint class.
  * @param {C} Class - A `WorkerEntrypoint` subclass.
@@ -565,15 +596,34 @@ export function withLogging<C extends EntrypointClass>(
 ): C {
   const { spans = false, session = false, env: mapping } = options
   const entrypoint = Class.name
-  const methods = prototypeMethods(Class)
-  if (session && methods.has('session')) {
+  const where = `withLogging(${entrypoint})`
+
+  const previous = loggedClasses.get(Class)
+  if (previous) {
+    if (sameOptions(previous, options)) return Class
+    throw new TypeError(`${where}: ${entrypoint} is already wrapped with other options`)
+  }
+  for (let base = Object.getPrototypeOf(Class); base; base = Object.getPrototypeOf(base)) {
+    if (loggedClasses.has(base)) {
+      throw new TypeError(
+        `${where}: ${entrypoint} extends a class already wrapped by withLogging(); wrap one of them, not both`,
+      )
+    }
+  }
+  if (session && 'session' in Class.prototype) {
+    throw new TypeError(`${where}: ${entrypoint} already defines session()`)
+  }
+  const traced = Class.prototype instanceof TracedEntrypoint
+  if (traced && mapping) {
     throw new TypeError(
-      `withLogging(${entrypoint}, { session: true }): ${entrypoint} already defines session()`,
+      `${where}: ${entrypoint} is a TracedEntrypoint; override its envMapping getter instead of passing env`,
     )
   }
 
   const rootLoggerOf = (target: object): Logger =>
-    rootLoggerFor(loggerOptionsFromEnv((target as { env: unknown }).env, mapping as EnvMapping))
+    traced
+      ? (target as unknown as { rootLogger: Logger }).rootLogger
+      : rootLoggerFor(loggerOptionsFromEnv((target as { env: unknown }).env, mapping as EnvMapping))
   const fieldsOf = (name: string): LogFields =>
     entrypoint ? { rpcMethod: name, entrypoint } : { rpcMethod: name }
   const operationOf = (name: string): string | undefined =>
@@ -587,26 +637,42 @@ export function withLogging<C extends EntrypointClass>(
   }
   Object.defineProperty(Logged, 'name', { value: entrypoint, configurable: true })
 
-  for (const [name, method] of methods) {
-    if (HANDLERS.has(name) && name !== 'fetch') continue
-    defineMethod(Logged.prototype, name, function (this: object, ...args: unknown[]) {
-      const call = () => method.apply(this, args)
+  /**
+   * Wrap one entrypoint method: a new Logging Context, or a child Span of the current one.
+   *
+   * @param {string} name - The method name.
+   * @param {Method} method - The class's implementation.
+   * @param {(args: unknown[]) => TraceCarrier} [carrierOf] - Reads a Trace Carrier from the call's arguments.
+   * @returns {Method} The wrapped method.
+   */
+  const wrap = (name: string, method: Method, carrierOf?: (args: unknown[]) => TraceCarrier) =>
+    function (this: object, ...args: unknown[]) {
+      const run = () => method.apply(this, args)
       const operation = operationOf(name)
-      if (getTraceContext()) return operation ? withSpan(operation, call) : call()
-      return runWithLogger(
-        {
-          logger: rootLoggerOf(this),
-          ...(name === 'fetch' ? carrierFromRequest(args[0]) : {}),
-          fields: fieldsOf(name),
-        },
-        operation ? () => recordSpan(operation, call) : call,
+      if (getTraceContext()) return operation ? withSpan(operation, run) : run()
+      return runLogged(
+        { logger: rootLoggerOf(this), ...carrierOf?.(args), fields: fieldsOf(name) },
+        run,
+        operation,
       )
-    })
+    }
+
+  const methods = prototypeMethods(Class)
+  const rpcMethods = [...methods].filter(([name]) => !isHandler(name))
+  for (const [name, method] of rpcMethods) defineMethod(Logged.prototype, name, wrap(name, method))
+  // `fetch` is the one handler wrapped, because its request is a Trace Carrier.
+  const fetch = methods.get('fetch')
+  if (fetch) {
+    defineMethod(
+      Logged.prototype,
+      'fetch',
+      wrap('fetch', fetch, (args) =>
+        extractCarrier((header) => (args[0] as Request | undefined)?.headers?.get(header)),
+      ),
+    )
   }
 
   if (session) {
-    const rpcMethods = [...methods].filter(([name]) => !HANDLERS.has(name))
-
     /** What `session(init)` returns: the same RPC methods, continuing the caller's trace. */
     class LoggedSession extends TracedSession<unknown> {
       #target: object
@@ -616,11 +682,24 @@ export function withLogging<C extends EntrypointClass>(
         this.#target = target
       }
 
+      /**
+       * `TracedSession.traced()`, reached through `super` so that a user method named
+       * `traced`, copied onto this prototype, cannot shadow it.
+       *
+       * @template R - The return type of `fn`.
+       * @param {() => R} fn - The method call.
+       * @param {string} [operation] - Span operation name.
+       * @returns {R} The return value of `fn`.
+       */
+      #traced<R>(fn: () => R, operation?: string): R {
+        return super.traced(fn, operation)
+      }
+
       static {
         for (const [name, method] of rpcMethods) {
           defineMethod(this.prototype, name, function (this: LoggedSession, ...args: unknown[]) {
             const target = this.#target
-            return this.traced(() => {
+            return this.#traced(() => {
               setLoggerContext(fieldsOf(name))
               return method.apply(target, args)
             }, operationOf(name))
@@ -634,5 +713,6 @@ export function withLogging<C extends EntrypointClass>(
     })
   }
 
+  loggedClasses.set(Logged, { spans, session, env: mapping })
   return Logged as unknown as C
 }
