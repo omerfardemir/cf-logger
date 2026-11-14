@@ -29,6 +29,14 @@ The per-process configuration a Root Logger is built from: service name, minimum
 Where each Logger Options field is read from in a Worker's (or process's) env: a var name or a function of env. Unmapped fields read `NAME`, `LOG_LEVEL`, `ENVIRONMENT` and `VERSION`.
 _Avoid_: env config, var map
 
+**Argument Routing**:
+The rule that places every argument of a log call in exactly one part of the line (the message, top-level fields, `err` / `errors`, or the Overflow), for both the structured call style (fields or an `Error` first) and the console style (message first). No argument is ever dropped. It runs before serialization, so routed values are serialized like any field.
+_Avoid_: argument parsing, normalization
+
+**Overflow**:
+The `args` field of a log line: the values of a log call that have no better place (arrays, class instances, functions, an object's values for loggercf's own keys), in call order. Present only when non-empty.
+_Avoid_: extras, rest, leftovers
+
 ### Tracing
 
 **Trace Context**:

@@ -205,24 +205,38 @@ export default class extends TracedEntrypoint<Env> {
 
 ### Log call shape
 
-The object comes first and the message second. An `Error` is kept under `err` either as the first argument or as `{ err }`. It is serialized with type, message, stack, own fields and `cause`.
+Two call styles work, and no argument is ever dropped. Prefer the structured style (fields or an `Error` first, then the message) for data you want to query. The console style (message first) also keeps every argument: a trailing object's keys become top-level fields, the first trailing `Error` becomes `err`, extra strings and numbers join the message, and anything else goes to an `args` array.
 
 ```ts
 import { createLogger } from 'loggercf'
 
 const logger = createLogger({ service: 'api' })
 const err = new Error('payment declined')
+
+// structured
 logger.error(err)
 logger.error({ err, orderId: 'o-1' }, 'charge failed')
 logger.info({ orderId: 'o-1' }, 'charged')
+
+// console style: same fields on the line
+logger.error('charge failed', err, { orderId: 'o-1' })
+logger.info('charged %s', 'o-1', { amount: 42 })
+
+try {
+  throw new Error('declined')
+} catch (e) {
+  logger.error({ err: e }, 'charge failed') // e is unknown: pass it as { err } or after the message
+}
 ```
+
+An `Error` is serialized with type, message, stack, own fields and `cause`. `printf` placeholders (`%s %d %i %f %j %o %O %%`) take arguments in order. `%s` prints an object as `[object Object]`:
 
 ```ts wrong
-logger.error('charge failed', err) // the error is dropped from the line
-logger.info('charged', { orderId }) // the object is dropped from the line
+logger.info('loaded order %s', order) // prints [object Object]; use logger.info({ order }, 'loaded order')
+logger.error(e) // in a catch, e is unknown and does not compile; use logger.error({ err: e }, 'msg')
 ```
 
-`traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context, and any value you pass for those keys is replaced. To read them, call `getTraceContext()`.
+`traceId`, `spanId` and `parentSpanId` are added to every line in a Logging Context. A log call can't overwrite them, or loggercf's other own keys (`time`, `level`, `message`, `service`, `environment`, `version`, `errors`, `args`, and `err` once set): an object's values for those keys land in `args` instead. To read the trace IDs, call `getTraceContext()`.
 
 ## Wrangler setup
 

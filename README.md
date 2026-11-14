@@ -1,6 +1,6 @@
 # loggercf
 
-Structured logging for Cloudflare Workers and Node.js. Built on [Pino](https://getpino.io/) with per-request context via `AsyncLocalStorage`, W3C trace propagation, and a Session Factory pattern for RPC trace propagation across service bindings.
+Structured logging for Cloudflare Workers and Node.js, with no runtime dependencies: per-request context via `AsyncLocalStorage`, W3C trace propagation, and a Session Factory pattern for RPC trace propagation across service bindings.
 
 ## Install
 
@@ -514,12 +514,61 @@ Span logging is **optional**. Without an operation name, `traced()` only opens t
 
 ## Log Output
 
+### Call styles
+
+Both styles work, and can be mixed. **No argument is ever dropped**: every value you pass ends up in one documented place in the line.
+
+```ts
+// Structured (recommended for fields you want to query): fields or an Error first, then the message
+logger.info({ userId: 'u-42' }, 'user signed in')
+logger.error(err, 'charge failed')
+logger.error({ err, orderId: 'o-1' }, 'charge failed')
+
+// Console style: the message first, then anything
+logger.info('user signed in', { userId: 'u-42' }) // {"message":"user signed in","userId":"u-42"}
+logger.error('charge failed', err) // {"message":"charge failed","err":{...}}
+logger.info('user %s signed in', 'ada', { plan: 'pro' }) // {"message":"user ada signed in","plan":"pro"}
+logger.error('scope', 'Failed to create task', { detail: 'x' }) // {"message":"scope Failed to create task","detail":"x"}
+logger.info('items', [1, 2, 3]) // {"message":"items","args":[[1,2,3]]}
+logger.error('two failures', e1, e2) // {"err":{...e1},"errors":[{...e2}],...}
+```
+
+The message supports `printf` placeholders: `%s` (string), `%d` / `%f` (number), `%i` (integer), `%j` / `%o` / `%O` (JSON), `%%` (a literal `%`, when there are arguments). Each placeholder takes the next argument. `%s` turns an object into `[object Object]`, so pass objects as fields or use `%j`. Any other `%` sequence takes an argument too (as `50% off %s` does), and that argument is routed like a later one: write `50%% off %s`.
+
+In a `catch`, where the error is `unknown`, use `logger.error({ err }, 'msg')` or `logger.error('msg', err)`: the first argument must be a string, an `Error` or an object.
+
+### Where each argument goes
+
+| Argument                                                                              | Goes to                                                                          |
+| ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **First**: a string                                                                   | the message (with placeholders)                                                  |
+| **First**: an `Error`                                                                 | `err`; the message defaults to `err.message`                                     |
+| **First**: a plain object                                                             | its keys, at the top level                                                       |
+| **First**: a number, boolean, `null`, `undefined`                                     | `args`, and `String(value)` is the message                                       |
+| **First**: anything else (array, class instance, ...)                                 | `args`                                                                           |
+| **Second**, after an `Error` or object: a string                                      | the message (with placeholders); `undefined` means no message                    |
+| **Any later argument** a placeholder takes                                            | the message                                                                      |
+| **Later**: an `Error`                                                                 | `err` if not set yet, otherwise `errors: [...]`                                  |
+| **Later**: a plain object                                                             | its keys, at the top level (a later object wins over an earlier one)             |
+| **Later**: a string, number, boolean, `null`, `undefined`, `BigInt`                   | appended to the message after a space, like `console.log('a', 'b', 3)` → `a b 3` |
+| **Later**: anything else (array, class instance, `Date`, function, symbol)            | `args`                                                                           |
+| A placeholder that can't print its argument (`%d` with `null`, `%j` with `undefined`) | the placeholder stays in the text; the argument is routed like a later one       |
+
+`args` (the overflow) is an array in call order, present only when something went there. An object can't overwrite loggercf's own keys: `time`, `level`, `message`, `service`, `environment`, `version`, `traceId`, `spanId`, `parentSpanId`, `errors`, `args`, and `err` once it is set. Those keys of an object move to `args`, as one object per argument:
+
+```ts
+logger.info('x', { level: 'custom', traceId: 'mine', a: 1 })
+// {"level":"INFO","a":1,"message":"x","traceId":"<real>",...,"args":[{"level":"custom","traceId":"mine"}]}
+```
+
+### The line
+
 Every runtime builds the same JSON line, one per log call (covered by a test that compares the two):
 
 - Starts with `time` (ISO 8601) and `level` (`TRACE` … `FATAL`); no `pid` or `hostname`.
-- When keys collide, strongest first: trace IDs (`traceId`, `spanId`, `parentSpanId`, which can't be overridden) → fields passed to the log call → logger fields (`createLogger` / `.child()`) → Context Fields.
-- Errors become `{ type, message, stack, ...own fields (e.g. code), cause }`, with `cause` nested the same way. `logger.error(err)` and `logger.error(err, 'msg')` both keep the error under `err`.
-- Circular references are written as `"[Circular]"` and `BigInt` as a string; logging never throws.
+- When keys collide, strongest first: trace IDs (`traceId`, `spanId`, `parentSpanId`) and the other keys above, which a log call can't set → fields passed to the log call → logger fields (`createLogger` / `.child()`) → Context Fields.
+- Errors become `{ type, message, stack, ...own fields (e.g. code), cause }`, with `cause` nested the same way: at the top level, in `errors`, and inside `args` items (e.g. `args: [{ err }]`).
+- Circular references are written as `"[Circular]"`, `BigInt` as a string, a function as `"[Function: name]"` and a symbol as `"Symbol(description)"`; logging never throws.
 
 Only the final write differs, detected at startup:
 
