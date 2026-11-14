@@ -9,6 +9,7 @@ import {
   _setSink,
 } from './logger'
 import { serializeError, stringifyRecord } from './output'
+import { formatMessage } from './route'
 import type { Logger } from './types'
 
 const TRACEPARENT = '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'
@@ -924,6 +925,24 @@ describe('the fast path keeps to the budget below its value cap', () => {
 
 describe('a placeholder that gave up spends nothing', () => {
   beforeEach(() => _reset())
+
+  it('a repeat too large for the budget is not walked again by each later placeholder', () => {
+    let reads = 0
+    // Keys are walked in order: the getter is read first, then the repeat runs out.
+    const counted = Object.assign(
+      Object.defineProperty({}, 'counted', { enumerable: true, get: () => ++reads }),
+      wide(15_000),
+    )
+    const { message, unprinted } = formatMessage('%j %j %j %j', [
+      counted,
+      counted,
+      counted,
+      counted,
+    ])
+    expect(message.endsWith(' %j %j %j')).toBe(true)
+    expect(unprinted).toHaveLength(3)
+    expect(reads).toBe(2) // printed once, then tried as a repeat once
+  })
 
   it('what it re-wrote before giving up is not charged to the line', () => {
     const entries = _captureEntries()

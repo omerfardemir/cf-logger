@@ -541,6 +541,13 @@ interface Written {
   objects: WeakSet<object>
   /** The long strings it holds, outside repeats. */
   strings: Set<string>
+  /**
+   * Repeats a placeholder gave up on because they didn't fit the budget,
+   * with the budget that was left. Its budget is restored, so a later
+   * placeholder with the same repeat and no more budget gives up at once,
+   * instead of re-writing it again.
+   */
+  tooLarge: WeakMap<object, Budget>
 }
 
 /** Thrown by a strict walk: the value cannot be written as JSON as it is. */
@@ -586,20 +593,27 @@ function charge(walk: Walk, key: string, value: unknown): void {
  * re-write budget. A repeat is written in full or, once the budget is spent,
  * is `"[Repeated]"` as a whole: never cut part way.
  *
- * @param {() => unknown} write - Writes the repeated object (or its `toJSON` result).
+ * @param {object} object - The repeated object.
+ * @param {() => unknown} write - Writes it (or its `toJSON` result).
  * @param {Walk} walk - The current walk.
  * @returns {unknown} Its JSON-ready value, or `"[Repeated]"`.
  * @throws `NOT_JSON` in a strict walk, instead of `"[Repeated]"`.
  */
-function repeatToJSONValue(write: () => unknown, walk: Walk): unknown {
+function repeatToJSONValue(object: object, write: () => unknown, walk: Walk): unknown {
   if (walk.inRepeat > 0) return write() // the outer repeat is charged
-  if (walk.budget.values <= 0 || walk.budget.chars <= 0) return standIn(walk, '[Repeated]')
+  const { budget } = walk
+  if (budget.values <= 0 || budget.chars <= 0) return standIn(walk, '[Repeated]')
+  const failed = walk.earlier?.tooLarge.get(object)
+  if (failed && budget.values <= failed.values && budget.chars <= failed.chars)
+    return standIn(walk, '[Repeated]')
+  const left = { ...budget }
   walk.inRepeat++
   try {
     return write()
   } catch (thrown) {
     if (thrown !== BUDGET_SPENT) throw thrown
-    walk.budget.values = 0
+    walk.earlier?.tooLarge.set(object, left)
+    budget.values = 0
     return standIn(walk, '[Repeated]')
   } finally {
     walk.inRepeat--
@@ -701,7 +715,7 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
           const write = () => toJSONValue(replaced, key, walk, false)
           // A `toJSON` may return a new object each time, so the object itself is what repeats.
           if (typeof replaced !== 'object' || replaced === null || walk.inRepeat > 0) return write()
-          if (isRepeat(object, walk)) return repeatToJSONValue(write, walk)
+          if (isRepeat(object, walk)) return repeatToJSONValue(object, write, walk)
           walk.seen.add(object)
           return write()
         }
@@ -714,7 +728,7 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
   walk.ancestors.add(object)
   try {
     if (isRepeat(object, walk))
-      return repeatToJSONValue(() => objectToJSONValue(object, walk), walk)
+      return repeatToJSONValue(object, () => objectToJSONValue(object, walk), walk)
     if (walk.inRepeat === 0) walk.seen.add(object)
     return objectToJSONValue(object, walk)
   } finally {
@@ -961,7 +975,7 @@ export function inlinePrinter(budget: Budget): MessagePrinter {
   let written: Written | undefined
   return {
     json(value) {
-      written ??= { objects: new WeakSet(), strings: new Set() }
+      written ??= { objects: new WeakSet(), strings: new Set(), tooLarge: new WeakMap() }
       const { values, chars } = budget
       const walk = newWalk(true, budget, written)
       let text: string | undefined
@@ -981,7 +995,7 @@ export function inlinePrinter(budget: Budget): MessagePrinter {
     },
     fits(text) {
       if (text.length < LONG_STRING) return true
-      written ??= { objects: new WeakSet(), strings: new Set() }
+      written ??= { objects: new WeakSet(), strings: new Set(), tooLarge: new WeakMap() }
       if (!written.strings.has(text)) {
         written.strings.add(text)
         return true
