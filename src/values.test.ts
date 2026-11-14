@@ -472,6 +472,18 @@ describe('the serializer', () => {
     })
   })
 
+  it('an undefined property is left out, as JSON does, in a field and under %j alike', () => {
+    _reset()
+    const entries = _captureEntries()
+    const logger = createLogger({ service: 'svc' })
+    logger.info('m', { a: undefined, b: 1, list: [undefined] })
+    logger.info('v=%j', { a: undefined, b: 1 })
+    expect(entries[0]).toMatchObject({ message: 'm', b: 1, list: [null] })
+    expect(entries[0]).not.toHaveProperty('a')
+    expect(entries[1].message).toBe('v={"b":1}')
+    expect(entries[1]).not.toHaveProperty('a')
+  })
+
   it('an own __proto__ key stays a key', () => {
     const record = JSON.parse('{"__proto__":{"x":1},"a":1}')
     expect(stringifyRecord(record)).toBe('{"__proto__":{"x":1},"a":1}')
