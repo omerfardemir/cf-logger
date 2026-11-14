@@ -61,7 +61,7 @@ function registeredEnvRootLogger(env: unknown, mapping: EnvMapping<any> | undefi
  * Each run starts a new root trace, with the Context Fields `cron` and
  * `scheduledTime` (ms since the epoch, as the controller gives it), and is recorded
  * as one Span, `span.end scheduled`: `INFO` with its duration, or `ERROR` with `err`
- * when the handler throws or rejects. The Root Logger is built from the handler's
+ * when the handler throws or rejects (a new root trace is always sampled). The Root Logger is built from the handler's
  * `env` through `options.env`, cached per isolate, and registered as the Default
  * Logger unless one is already set (first seen wins).
  *
@@ -122,8 +122,16 @@ export function withScheduled<E = Cloudflare.Env, R = void | Promise<void>>(
  * `{ ...payload, trace: getTraceCarrier() }`), the message continues the producer's
  * trace; otherwise it starts a new root trace. The body is never changed. Each call
  * is recorded as one Span, `span.end queue.message`: `INFO` with its duration, or
- * `ERROR` with `err` when `fn` throws or rejects. `fn`'s return value is returned as
- * it is, and a throw is rethrown unchanged.
+ * `ERROR` with `err` when `fn` throws or rejects. When the carrier's trace is not
+ * sampled (flags `00`), no `span.end` is written, but a throw still writes one
+ * `queue.message failed` line at `ERROR` with `err`. `fn`'s return value is returned
+ * as it is, and a throw is rethrown unchanged.
+ *
+ * Await (or return) it from `queue`: the batch is acked implicitly when the handler
+ * returns, so a call left unawaited may still be running when it is acked, and its
+ * throw is lost. Running the messages concurrently with
+ * `Promise.all(batch.messages.map((m) => withQueueMessage(batch, m, ...)))` is safe:
+ * each call has its own Logging Context.
  *
  * The Root Logger is built from the Worker's env (read through
  * `import { env } from 'cloudflare:workers'`, as `defaultLoggerFromEnv` does) with
@@ -197,10 +205,20 @@ const workflowClasses = new WeakMap<object, HandlerOptions<any>>()
  * the Workflow's env through `options.env`, cached per isolate, and registered as
  * the Default Logger in the constructor unless one is already set (first seen wins).
  *
- * `run` itself is not recorded as a Span: the engine replays it from the top after
- * every sleep, wait or restart, and a pause or termination surfaces in it as a throw,
- * so one "run" Span would not describe one unit of work. Wrap each step with
- * `tracedStep()` instead, for one Span per attempt.
+ * `run` itself is not recorded as a Span, and a rejection of `run` is not logged:
+ * the engine replays it from the top after every sleep, wait or restart, and uses
+ * thrown errors for its own control flow (a pause or termination surfaces in it as a
+ * throw, and no documented marker tells those apart from your errors), so one "run"
+ * Span or an `ERROR` line on rejection would misreport. A throw outside every
+ * `tracedStep()` (validation before the first step, code between steps, a plain
+ * `step.do`) is therefore not logged by `withWorkflow`; it shows as the instance's
+ * error in the Workflows dashboard. Put each unit of work in a `tracedStep()`, for one
+ * Span per attempt, `ERROR` on a throw.
+ *
+ * Without `payload.trace`, each execution of `run` starts its own root trace, so the
+ * replays of one instance have different `traceId`s; join them on
+ * `workflowInstanceId`, or pass `trace: getTraceCarrier()` in the params for one
+ * trace.
  *
  * Nothing about the Workflow changes: no step is added, the event, `step` and the
  * return value pass through as they are, and a throw is rethrown unchanged. `run`

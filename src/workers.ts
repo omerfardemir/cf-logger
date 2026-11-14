@@ -367,7 +367,9 @@ export async function withTrace<T, R>(
 export interface WithLoggingOptions<E = unknown> {
   /**
    * Record each call as a Span: one `span.end` with duration and status, at `ERROR`
-   * (with `err`) when the method throws or rejects. Default `false`.
+   * (with `err`) when the method throws or rejects. Default `false`: no `span.end`,
+   * but a call that throws or rejects still writes one `<Class>.<method> failed` line
+   * at `ERROR` with `err`.
    */
   spans?: boolean
   /**
@@ -547,6 +549,12 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
  * context, as a child Span when `spans` is on, and adds no `rpcMethod` or
  * `entrypoint` of its own.
  *
+ * A call that throws or rejects is always logged at `ERROR` with `err`, then rethrown
+ * unchanged: with `spans`, as its `span.end` line; without, as one
+ * `<Class>.<method> failed` line with `operation` and `err`, written by the call that
+ * opened the Logging Context (a nested call leaves it to that one, so the error is
+ * logged once). For an unsampled trace, `spans` writes only that `failed` line too.
+ *
  * The methods are wrapped, never changed: arguments, return values (sync or async,
  * an `RpcTarget` or a stub included) and thrown errors pass through as they are.
  * The returned class has the same RPC methods as `Class`; `scheduled`, `queue`,
@@ -573,9 +581,9 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
  * `alarm`, `webSocketMessage`, `webSocketClose` and `webSocketError` each run in their
  * own Logging Context (`fetch` continuing a `traceparent` header, the rest starting
  * a new root trace), with the Context Fields `rpcMethod` (the method or handler
- * name), `durableObject` (the class name; left off for an anonymous class) and either
- * `objectName` (`ctx.id.name`, for an object reached by name) or `objectId`
- * (`ctx.id.toString()`). `connect` is inherited unchanged. `session` is not
+ * name), `durableObject` (the class name; left off for an anonymous class),
+ * `objectId` (`ctx.id.toString()`, always), and `objectName` (`ctx.id.name`) too for
+ * an object reached by name. `connect` is inherited unchanged. `session` is not
  * available: the object gets no extra RPC method. `spans`, `fetch` and `env` work as
  * for an entrypoint.
  *
@@ -596,7 +604,7 @@ function sameOptions(a: WithLoggingOptions<any>, b: WithLoggingOptions<any>): bo
  *
  * class RoomObject extends DurableObject<Env> {
  *   async join(user: string) {
- *     getLogger().info({ user }, 'joined') // ..., rpcMethod, durableObject, objectName
+ *     getLogger().info({ user }, 'joined') // ..., rpcMethod, durableObject, objectId, objectName
  *   }
  * }
  *

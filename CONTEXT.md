@@ -52,7 +52,7 @@ The wire form of a Trace Context: a `traceparent` value plus an optional `traces
 _Avoid_: trace headers, propagation context
 
 **Span**:
-A named, timed operation within a Logging Context, reported once on completion with its duration and status.
+A named, timed operation within a Logging Context, reported once on completion with its duration and status. For an unsampled trace only a failure is reported: one `<operation> failed` line at `ERROR`, with no timing.
 
 **Traced Session**:
 An RPC target returned by a Service Binding's `session()` call that carries the caller's Trace Context privately, so every RPC method on it runs inside a Logging Context continuing the caller's trace.
