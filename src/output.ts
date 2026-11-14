@@ -854,10 +854,14 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
   // A copy of an `Error`: what is inside it is nested in that `Error`.
   const { errors } = walk
   const owner = errors?.owners.get(object as LogRecord)
-  if (errors && owner) {
+  // Entered only when `owner` is not an ancestor already: a reused copy can hold
+  // a copy of an `Error` the walk is inside, and that one keeps its depth.
+  let entered: Error | undefined
+  if (errors && owner && !errors.ancestors.has(owner)) {
     const depth = errors.ancestors.size
     errors.path[depth] = owner
     errors.ancestors.set(owner, depth)
+    entered = owner
   }
   try {
     if (isRepeat(object, walk))
@@ -866,7 +870,7 @@ function toJSONValue(value: unknown, key: string, walk: Walk, useToJSON = true):
     return objectToJSONValue(object, walk)
   } finally {
     walk.ancestors.delete(object)
-    if (errors && owner) errors.ancestors.delete(owner)
+    if (entered) errors?.ancestors.delete(entered)
   }
 }
 
