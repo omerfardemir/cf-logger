@@ -83,27 +83,32 @@ export interface UseLoggerOptions {
   /**
    * Picks the level of `request.end` from the final status and the error Hono caught
    * (`c.error`), if any. Defaults to `defaultRequestEndLevel`: `error` for an error or a 5xx,
-   * `warn` for a 4xx, `info` otherwise. When it throws or returns an unknown level, the default
-   * is used and one WARN is written. It is not called for a throw that escapes `useLogger` (see
-   * `useLogger`): that `request.end` is always at `error`, because its status is only assumed.
+   * `warn` for a 4xx, `info` otherwise. When it throws or returns an unknown level (`'silent'`
+   * included: `request.end` is never muted this way), the default is used and one WARN is
+   * written. It is not called for a throw that escapes `useLogger` (see `useLogger`): that
+   * `request.end` is always at `error`, because its status is only assumed.
    */
   level?: (statusCode: number, err: Error | undefined, c: Context) => LogLevel
   /**
    * Context Fields to add at the start of the request, so they are on every line of it,
    * `request.start` included. Runs before the handlers, so it sees the request but not what
    * later middleware sets. Must be synchronous. It cannot set the keys `useLogger` owns:
-   * `requestId`, `requestIdRejected`, `cfRay`, `method`, `path`, `route`, `statusCode`,
-   * `statusCodeAssumed`, `duration`, `err`, `originalErr`, and `userAgent` / `cf` when `include`
-   * turns them on. Those keys are dropped from its result, and one WARN names them (never their
-   * values). When it throws, returns anything but a plain object or `undefined` (a Promise, for
-   * example), or its result throws while it is read (a getter, a Proxy), the request is logged
-   * without these fields and one WARN is written.
+   * `requestId`, `requestIdRejected`, `cfRay`, `statusCode`, `statusCodeAssumed`, `duration`,
+   * `err`, `originalErr`, and `userAgent` / `cf` when `include` turns them on. Those keys are
+   * dropped from its result, and one WARN names them (never their values). It can set `method`,
+   * `path` and `route`, which then appear on the handlers' lines, but `request.start` and
+   * `request.end` always write their own. It runs before routing reaches the handler, so
+   * `c.req.routePath` here is `useLogger`'s own pattern: set `route` from the handler with
+   * `setLoggerContext` instead. When it throws, returns anything but a plain object or
+   * `undefined` (a Promise, for example), or its result throws while it is read (a getter, a
+   * Proxy), the request is logged without these fields and one WARN is written.
    */
   fields?: (c: Context) => LogFields | undefined
   /**
    * Fields to add to `request.end` only. Runs after the handlers, so it sees `c.var` values
    * they set (an authenticated user ID, for example). Must be synchronous. It cannot set the
-   * same keys `fields` cannot, and the same WARN names the ones it returned. When it fails the
+   * same keys `fields` cannot, and the same WARN names the ones it returned. A `method`, `path` or
+   * `route` it returns is replaced by the one `request.end` writes itself. When it fails the
    * way `fields` can, `request.end` is written without these fields and one WARN is written.
    */
   endFields?: (c: Context) => LogFields | undefined
@@ -123,6 +128,8 @@ export function defaultRequestEndLevel(statusCode: number, err: Error | undefine
   return err || statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
 }
 
+// The levels a `level` hook may return. `'silent'` is left out on purpose: `request.end`
+// cannot be muted by the hook (a Root Logger at `'silent'` mutes it, as it mutes every line).
 const LOG_LEVELS: ReadonlySet<unknown> = new Set<LogLevel>([
   'trace',
   'debug',
@@ -257,7 +264,8 @@ function describeReturned(value: unknown): string {
  */
 function describeReturnedLevel(value: unknown): string {
   if (typeof value !== 'string') return describeReturned(value)
-  return LOG_LEVELS.has(value.toLowerCase()) ? value : 'string'
+  const level = value.toLowerCase()
+  return LOG_LEVELS.has(level) || level === 'silent' ? value : 'string'
 }
 
 /** A synchronous `fields` / `endFields` result: a plain object, or nothing. */
@@ -271,14 +279,16 @@ function isLevel(value: unknown): value is LogLevel {
   return LOG_LEVELS.has(value)
 }
 
-/** The Owned Keys every request has: the keys `useLogger` writes, which a hook cannot set. */
+/**
+ * The Owned Keys every request has: the keys `useLogger` writes, which a hook cannot set.
+ * `method`, `path` and `route` are not among them: a hook may add them to the handlers' lines,
+ * and `request.start` and `request.end` still write their own, since a line's own fields win
+ * over Context Fields and over the `endFields` result.
+ */
 const OWNED_KEYS = [
   'requestId',
   'requestIdRejected',
   'cfRay',
-  'method',
-  'path',
-  'route',
   'statusCode',
   'statusCodeAssumed',
   'duration',

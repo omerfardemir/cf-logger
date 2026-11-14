@@ -64,7 +64,7 @@ Cloudflare Workers must enable Node.js compatibility in `wrangler.jsonc`:
 | `ENVIRONMENT` | `environment` | left off every log line |
 | `VERSION`     | `version`     | left off every log line |
 
-`LOG_LEVEL` must be one of `trace`, `debug`, `info`, `warn`, `error` or `fatal` (lowercase). A missing or empty value means `'info'`. Any other value falls back to `'info'` and writes one `WARN` per isolate with `invalidLevel` and `validLevels`.
+`LOG_LEVEL` must be one of `trace`, `debug`, `info`, `warn`, `error`, `fatal` or `silent` (lowercase). `silent` writes nothing at all. A missing or empty value means `'info'`. Any other value falls back to `'info'` and writes one `WARN` per isolate with `invalidLevel` and `validLevels`.
 
 Using other var names, or deriving a field from a binding, takes a mapping (see [`loggerOptionsFromEnv`](#loggeroptionsfromenvenv-mapping)). To use Cloudflare's [version metadata](https://developers.cloudflare.com/workers/runtime-apis/bindings/version-metadata/) as `version`, add the binding under a name of your choice and map it with a function:
 
@@ -90,7 +90,7 @@ Changes to the Logger Options read from env:
 - An empty `NAME` gives `service: 'unknown'` (0.0.1: `service: ""`).
 - A numeric `VERSION` is logged as a string (`2` becomes `"2"`), and `VERSION: 0`, which 0.0.1 left off, is now logged as `"0"`.
 - An invalid `LOG_LEVEL` falls back to `'info'` with one `WARN`; 0.0.1 threw.
-- `LOG_LEVEL: "silent"` is no longer accepted. In 0.0.1 it muted all logs; now it falls back to `'info'` with a `WARN`, so **a Worker that had `"silent"` starts writing info-level logs**. Change it before upgrading. The quietest level is `fatal`: only `logger.fatal()` lines are written. There is no off switch.
+- `LOG_LEVEL: "SILENT"` (any level name not in lowercase) falls back to `'info'` with one `WARN`; 0.0.1 passed it on and threw. `"silent"` still mutes all logs, as in 0.0.1.
 
 Changes to the Hono middleware (`useLogger`):
 
@@ -455,7 +455,11 @@ app.use(
 | `endFields`    | none                     | `(c) => fields`, synchronous, called after the handlers, so it sees `c.var` values they set. Added to `request.end` only.                                             |
 | `include`      | `{}`                     | `{ userAgent?: boolean, cf?: boolean }`. Adds the `User-Agent` header and Cloudflare's `request.cf` `colo`, `country` and `asn` to `request.start` and `request.end`. |
 
-Neither `fields` nor `endFields` can set the keys `useLogger` owns (its **Owned Keys**): `requestId`, `requestIdRejected`, `cfRay`, `method`, `path`, `route`, `statusCode`, `statusCodeAssumed`, `duration`, `err` and `originalErr`, plus `userAgent` and `cf` when `include` turns them on. Those keys are dropped from the hooks' results, even when the request has no value for them (no `cf-ray` header, no error). So that the removal stays visible, the first time each hook returns one, a WARN with `hook` and `droppedKeys` (the key names, never their values) reports it, once per hook per `useLogger()` call. For app data such as a user or tenant ID, use these hooks; for the request details Cloudflare provides, use `include`.
+A `level` hook that returns `'silent'` gets the default level and one WARN: `request.end` cannot be muted this way.
+
+Neither `fields` nor `endFields` can set the keys `useLogger` owns (its **Owned Keys**): `requestId`, `requestIdRejected`, `cfRay`, `statusCode`, `statusCodeAssumed`, `duration`, `err` and `originalErr`, plus `userAgent` and `cf` when `include` turns them on. Those keys are dropped from the hooks' results, even when the request has no value for them (no `cf-ray` header, no error). So that the removal stays visible, the first time each hook returns one, a WARN with `hook` and `droppedKeys` (the key names, never their values) reports it, once per hook per `useLogger()` call. For app data such as a user or tenant ID, use these hooks; for the request details Cloudflare provides, use `include`.
+
+`method`, `path` and `route` are not Owned Keys, so a hook may set them. To have them on every line the handlers write, return them from `fields`: `fields: (c) => ({ method: c.req.method, path: c.req.path })`. `request.start` and `request.end` always write their own `method`, `path` and `route`, which replace what `fields` or `endFields` returned for them. `fields` runs before routing reaches the handler, so `c.req.routePath` there is `useLogger`'s own pattern (such as `/*`), not the endpoint's: to tag the handlers' lines with the matched route, call `setLoggerContext({ route: c.req.routePath })` in the handler.
 
 A hook result that sets `level`, `time` or `message` currently overrides that key of the record, on every line for `fields` and on `request.end` for `endFields`. Avoid those names until [#21](https://github.com/omerfardemir/loggercf/issues/21) settles how such keys are routed.
 

@@ -100,7 +100,7 @@ describe('loggerOptionsFromEnv', () => {
         level: 'WARN',
         service: 'api',
         invalidLevel: 'verbose',
-        validLevels: ['trace', 'debug', 'info', 'warn', 'error', 'fatal'],
+        validLevels: ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent'],
       })
       expect(entries[0].message).toContain('LOG_LEVEL')
     })
@@ -134,7 +134,7 @@ describe('loggerOptionsFromEnv', () => {
     it('does not warn for valid or absent levels', () => {
       const entries = _captureEntries()
 
-      for (const level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal']) {
+      for (const level of ['trace', 'debug', 'info', 'warn', 'error', 'fatal', 'silent']) {
         expect(loggerOptionsFromEnv({ LOG_LEVEL: level }).level).toBe(level)
       }
       loggerOptionsFromEnv({})
@@ -149,12 +149,38 @@ describe('loggerOptionsFromEnv', () => {
       expect(entries).toHaveLength(1)
     })
 
-    it('rejects "silent", which 0.0.1 accepted through pino, with the warning', () => {
+    it('accepts "silent", as 0.0.1 did: the logger writes nothing, at any level, and no WARN', () => {
       const entries = _captureEntries()
 
-      expect(loggerOptionsFromEnv({ LOG_LEVEL: 'silent' }).level).toBe('info')
+      const options = loggerOptionsFromEnv({ NAME: 'api', LOG_LEVEL: 'silent' })
+      expect(options).toStrictEqual({ service: 'api', level: 'silent' })
+      const logger = createLogger(options)
+      for (const log of [logger, logger.child({ part: 'x' })]) {
+        log.trace('t')
+        log.debug('d')
+        log.info('i')
+        log.warn('w')
+        log.error(new Error('e'))
+        log.fatal({ code: 1 }, 'f')
+      }
+
+      expect(entries).toHaveLength(0)
+    })
+
+    it('accepts "silent" from a mapped var or a function', () => {
+      const entries = _captureEntries()
+
+      expect(loggerOptionsFromEnv({ LEVEL: 'silent' }, { level: 'LEVEL' }).level).toBe('silent')
+      expect(loggerOptionsFromEnv({}, { level: () => 'silent' }).level).toBe('silent')
+      expect(entries).toHaveLength(0)
+    })
+
+    it('rejects uppercase "SILENT", like the other levels', () => {
+      const entries = _captureEntries()
+
+      expect(loggerOptionsFromEnv({ LOG_LEVEL: 'SILENT' }).level).toBe('info')
       expect(entries).toHaveLength(1)
-      expect(entries[0]).toMatchObject({ level: 'WARN', invalidLevel: 'silent' })
+      expect(entries[0]).toMatchObject({ level: 'WARN', invalidLevel: 'SILENT' })
     })
 
     it('_reset() re-arms the warning', () => {
