@@ -23,6 +23,12 @@
       "service": "math-test",
       "entrypoint": "LoggedMath",
     },
+    {
+      // A hand-written TracedEntrypoint subclass (dev/math-worker/src/index.ts).
+      "binding": "TRACED",
+      "service": "math-test",
+      "entrypoint": "TracedMath",
+    },
   ],
   // Units of work outside HTTP (src/units.ts), driven by scripts/e2e-local.mjs.
   // Cron runs locally through /cdn-cgi/handler/scheduled. Before `pnpm dev:deploy`,

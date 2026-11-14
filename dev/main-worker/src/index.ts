@@ -8,7 +8,7 @@ import {
   type Logger,
 } from 'loggercf'
 import { withTrace } from 'loggercf/workers'
-import type { BindService, LoggedMathService, ServiceSession } from './types'
+import type { BindService, LoggedMathService, ServiceSession, TracedMathService } from './types'
 import { queue, scheduled, units, type Job } from './units'
 import { sessionSurface } from './session-surface'
 
@@ -18,6 +18,7 @@ type Context = {
   Bindings: {
     BIND: ServiceSession<BindService> & Fetcher
     LOGGED: LoggedMathService & ServiceSession<LoggedMathService> & Pick<Fetcher, 'fetch'>
+    TRACED: ServiceSession<TracedMathService>
     NAME: string
     LOG_LEVEL: string
     ENVIRONMENT: string
@@ -142,7 +143,8 @@ app.get('/logged', async (c) => {
 // GET /durable-object, /queue, /workflow: start each unit of work (src/units.ts).
 app.route('/', units)
 
-// GET /session-surface: what a caller reaches on a Traced Session stub (src/session-surface.ts).
+// GET /session-surface, /entrypoint-surface: what a caller reaches on a Traced Session stub
+// and on an entrypoint's binding (src/session-surface.ts).
 app.route('/', sessionSurface)
 
 /** GET /trace Shows current trace context */
